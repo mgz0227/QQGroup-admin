@@ -155,6 +155,13 @@
     document.querySelectorAll(".condition-field").forEach(function (field) {
       field.hidden = mode !== "conditional";
     });
+    updateUidDirectField();
+  }
+
+  function updateUidDirectField() {
+    var direct = element("uid-exists-auto-approve");
+    direct.disabled = !element("uid-check-enabled").checked;
+    if (direct.disabled) direct.checked = false;
   }
 
   function openEditor(group) {
@@ -236,9 +243,7 @@
   element("refresh-button").addEventListener("click", load);
   element("search-input").addEventListener("input", render);
   element("mode").addEventListener("change", updateConditionalFields);
-  element("uid-check-enabled").addEventListener("change", function () {
-    if (!this.checked) element("uid-exists-auto-approve").checked = false;
-  });
+  element("uid-check-enabled").addEventListener("change", updateUidDirectField);
   element("edit-form").addEventListener("submit", save);
   element("close-dialog").addEventListener("click", function () { element("edit-dialog").close(); });
   element("cancel-edit").addEventListener("click", function () { element("edit-dialog").close(); });

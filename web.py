@@ -93,6 +93,7 @@ class GroupAdminWeb:
         uid_exists_auto_approve = payload.get("uid_exists_auto_approve", False)
         if not isinstance(uid_exists_auto_approve, bool):
             raise TypeError("有效 UID 直接通过开关必须是布尔值")
+        uid_exists_auto_approve = uid_check_enabled and uid_exists_auto_approve
         condition_logic = cls._text(
             payload.get("condition_logic", "all"), "条件组合", 8
         )

@@ -373,6 +373,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["uid_exists_auto_approve"])
         self.assertEqual(payload["approve_keywords"], "主页\n老用户")
         self.assertEqual(payload["reject_keywords"], "广告\n引流")
+        payload["uid_check_enabled"] = False
+        self.assertFalse(
+            module.GroupAdminWeb._validated_save(payload)["uid_exists_auto_approve"]
+        )
         with self.assertRaises(ValueError):
             module.GroupAdminWeb._validated_save(
                 {
