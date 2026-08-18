@@ -79,11 +79,30 @@ def parse_group_ids(value: str) -> list[int]:
     return ids
 
 
-def parse_qq_numbers(value: str) -> list[str]:
-    numbers = parse_csv(value, label="QQ 号码", max_items=10_000)
+def parse_qq_numbers(value: str, *, max_items: int = 10_000) -> list[str]:
+    numbers = parse_csv(value, label="QQ 号码", max_items=max_items)
     if any(not item.isdigit() for item in numbers):
         raise ValueError("QQ 号码只能包含数字")
     return numbers
+
+
+def parse_qq_number_text(value: str) -> list[str]:
+    value = value.strip()
+    if not value:
+        return []
+    normalized = ",".join(item for item in re.split(r"[\s,，;；]+", value) if item)
+    return parse_qq_numbers(normalized, max_items=100_000)
+
+
+def whitelist_diff(
+    desired: list[str],
+    applied: list[str],
+) -> tuple[list[str], list[str]]:
+    desired_set = set(desired)
+    applied_set = set(applied)
+    additions = [user for user in desired if user not in applied_set]
+    removals = [user for user in applied if user not in desired_set]
+    return additions, removals
 
 
 def parse_duration(value: str) -> timedelta:
@@ -119,6 +138,38 @@ def validate_choice(value: str, choices: set[str], *, label: str) -> str:
     if value not in choices:
         raise ValueError(f"{label}只能是 {'/'.join(sorted(choices))}")
     return value
+
+
+def select_group_strategy(
+    strategies: list[Any],
+    group_openid: str,
+) -> dict[str, Any] | None:
+    if any(
+        isinstance(strategy, dict) and strategy.get("group_ids")
+        for strategy in strategies
+    ):
+        raise ValueError(
+            "检测到按 QQ 群号关联的自动审核策略，无法与当前群 OpenID 安全匹配；"
+            "请先在 QQ 官方后台整理"
+        )
+    matches = [
+        strategy
+        for strategy in strategies
+        if isinstance(strategy, dict)
+        and group_openid
+        in {str(value) for value in strategy.get("group_openids") or []}
+    ]
+    if len(matches) > 1:
+        raise ValueError("当前群存在多个自动审核策略，请先在 QQ 官方后台清理")
+    if not matches:
+        return None
+
+    groups = {str(value) for value in matches[0].get("group_openids") or []}
+    if groups != {group_openid}:
+        raise ValueError(
+            "当前群使用了跨群自动审核策略；为避免影响其他群，请先在 QQ 官方后台拆分"
+        )
+    return matches[0]
 
 
 class QQGroupAPI:

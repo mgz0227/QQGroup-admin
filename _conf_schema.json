@@ -1,0 +1,85 @@
+{
+  "uid_review_interval_seconds": {
+    "type": "int",
+    "description": "UID 审核轮询间隔（秒）",
+    "hint": "15-600 秒。多个群会自动错峰处理，建议保留 60 秒。",
+    "default": 60,
+    "slider": {
+      "min": 15,
+      "max": 600,
+      "step": 15
+    }
+  },
+  "auto_review_groups": {
+    "type": "template_list",
+    "description": "QQ群自动审核配置",
+    "hint": "逐个添加群。群 OpenID 可通过 /群信息 获取；保存后在对应群发送 /自动审核同步 确认。",
+    "default": [],
+    "templates": {
+      "qq_group": {
+        "name": "QQ群自动审核",
+        "display_item": "group_openid",
+        "hide_hint_in_list": true,
+        "items": {
+          "group_openid": {
+            "type": "string",
+            "description": "群 OpenID",
+            "hint": "不是 QQ 群号。请在目标群发送 /群信息 获取。",
+            "default": ""
+          },
+          "enabled": {
+            "type": "bool",
+            "description": "启用 QQ 号码白名单",
+            "hint": "与 B 站 UID 审核二选一。关闭后同步会删除该群的 QQ 官方策略。",
+            "default": false
+          },
+          "whitelist_qq_numbers": {
+            "type": "text",
+            "description": "白名单 QQ 号码",
+            "hint": "支持逗号、空格或换行分隔，最多 100000 个。同步会增删与上次配置的差异。",
+            "default": ""
+          },
+          "scan_pending": {
+            "type": "bool",
+            "description": "同步后扫描待审申请",
+            "hint": "启用后调用 QQ 官方执行接口，预计约 10 分钟完成。",
+            "default": true
+          },
+          "uid_review_enabled": {
+            "type": "bool",
+            "description": "启用 B 站 UID 审核",
+            "hint": "验证消息需为纯数字，或包含 UID:数字。仅处理用户主动申请。",
+            "default": false
+          },
+          "uid_reject_keywords": {
+            "type": "text",
+            "description": "验证消息拒绝关键词",
+            "hint": "逗号、分号或换行分隔，最多 100 个。命中后优先拒绝，不再查询 UID。",
+            "default": ""
+          },
+          "button_reject_reason": {
+            "type": "string",
+            "description": "按钮拒绝理由",
+            "hint": "管理员点击拒绝按钮时提交给 QQ；留空时使用“管理员拒绝”。",
+            "default": "管理员拒绝"
+          },
+          "platform_id": {
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "managed_strategy_id": {
+            "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "applied_whitelist": {
+            "type": "text",
+            "default": "",
+            "invisible": true
+          }
+        }
+      }
+    }
+  }
+}

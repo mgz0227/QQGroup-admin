@@ -6,8 +6,11 @@ from qq_api import (
     future_rfc3339,
     parse_duration,
     parse_group_ids,
+    parse_qq_number_text,
     parse_qq_numbers,
+    select_group_strategy,
     validate_rfc3339,
+    whitelist_diff,
 )
 
 
@@ -179,6 +182,14 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
             parse_duration("31d")
         with self.assertRaises(ValueError):
             parse_group_ids("not-a-group")
+        self.assertEqual(
+            parse_qq_number_text("123\n456，789;123, "),
+            ["123", "456", "789"],
+        )
+        self.assertEqual(
+            whitelist_diff(["123", "789"], ["123", "456"]),
+            (["789"], ["456"]),
+        )
 
     def test_rfc3339_validation_is_strict(self):
         self.assertEqual(
@@ -192,6 +203,27 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(invalid=invalid), self.assertRaises(ValueError):
                 validate_rfc3339(invalid)
+
+    def test_select_group_strategy_is_scoped_to_one_group(self):
+        strategy = {
+            "strategy_id": "strategy",
+            "group_openids": ["group"],
+        }
+        self.assertIs(select_group_strategy([strategy], "group"), strategy)
+        self.assertIsNone(select_group_strategy([strategy], "other"))
+
+        with self.assertRaises(ValueError):
+            select_group_strategy(
+                [{**strategy, "group_openids": ["group", "other"]}],
+                "group",
+            )
+        with self.assertRaises(ValueError):
+            select_group_strategy([strategy, strategy.copy()], "group")
+        with self.assertRaises(ValueError):
+            select_group_strategy(
+                [{"strategy_id": "numeric", "group_ids": [123]}],
+                "group",
+            )
 
 
 if __name__ == "__main__":
