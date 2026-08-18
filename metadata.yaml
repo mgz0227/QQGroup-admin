@@ -1,8 +1,11 @@
 name: astrbot_plugin_qqgroup_admin
 display_name: QQ 群聊管理
-desc: 基于 QQ 官方机器人 OpenAPI 的群聊管理插件。
-short_desc: 入群审批、成员禁言与自动审批策略管理。
-version: v1.2.0
+short_desc: QQ 官方群聊的入群审批、禁言与多群自动审核。
+desc: >-
+  基于 QQ 官方机器人 OpenAPI 的群聊管理插件，支持群信息查询、成员禁言与解禁、
+  入群申请按钮审批、QQ 号码白名单，以及由 B 站 UID、关键词、AND/OR 条件和
+  兜底动作组成的多群自动审核，并提供群内绑定按钮与独立 WebUI 管理页面。
+version: 1.3.0
 author: mgz0227
 repo: https://github.com/mgz0227/QQGroup-admin
 astrbot_version: ">=4.27.3,<5"

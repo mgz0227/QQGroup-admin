@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Awaitable, Callable
 from functools import wraps
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 from astrbot.api.star import Context
 from astrbot.api.web import error_response, json_response, request
@@ -42,7 +43,7 @@ class GroupAdminWeb:
         multiline: bool = False,
     ) -> str:
         if not isinstance(value, str):
-            raise ValueError(f"{label}格式错误")
+            raise TypeError(f"{label}格式错误")
         value = value.strip()
         if required and not value:
             raise ValueError(f"{label}不能为空")
@@ -56,16 +57,14 @@ class GroupAdminWeb:
     @classmethod
     def _validated_save(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
-            raise ValueError("请求内容必须是 JSON 对象")
+            raise TypeError("请求内容必须是 JSON 对象")
 
         group_openid = cls._text(
             payload.get("group_openid"), "群 OpenID", 128, required=True
         )
         if any(char.isspace() for char in group_openid):
             raise ValueError("群 OpenID 不能包含空白字符")
-        raw_mode = cls._text(
-            payload.get("mode"), "审核方式", 16, required=True
-        )
+        raw_mode = cls._text(payload.get("mode"), "审核方式", 16, required=True)
         mode = "conditional" if raw_mode == "uid" else raw_mode
         if mode not in {"off", "conditional", "native"}:
             raise ValueError("审核方式只能是 off、conditional 或 native")
@@ -83,18 +82,14 @@ class GroupAdminWeb:
             multiline=True,
         )
         reject_text = cls._text(
-            payload.get(
-                "reject_keywords", payload.get("uid_reject_keywords", "")
-            ),
+            payload.get("reject_keywords", payload.get("uid_reject_keywords", "")),
             "拒绝关键词",
             7_000,
             multiline=True,
         )
-        uid_check_enabled = payload.get(
-            "uid_check_enabled", raw_mode == "uid"
-        )
+        uid_check_enabled = payload.get("uid_check_enabled", raw_mode == "uid")
         if not isinstance(uid_check_enabled, bool):
-            raise ValueError("UID 检查开关必须是布尔值")
+            raise TypeError("UID 检查开关必须是布尔值")
         condition_logic = cls._text(
             payload.get("condition_logic", "all"), "条件组合", 8
         )
@@ -112,16 +107,14 @@ class GroupAdminWeb:
         )
         scan_pending = payload.get("scan_pending", True)
         if not isinstance(scan_pending, bool):
-            raise ValueError("扫描待审申请必须是布尔值")
+            raise TypeError("扫描待审申请必须是布尔值")
 
         reject_keywords = "\n".join(parse_keywords(reject_text))
 
         return {
             "group_openid": group_openid,
             "mode": mode,
-            "whitelist_qq_numbers": "\n".join(
-                parse_qq_number_text(whitelist_text)
-            ),
+            "whitelist_qq_numbers": "\n".join(parse_qq_number_text(whitelist_text)),
             "uid_check_enabled": uid_check_enabled,
             "approve_keywords": "\n".join(parse_keywords(approve_text)),
             "reject_keywords": reject_keywords,
@@ -135,7 +128,7 @@ class GroupAdminWeb:
     @classmethod
     def _validated_group(cls, payload: Any) -> str:
         if not isinstance(payload, dict):
-            raise ValueError("请求内容必须是 JSON 对象")
+            raise TypeError("请求内容必须是 JSON 对象")
         group_openid = cls._text(
             payload.get("group_openid"), "群 OpenID", 128, required=True
         )
@@ -163,9 +156,7 @@ class GroupAdminWeb:
                     and bool(item.get("synchronized"))
                     for item in groups
                 ),
-                "pending": sum(
-                    not bool(item.get("synchronized")) for item in groups
-                ),
+                "pending": sum(not bool(item.get("synchronized")) for item in groups),
             }
         )
 
@@ -203,7 +194,7 @@ class GroupAdminWeb:
                 return self._error(str(exc), 404)
             except RuntimeError as exc:
                 return self._error(str(exc), 409)
-            except Exception:  # noqa: BLE001 - WebUI trust boundary
+            except Exception:
                 self.plugin.logger.exception("QQ群管理页面请求失败")
                 return self._error("服务器处理请求失败", 500)
 

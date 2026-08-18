@@ -160,7 +160,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                             "verify_info": {"verify_message": "UID:188144093"},
                         }
                     ],
-                    "next_cursor": "next",
+                    "next_cursor": "next_page",
                 }
             )
         )
@@ -171,9 +171,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         message = client.api.messages[0]
-        self.assertEqual(message["msg_type"], 0)
-        self.assertIn("content", message)
-        self.assertNotIn("markdown", message)
+        self.assertEqual(message["msg_type"], 2)
+        self.assertIn("markdown", message)
+        self.assertNotIn("content", message)
+        self.assertIn("/申请列表 next\\_page", message["markdown"]["content"])
         buttons = message["keyboard"]["content"]["rows"][0]["buttons"]
         self.assertEqual([button["action"]["type"] for button in buttons], [1, 1])
         self.assertEqual(
@@ -262,6 +263,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertEqual(plugin.config["auto_review_groups"], [])
 
+        self.assertEqual(client.api.messages[0]["msg_type"], 2)
+        self.assertIn("markdown", client.api.messages[0])
+        self.assertNotIn("content", client.api.messages[0])
         buttons = [
             button
             for row in client.api.messages[0]["keyboard"]["content"]["rows"]
@@ -596,8 +600,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         plugin._api = lambda _event: api
 
         results = [
-            result
-            async for result in plugin.mute_member(event, "member-1", "45")
+            result async for result in plugin.mute_member(event, "member-1", "45")
         ]
 
         self.assertEqual(results, [])

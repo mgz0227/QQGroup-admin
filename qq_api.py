@@ -110,9 +110,7 @@ def parse_duration(value: str) -> timedelta:
     if not match:
         raise ValueError("时长格式应为秒数、30m、2h 或 7d，最大 30d")
     amount = int(match.group(1))
-    seconds = amount * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[
-        match.group(2)
-    ]
+    seconds = amount * {"": 1, "s": 1, "m": 60, "h": 3600, "d": 86400}[match.group(2)]
     duration = timedelta(seconds=seconds)
     if duration > MAX_MUTE_DURATION:
         raise ValueError("成员最长只能禁言 30 天")
