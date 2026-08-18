@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import re
 import secrets
 import time
 from contextlib import suppress
@@ -40,6 +41,14 @@ QQ_PLATFORM_NAMES = {"qq_official", "qq_official_webhook"}
 INTERACTION_INTENT = 1 << 26
 BUTTON_TOKEN_TTL = 15 * 60
 JOIN_LIST_LIMIT = 5
+GROUP_TEMPLATE_KEY = "qq_group"
+CONDITION_LOGICS = {"all", "any"}
+FALLBACK_ACTIONS = {"pending", "decline", "approve"}
+
+
+class WakeCommandFilter(filter.CustomFilter):
+    def filter(self, event: AstrMessageEvent, _cfg: AstrBotConfig) -> bool:
+        return bool(event.is_at_or_wake_command)
 
 
 def guarded(handler):
@@ -80,6 +89,20 @@ def qq_group_command(name: str):
     return decorator
 
 
+def qq_admin_regex(pattern: str):
+    def decorator(handler):
+        wrapped = guarded(handler)
+        wrapped = filter.regex(pattern)(wrapped)
+        wrapped = filter.custom_filter(WakeCommandFilter, False)(wrapped)
+        wrapped = filter.platform_adapter_type(QQ_PLATFORM_TYPES)(wrapped)
+        wrapped = filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)(
+            wrapped
+        )
+        return filter.permission_type(filter.PermissionType.ADMIN)(wrapped)
+
+    return decorator
+
+
 def split_message(text: str, limit: int = 3000) -> list[str]:
     chunks = []
     while len(text) > limit:
@@ -100,7 +123,7 @@ class QQGroupAdmin(Star):
 /申请列表 [游标]
 /审核设置
 /禁言状态
-/禁言 <成员OpenID|@成员> <30m|2h|7d>
+/禁言 <成员OpenID|@成员> <60|30m|2h|7d>
 /解禁 <成员OpenID|@成员>
 /自动审核状态
 /自动审核开启 <QQ号,...>
@@ -120,7 +143,45 @@ class QQGroupAdmin(Star):
         self._poll_cursors: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
         self._bilibili_retry_at = 0.0
+        self._migrate_config()
         self._web = GroupAdminWeb(self, context)
+
+    def _migrate_config(self) -> None:
+        entries = self.config.get("auto_review_groups") or []
+        if not isinstance(entries, list):
+            return
+        changed = False
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            template_key = str(entry.get("__template_key") or "").strip()
+            if not template_key:
+                entry["__template_key"] = GROUP_TEMPLATE_KEY
+                if entry.get("template") == GROUP_TEMPLATE_KEY:
+                    entry.pop("template")
+                changed = True
+            elif template_key != GROUP_TEMPLATE_KEY:
+                self.logger.warning("保留未知的群审核配置模板：%s", template_key)
+
+            if "reject_keywords" not in entry:
+                entry["reject_keywords"] = str(
+                    entry.pop("uid_reject_keywords", "") or ""
+                )
+                changed = True
+            for key, default in (
+                ("uid_check_enabled", True),
+                ("approve_keywords", ""),
+                ("condition_logic", "all"),
+                (
+                    "fallback_action",
+                    "decline" if entry.get("uid_review_enabled") else "pending",
+                ),
+            ):
+                if key not in entry:
+                    entry[key] = default
+                    changed = True
+        if changed:
+            self.config.save_config()
 
     async def initialize(self) -> None:
         self._web.register_routes()
@@ -464,13 +525,18 @@ class QQGroupAdmin(Star):
             if not isinstance(entries, list):
                 raise TypeError("WebUI 自动审核配置格式错误")
             entry = {
+                "__template_key": GROUP_TEMPLATE_KEY,
                 "group_name": group_name,
                 "group_openid": group_openid,
                 "enabled": False,
                 "whitelist_qq_numbers": "",
                 "scan_pending": True,
                 "uid_review_enabled": False,
-                "uid_reject_keywords": "",
+                "uid_check_enabled": True,
+                "approve_keywords": "",
+                "reject_keywords": "",
+                "condition_logic": "all",
+                "fallback_action": "pending",
                 "button_reject_reason": "管理员拒绝",
                 "platform_id": platform_id,
                 "managed_strategy_id": "",
@@ -484,19 +550,37 @@ class QQGroupAdmin(Star):
         self.config.save_config()
         return entry
 
-    def _uid_settings(self, entry: dict[str, Any] | None) -> tuple[bool, list[str]]:
+    def _condition_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         if entry is None:
-            return False, []
-        return bool(entry.get("uid_review_enabled", False)), parse_keywords(
-            str(entry.get("uid_reject_keywords") or "")
-        )
+            return {"enabled": False}
+        logic = str(entry.get("condition_logic") or "all")
+        fallback = str(entry.get("fallback_action") or "pending")
+        if logic not in CONDITION_LOGICS:
+            raise ValueError("条件组合只能是 all 或 any")
+        if fallback not in FALLBACK_ACTIONS:
+            raise ValueError("兜底动作只能是 pending、decline 或 approve")
+        return {
+            "enabled": bool(entry.get("uid_review_enabled", False)),
+            "uid_check_enabled": bool(entry.get("uid_check_enabled", True)),
+            "approve_keywords": parse_keywords(
+                str(entry.get("approve_keywords") or "")
+            ),
+            "reject_keywords": parse_keywords(
+                str(
+                    entry.get("reject_keywords")
+                    or entry.get("uid_reject_keywords")
+                    or ""
+                )
+            ),
+            "condition_logic": logic,
+            "fallback_action": fallback,
+        }
 
     def _ensure_native_mode(self, group_openid: str) -> None:
         entry = self._group_config(group_openid)
-        uid_enabled, _ = self._uid_settings(entry)
-        if uid_enabled:
+        if self._condition_settings(entry)["enabled"]:
             raise ValueError(
-                "当前群已启用 B 站 UID 审核，不能同时使用 QQ 号码白名单策略"
+                "当前群已启用条件审核，不能同时使用 QQ 号码白名单策略"
             )
 
     def _platform_clients(self) -> dict[str, Any]:
@@ -507,7 +591,7 @@ class QQGroupAdmin(Star):
                 clients[platform_id] = platform.get_client()
         return clients
 
-    def _uid_review_entries(self) -> list[tuple[str, str, list[str]]]:
+    def _uid_review_entries(self) -> list[tuple[str, str, dict[str, Any]]]:
         entries = self.config.get("auto_review_groups") or []
         if not isinstance(entries, list):
             self.logger.warning("WebUI 自动审核配置格式错误")
@@ -523,17 +607,17 @@ class QQGroupAdmin(Star):
             ):
                 continue
             try:
-                enabled, keywords = self._uid_settings(entry)
+                settings = self._condition_settings(entry)
             except ValueError as exc:
-                self.logger.warning("跳过无效的 UID 审核配置：%s", exc)
+                self.logger.warning("跳过无效的条件审核配置：%s", exc)
                 continue
             group_openid = str(entry.get("group_openid") or "").strip()
             platform_id = str(entry.get("platform_id") or "").strip()
             key = (platform_id, group_openid)
-            if not enabled or not all(key) or key in seen:
+            if not settings["enabled"] or not all(key) or key in seen:
                 continue
             seen.add(key)
-            result.append((platform_id, group_openid, keywords))
+            result.append((platform_id, group_openid, settings))
         return result
 
     def _review_interval(self) -> int:
@@ -548,7 +632,7 @@ class QQGroupAdmin(Star):
         client: Any,
         platform_id: str,
         group_openid: str,
-        keywords: list[str],
+        settings: dict[str, Any],
     ) -> None:
         api = QQGroupAPI(client)
         key = (platform_id, group_openid)
@@ -577,28 +661,60 @@ class QQGroupAdmin(Star):
                 continue
 
             text = verification_text(request)
-            keyword = matched_keyword(text, keywords)
-            uid = None if keyword else parse_request_bilibili_uid(request)
+            keyword = matched_keyword(text, settings["reject_keywords"])
             if keyword:
                 op, reason = "decline", "验证消息包含拒绝关键词"
-            elif uid is None:
-                op, reason = "decline", "未提供有效的 B 站 UID"
             else:
-                if time.monotonic() < self._bilibili_retry_at:
-                    return
-                try:
-                    exists = await bilibili_uid_exists(uid)
-                except BilibiliLookupError as exc:
-                    self._bilibili_retry_at = time.monotonic() + max(
-                        60,
-                        self._review_interval(),
-                    )
-                    self.logger.warning(
-                        "B 站 UID 查询暂不可用，本轮保留待审申请：%s", exc
-                    )
-                    return
-                op = "approve" if exists else "decline"
-                reason = "" if exists else "B 站 UID 不存在"
+                checks = []
+                failure_reason = "未满足自动审核条件"
+                approve_keywords = settings["approve_keywords"]
+                if approve_keywords:
+                    keyword_ok = bool(matched_keyword(text, approve_keywords))
+                    checks.append(keyword_ok)
+                    if not keyword_ok:
+                        failure_reason = "验证消息未包含通过关键词"
+
+                logic = settings["condition_logic"]
+                uid_needed = bool(settings["uid_check_enabled"])
+                if logic == "all" and False in checks:
+                    uid_needed = False
+                elif logic == "any" and True in checks:
+                    uid_needed = False
+
+                if uid_needed:
+                    uid = parse_request_bilibili_uid(request)
+                    if uid is None:
+                        checks.append(False)
+                        failure_reason = "未提供有效的 B 站 UID"
+                    else:
+                        if time.monotonic() < self._bilibili_retry_at:
+                            return
+                        try:
+                            exists = await bilibili_uid_exists(uid)
+                        except BilibiliLookupError as exc:
+                            self._bilibili_retry_at = time.monotonic() + max(
+                                60,
+                                self._review_interval(),
+                            )
+                            self.logger.warning(
+                                "B 站 UID 查询暂不可用，本轮保留待审申请：%s",
+                                exc,
+                            )
+                            return
+                        checks.append(exists)
+                        if not exists:
+                            failure_reason = "B 站 UID 不存在"
+
+                passed = bool(checks) and (
+                    all(checks) if logic == "all" else any(checks)
+                )
+                if passed:
+                    op, reason = "approve", ""
+                else:
+                    op = settings["fallback_action"]
+                    if op == "pending":
+                        continue
+                    reason = failure_reason if op == "decline" else ""
 
             try:
                 await self._approve_request(
@@ -626,7 +742,7 @@ class QQGroupAdmin(Star):
         while True:
             try:
                 clients = self._platform_clients()
-                for platform_id, group_openid, keywords in self._uid_review_entries():
+                for platform_id, group_openid, settings in self._uid_review_entries():
                     client = clients.get(platform_id)
                     if client is None:
                         continue
@@ -635,7 +751,7 @@ class QQGroupAdmin(Star):
                             client,
                             platform_id,
                             group_openid,
-                            keywords,
+                            settings,
                         )
                     except (
                         QQAPIError,
@@ -709,11 +825,8 @@ class QQGroupAdmin(Star):
             yield event.plain_result(chunk)
 
     @staticmethod
-    def _markdown_text(value: Any, limit: int = 160) -> str:
-        text = " ".join(str(value or "-").split())[:limit]
-        for char in "\\`*_{}[]()#+-.!|<>":
-            text = text.replace(char, f"\\{char}")
-        return text
+    def _plain_text(value: Any, limit: int = 160) -> str:
+        return " ".join(str(value or "-").split())[:limit]
 
     @qq_admin_command("群帮助")
     async def help_command(self, event: AstrMessageEvent):
@@ -788,7 +901,7 @@ class QQGroupAdmin(Star):
             {
                 "buttons": [
                     button("bind", "绑定此群", "bind", 1),
-                    button("uid", "启用 UID 审核", "uid", 1),
+                    button("uid", "启用条件审核", "uid", 1),
                 ]
             },
             {
@@ -800,13 +913,11 @@ class QQGroupAdmin(Star):
         ]
         kwargs = {
             "group_openid": group_openid,
-            "msg_type": 2,
-            "markdown": {
-                "content": (
-                    f"# {self._markdown_text(group_name)}\n"
-                    "选择当前群的自动审核操作。设置按钮仅群主或群管理员可用。"
-                )
-            },
+            "msg_type": 0,
+            "content": (
+                f"{self._plain_text(group_name)}\n"
+                "选择当前群的自动审核操作。设置按钮仅群主或群管理员可用。"
+            ),
             "keyboard": {"content": {"rows": rows}},
         }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
@@ -815,9 +926,13 @@ class QQGroupAdmin(Star):
         try:
             await client.api.post_group_message(**kwargs)
         except Exception as exc:
+            detail = self._plain_text(exc, 240)
+            self.logger.warning("发送审核设置按钮失败：%s", exc)
             raise RuntimeError(
-                "发送审核设置按钮失败；请确认机器人已开通 Markdown 和自定义按钮权限"
+                f"发送审核设置按钮失败；请确认自定义按钮权限（QQ 返回：{detail}）"
             ) from exc
+        if hasattr(event, "stop_event"):
+            event.stop_event()
 
     @qq_admin_command("机器人状态")
     async def bot_state(self, event: AstrMessageEvent):
@@ -860,17 +975,17 @@ class QQGroupAdmin(Star):
             yield event.plain_result("当前没有待审入群申请。")
             return
 
-        lines = [f"# 入群申请（{len(requests)} 条）"]
+        lines = [f"入群申请（{len(requests)} 条）"]
         rows = []
         for index, item in enumerate(requests, 1):
             member_openid = str(item.get("member_openid") or "")
             join_request_id = str(item.get("join_request_id") or "")
             lines.extend(
                 [
-                    f"\n## {index}\\. {self._markdown_text(item.get('username'))}",
-                    f"验证：{self._markdown_text(verification_text(item))}",
-                    f"风险：{self._markdown_text(item.get('risk_tips'))}",
-                    f"时间：{self._markdown_text(item.get('apply_at'))}",
+                    f"\n{index}. {self._plain_text(item.get('username'))}",
+                    f"验证：{self._plain_text(verification_text(item))}",
+                    f"风险：{self._plain_text(item.get('risk_tips'))}",
+                    f"时间：{self._plain_text(item.get('apply_at'))}",
                 ]
             )
             if not member_openid or not join_request_id:
@@ -917,11 +1032,11 @@ class QQGroupAdmin(Star):
 
         next_cursor = str(data.get("next_cursor") or "")
         if next_cursor:
-            lines.append(f"\n下一页：`/申请列表 {self._markdown_text(next_cursor)}`")
+            lines.append(f"\n下一页：/申请列表 {self._plain_text(next_cursor)}")
         kwargs = {
             "group_openid": group_openid,
-            "msg_type": 2,
-            "markdown": {"content": "\n".join(lines)},
+            "msg_type": 0,
+            "content": "\n".join(lines),
             "keyboard": {"content": {"rows": rows}},
         }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
@@ -930,9 +1045,13 @@ class QQGroupAdmin(Star):
         try:
             await self._client(event).api.post_group_message(**kwargs)
         except Exception as exc:
+            detail = self._plain_text(exc, 240)
+            self.logger.warning("发送审批按钮失败：%s", exc)
             raise RuntimeError(
-                "发送审批按钮失败；请确认机器人已开通 Markdown 和自定义按钮权限"
+                f"发送审批按钮失败；请确认自定义按钮权限（QQ 返回：{detail}）"
             ) from exc
+        if hasattr(event, "stop_event"):
+            event.stop_event()
 
     @qq_admin_command("禁言状态")
     async def mute_state(self, event: AstrMessageEvent):
@@ -971,7 +1090,7 @@ class QQGroupAdmin(Star):
         event: AstrMessageEvent,
         member_openid: str,
         duration: str,
-    ) -> str:
+    ) -> tuple[str, str]:
         _, group_openid, _ = self._context(event)
         member = self._target_member(event, member_openid)
         api = self._api(event)
@@ -989,7 +1108,43 @@ class QQGroupAdmin(Star):
             group_openid,
             [{"op": op, "member_openid": member, "mute_expire_at": expire_at}],
         )
-        return expire_at
+        return member, expire_at
+
+    async def _send_mute_success(
+        self,
+        event: AstrMessageEvent,
+        member_openid: str,
+        duration: str,
+        expire_at: str,
+    ) -> Any | None:
+        template = str(
+            self.config.get(
+                "mute_success_message",
+                "已设置禁言，至 {expire_at}。",
+            )
+            or "已设置禁言，至 {expire_at}。"
+        )
+        text = (
+            template.replace("{duration}", duration)
+            .replace("{expire_at}", expire_at)
+            .replace("{member_openid}", member_openid)
+        )[:1000]
+        if not bool(self.config.get("mute_reply_at_member", False)):
+            return event.plain_result(text)
+
+        _, group_openid, _ = self._context(event)
+        kwargs = {
+            "group_openid": group_openid,
+            "msg_type": 0,
+            "content": f"<@{member_openid}> {text}",
+        }
+        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        if message_id:
+            kwargs["msg_id"] = message_id
+        await self._client(event).api.post_group_message(**kwargs)
+        if hasattr(event, "stop_event"):
+            event.stop_event()
+        return None
 
     @qq_admin_command("禁言")
     async def mute_member(
@@ -999,8 +1154,36 @@ class QQGroupAdmin(Star):
         duration: str,
     ):
         """新增或更新成员禁言，最长 30 天。"""
-        expire_at = await self._set_mute(event, member_openid, duration)
-        yield event.plain_result(f"已设置禁言，至 {expire_at}。")
+        member, expire_at = await self._set_mute(event, member_openid, duration)
+        result = await self._send_mute_success(
+            event,
+            member,
+            duration,
+            expire_at,
+        )
+        if result is not None:
+            yield result
+
+    @qq_admin_regex(r"^/?禁言(?=<@!?[^>]+>|@\S+)")
+    async def mute_member_compact(self, event: AstrMessageEvent):
+        """兼容命令与 @成员 之间不留空格。"""
+        match = re.fullmatch(
+            r"/?禁言(?:<@!?[^>]+>|@\S+)\s+(\S+)",
+            event.get_message_str().strip(),
+        )
+        if not match:
+            raise ValueError("用法：/禁言@成员 <60|30m|2h|7d>")
+        member, expire_at = await self._set_mute(event, "@", match.group(1))
+        result = await self._send_mute_success(
+            event,
+            member,
+            match.group(1),
+            expire_at,
+        )
+        if hasattr(event, "stop_event"):
+            event.stop_event()
+        if result is not None:
+            yield result
 
     @qq_admin_command("解禁")
     async def mute_remove(self, event: AstrMessageEvent, member_openid: str):
@@ -1011,6 +1194,24 @@ class QQGroupAdmin(Star):
             group_openid,
             [{"op": "del", "member_openid": member, "mute_expire_at": ""}],
         )
+        yield event.plain_result("已解除禁言。")
+
+    @qq_admin_regex(r"^/?解禁(?=<@!?[^>]+>|@\S+)")
+    async def mute_remove_compact(self, event: AstrMessageEvent):
+        """兼容命令与 @成员 之间不留空格。"""
+        if not re.fullmatch(
+            r"/?解禁(?:<@!?[^>]+>|@\S+)",
+            event.get_message_str().strip(),
+        ):
+            raise ValueError("用法：/解禁@成员")
+        _, group_openid, _ = self._context(event)
+        member = self._target_member(event, "@")
+        await self._api(event).set_member_mutes(
+            group_openid,
+            [{"op": "del", "member_openid": member, "mute_expire_at": ""}],
+        )
+        if hasattr(event, "stop_event"):
+            event.stop_event()
         yield event.plain_result("已解除禁言。")
 
     async def _auto_strategy(
@@ -1053,7 +1254,9 @@ class QQGroupAdmin(Star):
             else native_enabled
         )
         uid_enabled = (
-            self._uid_settings(entry)[0] if uid_enabled is None else uid_enabled
+            self._condition_settings(entry)["enabled"]
+            if uid_enabled is None
+            else uid_enabled
         )
         if uid_enabled and native_enabled:
             raise ValueError(
@@ -1080,7 +1283,7 @@ class QQGroupAdmin(Star):
             entry["applied_whitelist"] = ""
             self.config.save_config()
             return (
-                "B 站 UID 与关键词自动审核已启用。"
+                "条件审核已启用。"
                 if uid_enabled
                 else "两种自动审核均已关闭，群绑定已保留。"
             )
@@ -1170,8 +1373,11 @@ class QQGroupAdmin(Star):
         group_openid = str(entry.get("group_openid") or "").strip()
         group_name = str(entry.get("group_name") or "").strip()
         native_enabled = bool(entry.get("enabled", False))
-        uid_enabled = bool(entry.get("uid_review_enabled", False))
-        mode = "native" if native_enabled else "uid" if uid_enabled else "off"
+        settings = self._condition_settings(entry)
+        condition_enabled = settings["enabled"]
+        mode = (
+            "native" if native_enabled else "conditional" if condition_enabled else "off"
+        )
         bound = bool(entry.get("platform_id"))
         managed = bool(entry.get("managed_strategy_id"))
         desired = parse_qq_number_text(
@@ -1182,7 +1388,7 @@ class QQGroupAdmin(Star):
             bound and managed and desired == applied
             if mode == "native"
             else bound and not managed
-            if mode == "uid"
+            if mode == "conditional"
             else not managed
         )
         return {
@@ -1192,7 +1398,11 @@ class QQGroupAdmin(Star):
             "bound": bound,
             "synchronized": synchronized,
             "whitelist_qq_numbers": "\n".join(desired),
-            "uid_reject_keywords": str(entry.get("uid_reject_keywords") or ""),
+            "uid_check_enabled": settings["uid_check_enabled"],
+            "approve_keywords": "\n".join(settings["approve_keywords"]),
+            "reject_keywords": "\n".join(settings["reject_keywords"]),
+            "condition_logic": settings["condition_logic"],
+            "fallback_action": settings["fallback_action"],
             "scan_pending": bool(entry.get("scan_pending", True)),
             "button_reject_reason": str(
                 entry.get("button_reject_reason") or "管理员拒绝"
@@ -1217,9 +1427,13 @@ class QQGroupAdmin(Star):
         entry.update(
             {
                 "enabled": mode == "native",
-                "uid_review_enabled": mode == "uid",
+                "uid_review_enabled": mode == "conditional",
                 "whitelist_qq_numbers": str(payload["whitelist_qq_numbers"]),
-                "uid_reject_keywords": str(payload["uid_reject_keywords"]),
+                "uid_check_enabled": bool(payload["uid_check_enabled"]),
+                "approve_keywords": str(payload["approve_keywords"]),
+                "reject_keywords": str(payload["reject_keywords"]),
+                "condition_logic": str(payload["condition_logic"]),
+                "fallback_action": str(payload["fallback_action"]),
                 "scan_pending": bool(payload["scan_pending"]),
                 "button_reject_reason": str(payload["button_reject_reason"]),
             }
@@ -1263,9 +1477,10 @@ class QQGroupAdmin(Star):
         """查询当前群的两种自动审核状态。"""
         _, group_openid, _ = self._context(event)
         entry = self._group_config(group_openid)
-        uid_enabled, keywords = self._uid_settings(entry)
-        uid_bound = bool(
-            uid_enabled
+        settings = self._condition_settings(entry)
+        condition_enabled = settings["enabled"]
+        condition_bound = bool(
+            condition_enabled
             and entry
             and entry.get("platform_id")
             and not entry.get("managed_strategy_id")
@@ -1277,10 +1492,19 @@ class QQGroupAdmin(Star):
             native_state = "已开启" if strategy.get("is_enable") == "on" else "已停用"
         lines = [
             f"QQ 号码白名单：{native_state}",
-            "B 站 UID 审核："
-            + ("已开启" if uid_bound else "待同步" if uid_enabled else "未开启"),
-            f"UID 拒绝关键词：{len(keywords)} 个",
-            "UID 平台绑定：" + ("已绑定" if uid_bound else "未绑定"),
+            "条件审核："
+            + (
+                "已开启"
+                if condition_bound
+                else "待同步"
+                if condition_enabled
+                else "未开启"
+            ),
+            f"硬拒绝关键词：{len(settings.get('reject_keywords', []))} 个",
+            f"通过关键词：{len(settings.get('approve_keywords', []))} 个",
+            "条件组合："
+            + ("全部满足" if settings.get("condition_logic") == "all" else "任一满足"),
+            "条件审核平台绑定：" + ("已绑定" if condition_bound else "未绑定"),
         ]
         if strategy is not None:
             lines.extend(
@@ -1420,8 +1644,12 @@ class QQGroupAdmin(Star):
         if entry and entry.get("platform_id"):
             entry["platform_id"] = ""
             self.config.save_config()
-        uid_enabled, _ = self._uid_settings(entry)
+        condition_enabled = self._condition_settings(entry)["enabled"]
         yield event.plain_result(
             "QQ 号码白名单策略及名单已删除。"
-            + ("WebUI 中 B 站 UID 开关已保留，请同步后启用。" if uid_enabled else "")
+            + (
+                "WebUI 中条件审核开关已保留，请同步后启用。"
+                if condition_enabled
+                else ""
+            )
         )

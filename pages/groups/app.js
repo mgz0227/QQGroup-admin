@@ -39,7 +39,12 @@
   }
 
   function modeLabel(mode) {
-    return { off: "已关闭", uid: "B站 UID", native: "QQ 白名单" }[mode] || "配置异常";
+    return {
+      off: "已关闭",
+      uid: "条件审核",
+      conditional: "条件审核",
+      native: "QQ 白名单"
+    }[mode] || "配置异常";
   }
 
   function stateLabel(group) {
@@ -124,6 +129,15 @@
       .then(function (result) {
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
+        groups.forEach(function (group) {
+          if (group.mode === "uid") {
+            group.mode = "conditional";
+            if (group.uid_check_enabled == null) group.uid_check_enabled = true;
+          }
+          if (group.reject_keywords == null && group.uid_reject_keywords != null) {
+            group.reject_keywords = group.uid_reject_keywords;
+          }
+        });
         render();
       })
       .catch(function (error) {
@@ -136,17 +150,26 @@
   function updateConditionalFields() {
     var mode = element("mode").value;
     element("whitelist-field").hidden = mode !== "native";
-    element("keywords-field").hidden = mode !== "uid";
     element("scan-field").hidden = mode !== "native";
+    document.querySelectorAll(".condition-field").forEach(function (field) {
+      field.hidden = mode !== "conditional";
+    });
   }
 
   function openEditor(group) {
     editingGroup = group;
     element("dialog-title").textContent = group.group_name || "编辑群审核";
     element("dialog-subtitle").textContent = group.group_openid;
-    element("mode").value = group.mode || "off";
+    element("mode").value = group.mode === "uid" ? "conditional" : (group.mode || "off");
+    if (!element("mode").value) element("mode").value = "off";
     element("whitelist").value = group.whitelist_qq_numbers || "";
-    element("keywords").value = group.uid_reject_keywords || "";
+    element("uid-check-enabled").checked = group.uid_check_enabled === true;
+    element("approve-keywords").value = group.approve_keywords || "";
+    element("reject-keywords").value = group.reject_keywords || group.uid_reject_keywords || "";
+    element("condition-logic").value = group.condition_logic || "all";
+    if (!element("condition-logic").value) element("condition-logic").value = "all";
+    element("fallback-action").value = group.fallback_action || "pending";
+    if (!element("fallback-action").value) element("fallback-action").value = "pending";
     element("reject-reason").value = group.button_reject_reason || "管理员拒绝";
     element("scan-pending").checked = group.scan_pending !== false;
     updateConditionalFields();
@@ -160,7 +183,11 @@
       group_openid: editingGroup.group_openid,
       mode: element("mode").value,
       whitelist_qq_numbers: element("whitelist").value,
-      uid_reject_keywords: element("keywords").value,
+      uid_check_enabled: element("uid-check-enabled").checked,
+      approve_keywords: element("approve-keywords").value,
+      reject_keywords: element("reject-keywords").value,
+      condition_logic: element("condition-logic").value,
+      fallback_action: element("fallback-action").value,
       button_reject_reason: element("reject-reason").value,
       scan_pending: element("scan-pending").checked
     };

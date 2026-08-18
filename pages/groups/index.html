@@ -67,17 +67,40 @@
             <span>审核方式</span>
             <select id="mode" name="mode">
               <option value="off">关闭自动审核</option>
-              <option value="uid">B站 UID 审核</option>
+              <option value="conditional">条件审核</option>
               <option value="native">QQ 号码白名单</option>
+            </select>
+          </label>
+          <label class="checkbox wide condition-field">
+            <input id="uid-check-enabled" name="uid_check_enabled" type="checkbox">
+            <span>检查 B站 UID</span>
+          </label>
+          <label class="wide condition-field">
+            <span>通过关键词（可选条件）</span>
+            <textarea id="approve-keywords" name="approve_keywords" rows="3" placeholder="每行一个关键词"></textarea>
+          </label>
+          <label class="wide condition-field">
+            <span>硬拒绝关键词</span>
+            <textarea id="reject-keywords" name="reject_keywords" rows="3" placeholder="每行一个关键词"></textarea>
+          </label>
+          <label class="condition-field">
+            <span>条件组合</span>
+            <select id="condition-logic" name="condition_logic">
+              <option value="all">全部满足</option>
+              <option value="any">任一满足</option>
+            </select>
+          </label>
+          <label class="condition-field">
+            <span>条件未通过时</span>
+            <select id="fallback-action" name="fallback_action">
+              <option value="pending">保留待审</option>
+              <option value="decline">拒绝申请</option>
+              <option value="approve">同意申请</option>
             </select>
           </label>
           <label id="whitelist-field" class="wide conditional">
             <span>白名单 QQ 号码</span>
             <textarea id="whitelist" name="whitelist_qq_numbers" rows="5" placeholder="每行一个 QQ 号"></textarea>
-          </label>
-          <label id="keywords-field" class="wide conditional">
-            <span>验证消息拒绝关键词</span>
-            <textarea id="keywords" name="uid_reject_keywords" rows="4" placeholder="每行一个关键词"></textarea>
           </label>
           <label class="wide">
             <span>按钮拒绝理由</span>
@@ -108,7 +131,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="/api/plugin/page/bridge-sdk.js"></script>
     <script src="./app.js"></script>
   </body>
 </html>

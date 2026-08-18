@@ -1,7 +1,7 @@
 {
   "uid_review_interval_seconds": {
     "type": "int",
-    "description": "UID 审核轮询间隔（秒）",
+    "description": "条件审核轮询间隔（秒）",
     "hint": "15-600 秒。多个群会自动错峰处理，建议保留 60 秒。",
     "default": 60,
     "slider": {
@@ -9,6 +9,18 @@
       "max": 600,
       "step": 15
     }
+  },
+  "mute_success_message": {
+    "type": "string",
+    "description": "禁言成功回复",
+    "hint": "支持 {duration}、{expire_at}、{member_openid} 占位符。",
+    "default": "已设置禁言，至 {expire_at}。"
+  },
+  "mute_reply_at_member": {
+    "type": "bool",
+    "description": "禁言成功后 @成员",
+    "hint": "启用后在成功回复开头提及被禁言成员。",
+    "default": false
   },
   "auto_review_groups": {
     "type": "template_list",
@@ -36,7 +48,7 @@
           "enabled": {
             "type": "bool",
             "description": "启用 QQ 号码白名单",
-            "hint": "与 B 站 UID 审核二选一。关闭后同步会删除该群的 QQ 官方策略。",
+            "hint": "与条件审核二选一。关闭后同步会删除该群的 QQ 官方策略。",
             "default": false
           },
           "whitelist_qq_numbers": {
@@ -53,15 +65,43 @@
           },
           "uid_review_enabled": {
             "type": "bool",
-            "description": "启用 B 站 UID 审核",
-            "hint": "验证消息需为纯数字，或包含 UID:数字。仅处理用户主动申请。",
+            "description": "启用条件审核",
+            "hint": "拒绝关键词优先，其余启用条件可按全部满足或任一满足组合。",
             "default": false
           },
-          "uid_reject_keywords": {
+          "uid_check_enabled": {
+            "type": "bool",
+            "description": "检查 B 站 UID",
+            "hint": "验证消息需为纯数字，或包含 UID:数字。B 站查询异常时保留待审。",
+            "default": true
+          },
+          "approve_keywords": {
             "type": "text",
-            "description": "验证消息拒绝关键词",
-            "hint": "逗号、分号或换行分隔，最多 100 个。命中后优先拒绝，不再查询 UID。",
+            "description": "通过关键词",
+            "hint": "逗号、分号或换行分隔，最多 100 个。命中任意一个即满足关键词条件。",
             "default": ""
+          },
+          "reject_keywords": {
+            "type": "text",
+            "description": "硬拒绝关键词",
+            "hint": "命中后立即拒绝，优先于 UID、通过关键词、与或组合和兜底规则。",
+            "default": ""
+          },
+          "condition_logic": {
+            "type": "string",
+            "description": "条件组合",
+            "hint": "全部满足为 AND，任一满足为 OR。",
+            "default": "all",
+            "options": ["all", "any"],
+            "labels": ["全部满足", "任一满足"]
+          },
+          "fallback_action": {
+            "type": "string",
+            "description": "条件未通过时",
+            "hint": "B 站查询异常始终保留待审，不执行兜底。",
+            "default": "pending",
+            "options": ["pending", "decline", "approve"],
+            "labels": ["保留待审", "拒绝申请", "同意申请"]
           },
           "button_reject_reason": {
             "type": "string",

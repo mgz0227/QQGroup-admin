@@ -176,6 +176,7 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
 
     def test_input_limits(self):
         self.assertEqual(parse_duration("2h").total_seconds(), 7200)
+        self.assertEqual(parse_duration("45").total_seconds(), 45)
         self.assertEqual(parse_group_ids("123,456"), [123, 456])
         self.assertEqual(parse_qq_numbers("123,123,456"), ["123", "456"])
         with self.assertRaises(ValueError):

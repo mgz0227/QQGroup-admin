@@ -31,6 +31,11 @@ class TestStar:
         self.logger.propagate = False
 
 
+class TestCustomFilter:
+    def __init__(self, raise_error=True, **_kwargs):
+        self.raise_error = raise_error
+
+
 astrbot = types.ModuleType("astrbot")
 astrbot_api = types.ModuleType("astrbot.api")
 astrbot_event = types.ModuleType("astrbot.api.event")
@@ -47,6 +52,9 @@ astrbot_event.filter = SimpleNamespace(
     event_message_type=identity_decorator,
     permission_type=identity_decorator,
     on_platform_loaded=identity_decorator,
+    regex=identity_decorator,
+    custom_filter=identity_decorator,
+    CustomFilter=TestCustomFilter,
 )
 astrbot_star.Context = object
 astrbot_star.Star = TestStar
@@ -95,13 +103,17 @@ class FakeClient:
 
 
 class FakeEvent:
-    def __init__(self, client):
+    def __init__(self, client, message_str=""):
         self.bot = client
+        self.message_str = message_str
+        self.stopped = False
+        self.is_at_or_wake_command = True
         self.message_obj = SimpleNamespace(
             message_id="message-1",
             raw_message=SimpleNamespace(
                 group_openid="group-1",
                 author=SimpleNamespace(member_openid="admin-1"),
+                mentions=[],
             ),
         )
 
@@ -110,6 +122,12 @@ class FakeEvent:
 
     def plain_result(self, text):
         return text
+
+    def get_message_str(self):
+        return self.message_str
+
+    def stop_event(self):
+        self.stopped = True
 
 
 class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
@@ -151,7 +169,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         results = [result async for result in plugin.join_list(event)]
 
         self.assertEqual(results, [])
+        self.assertTrue(event.stopped)
         message = client.api.messages[0]
+        self.assertEqual(message["msg_type"], 0)
+        self.assertIn("content", message)
+        self.assertNotIn("markdown", message)
         buttons = message["keyboard"]["content"]["rows"][0]["buttons"]
         self.assertEqual([button["action"]["type"] for button in buttons], [1, 1])
         self.assertEqual(
@@ -237,6 +259,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         with patch.object(module, "QQGroupAPI", return_value=api):
             results = [result async for result in plugin.review_settings(event)]
         self.assertEqual(results, [])
+        self.assertTrue(event.stopped)
         self.assertEqual(plugin.config["auto_review_groups"], [])
 
         buttons = [
@@ -272,6 +295,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         entry = plugin.config["auto_review_groups"][0]
         self.assertEqual(entry["group_name"], "测试群")
         self.assertEqual(entry["group_openid"], "group-1")
+        self.assertEqual(entry["__template_key"], "qq_group")
         self.assertEqual(entry["platform_id"], "platform-1")
         self.assertTrue(entry["uid_review_enabled"])
         self.assertFalse(entry["enabled"])
@@ -329,15 +353,20 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         payload = module.GroupAdminWeb._validated_save(
             {
                 "group_openid": "group-1",
-                "mode": "uid",
+                "mode": "conditional",
                 "whitelist_qq_numbers": "123, 456",
-                "uid_reject_keywords": "广告, 引流",
+                "uid_check_enabled": True,
+                "approve_keywords": "主页, 老用户",
+                "reject_keywords": "广告, 引流",
+                "condition_logic": "any",
+                "fallback_action": "pending",
                 "scan_pending": True,
                 "button_reject_reason": "资料不完整",
             }
         )
         self.assertEqual(payload["whitelist_qq_numbers"], "123\n456")
-        self.assertEqual(payload["uid_reject_keywords"], "广告\n引流")
+        self.assertEqual(payload["approve_keywords"], "主页\n老用户")
+        self.assertEqual(payload["reject_keywords"], "广告\n引流")
         with self.assertRaises(ValueError):
             module.GroupAdminWeb._validated_save(
                 {
@@ -360,10 +389,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(plugin._uid_review_entries(), [])
         entry["managed_strategy_id"] = ""
-        self.assertEqual(
-            plugin._uid_review_entries(),
-            [("platform-1", "group-1", [])],
-        )
+        result = plugin._uid_review_entries()
+        self.assertEqual(result[0][:2], ("platform-1", "group-1"))
+        self.assertTrue(result[0][2]["uid_check_enabled"])
 
     async def test_uid_review_rejects_keyword_before_uid_format(self):
         plugin, _ = self.plugin()
@@ -411,7 +439,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 object(),
                 "platform-1",
                 "group-1",
-                ["广告"],
+                {
+                    "uid_check_enabled": True,
+                    "approve_keywords": [],
+                    "reject_keywords": ["广告"],
+                    "condition_logic": "all",
+                    "fallback_action": "decline",
+                },
             )
 
         lookup.assert_awaited_once_with("188144093")
@@ -424,6 +458,126 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["验证消息包含拒绝关键词", "未提供有效的 B 站 UID", ""],
         )
         self.assertTrue(any(call.args[0] >= 1 for call in sleeper.await_args_list))
+
+    async def test_condition_logic_and_fallback(self):
+        plugin, _ = self.plugin()
+        requests = [
+            {
+                "member_openid": "member-1",
+                "join_request_id": "request-1",
+                "apply_source": "self_apply",
+                "verify_info": {"verify_message": "普通申请"},
+            },
+            {
+                "member_openid": "member-2",
+                "join_request_id": "request-2",
+                "apply_source": "self_apply",
+                "verify_info": {"verify_message": "老用户 UID:188144093"},
+            },
+        ]
+        api = SimpleNamespace(
+            list_join_requests=AsyncMock(
+                return_value={"list": requests, "next_cursor": ""}
+            ),
+            approve_join_request=AsyncMock(),
+        )
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(module, "bilibili_uid_exists", AsyncMock(return_value=True)),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+        ):
+            await plugin._poll_uid_group(
+                object(),
+                "platform-1",
+                "group-1",
+                {
+                    "uid_check_enabled": True,
+                    "approve_keywords": ["老用户"],
+                    "reject_keywords": [],
+                    "condition_logic": "all",
+                    "fallback_action": "pending",
+                },
+            )
+
+        calls = api.approve_join_request.await_args_list
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].kwargs["op"], "approve")
+        self.assertEqual(calls[0].args[1], "member-2")
+
+    async def test_compact_mute_uses_seconds_and_custom_mention_reply(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            mute_success_message="已禁言 {duration} 秒",
+            mute_reply_at_member=True,
+        )
+        event = FakeEvent(client, "/禁言<@member-1> 45")
+        event.message_obj.raw_message.mentions = [
+            SimpleNamespace(member_openid="member-1", is_you=False)
+        ]
+        api = SimpleNamespace(
+            get_mute_state=AsyncMock(return_value={"members": []}),
+            set_member_mutes=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        results = [result async for result in plugin.mute_member_compact(event)]
+
+        self.assertEqual(results, [])
+        self.assertTrue(event.stopped)
+        mute = api.set_member_mutes.await_args.args[1][0]
+        self.assertEqual(mute["op"], "add")
+        self.assertEqual(mute["member_openid"], "member-1")
+        self.assertEqual(client.api.messages[-1]["content"], "<@member-1> 已禁言 45 秒")
+
+    async def test_standard_mute_stops_after_direct_mention_reply(self):
+        plugin, client = self.plugin()
+        plugin.config["mute_reply_at_member"] = True
+        event = FakeEvent(client)
+        api = SimpleNamespace(
+            get_mute_state=AsyncMock(return_value={"members": []}),
+            set_member_mutes=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        results = [
+            result
+            async for result in plugin.mute_member(event, "member-1", "45")
+        ]
+
+        self.assertEqual(results, [])
+        self.assertTrue(event.stopped)
+
+    def test_compact_commands_require_wake_prefix(self):
+        _plugin, client = self.plugin()
+        event = FakeEvent(client, "禁言<@member-1> 45")
+        event.is_at_or_wake_command = False
+
+        command_filter = module.WakeCommandFilter(False)
+
+        self.assertFalse(command_filter.filter(event, TestConfig()))
+        event.is_at_or_wake_command = True
+        self.assertTrue(command_filter.filter(event, TestConfig()))
+
+    def test_legacy_config_is_migrated_once(self):
+        config = TestConfig(
+            auto_review_groups=[
+                {
+                    "group_openid": "group-1",
+                    "uid_review_enabled": True,
+                    "uid_reject_keywords": "广告",
+                }
+            ]
+        )
+        context = SimpleNamespace(get_platform_inst=lambda _platform_id: None)
+
+        module.QQGroupAdmin(context, config)
+
+        entry = config["auto_review_groups"][0]
+        self.assertEqual(entry["__template_key"], "qq_group")
+        self.assertEqual(entry["reject_keywords"], "广告")
+        self.assertEqual(entry["fallback_action"], "decline")
+        self.assertNotIn("uid_reject_keywords", entry)
+        self.assertEqual(config.save_count, 1)
 
 
 if __name__ == "__main__":
