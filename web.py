@@ -90,6 +90,9 @@ class GroupAdminWeb:
         uid_check_enabled = payload.get("uid_check_enabled", raw_mode == "uid")
         if not isinstance(uid_check_enabled, bool):
             raise TypeError("UID 检查开关必须是布尔值")
+        uid_exists_auto_approve = payload.get("uid_exists_auto_approve", False)
+        if not isinstance(uid_exists_auto_approve, bool):
+            raise TypeError("有效 UID 直接通过开关必须是布尔值")
         condition_logic = cls._text(
             payload.get("condition_logic", "all"), "条件组合", 8
         )
@@ -116,6 +119,7 @@ class GroupAdminWeb:
             "mode": mode,
             "whitelist_qq_numbers": "\n".join(parse_qq_number_text(whitelist_text)),
             "uid_check_enabled": uid_check_enabled,
+            "uid_exists_auto_approve": uid_exists_auto_approve,
             "approve_keywords": "\n".join(parse_keywords(approve_text)),
             "reject_keywords": reject_keywords,
             "uid_reject_keywords": reject_keywords,

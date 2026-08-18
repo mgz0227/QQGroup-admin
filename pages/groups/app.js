@@ -134,6 +134,7 @@
             group.mode = "conditional";
             if (group.uid_check_enabled == null) group.uid_check_enabled = true;
           }
+          if (group.uid_exists_auto_approve == null) group.uid_exists_auto_approve = false;
           if (group.reject_keywords == null && group.uid_reject_keywords != null) {
             group.reject_keywords = group.uid_reject_keywords;
           }
@@ -164,6 +165,8 @@
     if (!element("mode").value) element("mode").value = "off";
     element("whitelist").value = group.whitelist_qq_numbers || "";
     element("uid-check-enabled").checked = group.uid_check_enabled === true;
+    element("uid-exists-auto-approve").checked =
+      group.uid_check_enabled === true && group.uid_exists_auto_approve === true;
     element("approve-keywords").value = group.approve_keywords || "";
     element("reject-keywords").value = group.reject_keywords || group.uid_reject_keywords || "";
     element("condition-logic").value = group.condition_logic || "all";
@@ -184,6 +187,7 @@
       mode: element("mode").value,
       whitelist_qq_numbers: element("whitelist").value,
       uid_check_enabled: element("uid-check-enabled").checked,
+      uid_exists_auto_approve: element("uid-exists-auto-approve").checked,
       approve_keywords: element("approve-keywords").value,
       reject_keywords: element("reject-keywords").value,
       condition_logic: element("condition-logic").value,
@@ -232,6 +236,9 @@
   element("refresh-button").addEventListener("click", load);
   element("search-input").addEventListener("input", render);
   element("mode").addEventListener("change", updateConditionalFields);
+  element("uid-check-enabled").addEventListener("change", function () {
+    if (!this.checked) element("uid-exists-auto-approve").checked = false;
+  });
   element("edit-form").addEventListener("submit", save);
   element("close-dialog").addEventListener("click", function () { element("edit-dialog").close(); });
   element("cancel-edit").addEventListener("click", function () { element("edit-dialog").close(); });

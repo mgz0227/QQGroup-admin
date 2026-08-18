@@ -168,6 +168,7 @@ class QQGroupAdmin(Star):
                 changed = True
             for key, default in (
                 ("uid_check_enabled", True),
+                ("uid_exists_auto_approve", False),
                 ("approve_keywords", ""),
                 ("condition_logic", "all"),
                 (
@@ -527,6 +528,7 @@ class QQGroupAdmin(Star):
                 "scan_pending": True,
                 "uid_review_enabled": False,
                 "uid_check_enabled": True,
+                "uid_exists_auto_approve": False,
                 "approve_keywords": "",
                 "reject_keywords": "",
                 "condition_logic": "all",
@@ -553,9 +555,15 @@ class QQGroupAdmin(Star):
             raise ValueError("条件组合只能是 all 或 any")
         if fallback not in FALLBACK_ACTIONS:
             raise ValueError("兜底动作只能是 pending、decline 或 approve")
+        uid_check_enabled = bool(entry.get("uid_check_enabled", True))
         return {
             "enabled": bool(entry.get("uid_review_enabled", False)),
-            "uid_check_enabled": bool(entry.get("uid_check_enabled", True)),
+            "uid_check_enabled": uid_check_enabled,
+            "uid_exists_auto_approve": uid_check_enabled
+            and bool(entry.get("uid_exists_auto_approve", False)),
+            "global_reject_keywords": parse_keywords(
+                str(self.config.get("global_reject_keywords") or "")
+            ),
             "approve_keywords": parse_keywords(
                 str(entry.get("approve_keywords") or "")
             ),
@@ -653,11 +661,18 @@ class QQGroupAdmin(Star):
                 continue
 
             text = verification_text(request)
+            global_keyword = matched_keyword(
+                text, settings.get("global_reject_keywords", [])
+            )
             keyword = matched_keyword(text, settings["reject_keywords"])
-            if keyword:
+            if global_keyword:
+                op, reason = "decline", "验证消息包含全局拒绝关键词"
+            elif keyword:
                 op, reason = "decline", "验证消息包含拒绝关键词"
             else:
                 checks = []
+                uid_direct = bool(settings.get("uid_exists_auto_approve", False))
+                uid_direct_passed = False
                 failure_reason = "未满足自动审核条件"
                 approve_keywords = settings["approve_keywords"]
                 if approve_keywords:
@@ -668,7 +683,7 @@ class QQGroupAdmin(Star):
 
                 logic = settings["condition_logic"]
                 uid_needed = bool(settings["uid_check_enabled"])
-                if (logic == "all" and False in checks) or (
+                if (logic == "all" and False in checks and not uid_direct) or (
                     logic == "any" and True in checks
                 ):
                     uid_needed = False
@@ -694,11 +709,13 @@ class QQGroupAdmin(Star):
                             )
                             continue
                         checks.append(exists)
-                        if not exists:
+                        if exists and uid_direct:
+                            uid_direct_passed = True
+                        elif not exists:
                             failure_reason = "B 站 UID 不存在"
 
-                passed = bool(checks) and (
-                    all(checks) if logic == "all" else any(checks)
+                passed = uid_direct_passed or (
+                    bool(checks) and (all(checks) if logic == "all" else any(checks))
                 )
                 if passed:
                     op, reason = "approve", ""
@@ -1402,6 +1419,7 @@ class QQGroupAdmin(Star):
             "synchronized": synchronized,
             "whitelist_qq_numbers": "\n".join(desired),
             "uid_check_enabled": settings["uid_check_enabled"],
+            "uid_exists_auto_approve": settings["uid_exists_auto_approve"],
             "approve_keywords": "\n".join(settings["approve_keywords"]),
             "reject_keywords": "\n".join(settings["reject_keywords"]),
             "condition_logic": settings["condition_logic"],
@@ -1432,6 +1450,7 @@ class QQGroupAdmin(Star):
                 "uid_review_enabled": mode == "conditional",
                 "whitelist_qq_numbers": str(payload["whitelist_qq_numbers"]),
                 "uid_check_enabled": bool(payload["uid_check_enabled"]),
+                "uid_exists_auto_approve": bool(payload["uid_exists_auto_approve"]),
                 "approve_keywords": str(payload["approve_keywords"]),
                 "reject_keywords": str(payload["reject_keywords"]),
                 "condition_logic": str(payload["condition_logic"]),
@@ -1503,6 +1522,8 @@ class QQGroupAdmin(Star):
                 else "未开启"
             ),
             f"硬拒绝关键词：{len(settings.get('reject_keywords', []))} 个",
+            "有效 UID 直接通过："
+            + ("已开启" if settings.get("uid_exists_auto_approve") else "未开启"),
             f"通过关键词：{len(settings.get('approve_keywords', []))} 个",
             "条件组合："
             + ("全部满足" if settings.get("condition_logic") == "all" else "任一满足"),

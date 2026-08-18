@@ -22,6 +22,12 @@
     "hint": "启用后在成功回复开头提及被禁言成员。",
     "default": false
   },
+  "global_reject_keywords": {
+    "type": "text",
+    "description": "全局拒绝关键词",
+    "hint": "逗号、分号或换行分隔，最多 100 个。命中后立即拒绝，优先于群级规则、有效 UID 直通和其他条件。",
+    "default": ""
+  },
   "auto_review_groups": {
     "type": "template_list",
     "description": "QQ群自动审核配置",
@@ -74,6 +80,12 @@
             "description": "检查 B 站 UID",
             "hint": "验证消息需为纯数字，或包含 UID:数字。B 站查询异常时保留待审。",
             "default": true
+          },
+          "uid_exists_auto_approve": {
+            "type": "bool",
+            "description": "有效 UID 直接通过",
+            "hint": "UID 存在时忽略通过关键词和条件组合并直接同意；全局及群级拒绝关键词仍优先。",
+            "default": false
           },
           "approve_keywords": {
             "type": "text",

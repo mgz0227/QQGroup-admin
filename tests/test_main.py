@@ -360,6 +360,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "mode": "conditional",
                 "whitelist_qq_numbers": "123, 456",
                 "uid_check_enabled": True,
+                "uid_exists_auto_approve": True,
                 "approve_keywords": "主页, 老用户",
                 "reject_keywords": "广告, 引流",
                 "condition_logic": "any",
@@ -369,6 +370,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         self.assertEqual(payload["whitelist_qq_numbers"], "123\n456")
+        self.assertTrue(payload["uid_exists_auto_approve"])
         self.assertEqual(payload["approve_keywords"], "主页\n老用户")
         self.assertEqual(payload["reject_keywords"], "广告\n引流")
         with self.assertRaises(ValueError):
@@ -508,6 +510,78 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].kwargs["op"], "approve")
         self.assertEqual(calls[0].args[1], "member-2")
 
+    async def test_global_reject_precedes_uid_direct_approve(self):
+        plugin, _ = self.plugin()
+        plugin.config["global_reject_keywords"] = "全局封禁"
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            {
+                "uid_review_enabled": True,
+                "uid_check_enabled": True,
+                "uid_exists_auto_approve": True,
+                "approve_keywords": "老用户",
+                "reject_keywords": "",
+                "condition_logic": "all",
+                "fallback_action": "pending",
+            }
+        )
+        api = SimpleNamespace(
+            list_join_requests=AsyncMock(
+                return_value={
+                    "list": [
+                        {
+                            "member_openid": "member-1",
+                            "join_request_id": "request-1",
+                            "apply_source": "self_apply",
+                            "verify_info": {"verify_message": "全局封禁 UID:188144093"},
+                        },
+                        {
+                            "member_openid": "member-2",
+                            "join_request_id": "request-2",
+                            "apply_source": "self_apply",
+                            "verify_info": {"verify_message": "UID:188144093"},
+                        },
+                    ],
+                    "next_cursor": "",
+                }
+            ),
+            approve_join_request=AsyncMock(),
+        )
+        lookup = AsyncMock(return_value=True)
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(module, "bilibili_uid_exists", lookup),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+        ):
+            await plugin._poll_uid_group(
+                object(),
+                "platform-1",
+                "group-1",
+                plugin._condition_settings(entry),
+            )
+
+        lookup.assert_awaited_once_with("188144093")
+        calls = api.approve_join_request.await_args_list
+        self.assertEqual([call.kwargs["op"] for call in calls], ["decline", "approve"])
+        self.assertEqual(
+            calls[0].kwargs["reject_reason"],
+            "验证消息包含全局拒绝关键词",
+        )
+
+    async def test_uid_direct_approve_requires_uid_check(self):
+        plugin, _ = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            {
+                "uid_check_enabled": False,
+                "uid_exists_auto_approve": True,
+            }
+        )
+
+        settings = plugin._condition_settings(entry)
+
+        self.assertFalse(settings["uid_exists_auto_approve"])
+
     async def test_bilibili_failure_does_not_skip_later_hard_reject(self):
         plugin, _ = self.plugin()
         api = SimpleNamespace(
@@ -634,6 +708,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         entry = config["auto_review_groups"][0]
         self.assertEqual(entry["__template_key"], "qq_group")
         self.assertEqual(entry["reject_keywords"], "广告")
+        self.assertFalse(entry["uid_exists_auto_approve"])
         self.assertEqual(entry["fallback_action"], "decline")
         self.assertNotIn("uid_reject_keywords", entry)
         self.assertEqual(config.save_count, 1)

@@ -75,6 +75,10 @@
             <input id="uid-check-enabled" name="uid_check_enabled" type="checkbox">
             <span>检查 B站 UID</span>
           </label>
+          <label class="checkbox wide condition-field">
+            <input id="uid-exists-auto-approve" name="uid_exists_auto_approve" type="checkbox">
+            <span>有效 UID 直接通过（全局及群级拒绝关键词仍优先）</span>
+          </label>
           <label class="wide condition-field">
             <span>通过关键词（可选条件）</span>
             <textarea id="approve-keywords" name="approve_keywords" rows="3" placeholder="每行一个关键词"></textarea>
@@ -131,6 +135,6 @@
     </dialog>
 
     <div class="toast" id="toast" role="status" aria-live="polite"></div>
-    <script src="./app.js"></script>
+    <script type="module" src="./app.js"></script>
   </body>
 </html>
