@@ -13,14 +13,20 @@
   "auto_review_groups": {
     "type": "template_list",
     "description": "QQ群自动审核配置",
-    "hint": "逐个添加群。群 OpenID 可通过 /群信息 获取；保存后在对应群发送 /自动审核同步 确认。",
+    "hint": "优先在目标群发送 /审核设置 并点击绑定，群名称和 OpenID 会自动写入。",
     "default": [],
     "templates": {
       "qq_group": {
-        "name": "QQ群自动审核",
-        "display_item": "group_openid",
+        "name": "群",
+        "display_item": "group_name",
         "hide_hint_in_list": true,
         "items": {
+          "group_name": {
+            "type": "string",
+            "description": "群名称",
+            "hint": "群内绑定时由 QQ 官方接口自动读取。",
+            "default": ""
+          },
           "group_openid": {
             "type": "string",
             "description": "群 OpenID",

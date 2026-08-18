@@ -15,8 +15,12 @@ def identity_decorator(*_args, **_kwargs):
 
 
 class TestConfig(dict):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.save_count = 0
+
     def save_config(self):
-        pass
+        self.save_count += 1
 
 
 class TestStar:
@@ -31,6 +35,7 @@ astrbot = types.ModuleType("astrbot")
 astrbot_api = types.ModuleType("astrbot.api")
 astrbot_event = types.ModuleType("astrbot.api.event")
 astrbot_star = types.ModuleType("astrbot.api.star")
+astrbot_web = types.ModuleType("astrbot.api.web")
 astrbot_api.AstrBotConfig = TestConfig
 astrbot_event.AstrMessageEvent = object
 astrbot_event.filter = SimpleNamespace(
@@ -45,12 +50,16 @@ astrbot_event.filter = SimpleNamespace(
 )
 astrbot_star.Context = object
 astrbot_star.Star = TestStar
+astrbot_web.error_response = lambda message, status_code=500: (message, status_code)
+astrbot_web.json_response = lambda data: data
+astrbot_web.request = SimpleNamespace()
 sys.modules.update(
     {
         "astrbot": astrbot,
         "astrbot.api": astrbot_api,
         "astrbot.api.event": astrbot_event,
         "astrbot.api.star": astrbot_star,
+        "astrbot.api.web": astrbot_web,
     }
 )
 
@@ -79,6 +88,12 @@ class FakeClientAPI:
         self.acks.append((interaction_id, code))
 
 
+class FakeClient:
+    def __init__(self):
+        self.api = FakeClientAPI()
+        self.intents = 0
+
+
 class FakeEvent:
     def __init__(self, client):
         self.bot = client
@@ -99,7 +114,7 @@ class FakeEvent:
 
 class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
     def plugin(self):
-        client = SimpleNamespace(api=FakeClientAPI())
+        client = FakeClient()
         platform = SimpleNamespace(get_client=lambda: client)
         context = SimpleNamespace(get_platform_inst=lambda _platform_id: platform)
         config = TestConfig(
@@ -160,9 +175,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             group_openid="group-1",
             data=SimpleNamespace(resolved=SimpleNamespace(button_data=button_data)),
         )
-        await plugin._handle_interaction(client, interaction)
+        self.assertTrue(await plugin._handle_interaction(client, interaction))
         interaction.id = "interaction-2"
-        await plugin._handle_interaction(client, interaction)
+        self.assertTrue(await plugin._handle_interaction(client, interaction))
 
         self.assertEqual(approvals[0][1]["op"], "approve")
         self.assertEqual(client.api.acks, [("interaction-1", 0), ("interaction-2", 3)])
@@ -174,8 +189,162 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         token = plugin._approval_token("group-1", "member-2", "request-2")
         interaction.id = "interaction-3"
         interaction.data.resolved.button_data = f"qqga:{token}:approve"
-        await plugin._handle_interaction(client, interaction)
+        self.assertTrue(await plugin._handle_interaction(client, interaction))
         self.assertEqual(client.api.acks[-1], ("interaction-3", 2))
+
+        interaction.id = "interaction-4"
+        interaction.data.resolved.button_data = "other:token:action"
+        self.assertFalse(await plugin._handle_interaction(client, interaction))
+        self.assertNotIn(("interaction-4", 1), client.api.acks)
+
+    async def test_interaction_handler_chains_once_and_restores_previous(self):
+        plugin, client = self.plugin()
+        previous = AsyncMock()
+        client.on_interaction_create = previous
+        platform = SimpleNamespace(get_client=lambda: client)
+        plugin._qq_platforms = lambda: [platform, platform]
+
+        plugin._patch_qq_clients()
+        installed = client.on_interaction_create
+        plugin._patch_qq_clients()
+
+        self.assertIs(client.on_interaction_create, installed)
+        self.assertTrue(client.intents & module.INTERACTION_INTENT)
+        interaction = SimpleNamespace(
+            id="foreign",
+            type=11,
+            chat_type=1,
+            group_openid="group-1",
+            data=SimpleNamespace(
+                resolved=SimpleNamespace(button_data="another:token:button")
+            ),
+        )
+        await client.on_interaction_create(interaction)
+        previous.assert_awaited_once_with(interaction)
+        self.assertEqual(client.api.acks, [])
+
+        await plugin.terminate()
+        self.assertIs(client.on_interaction_create, previous)
+
+    async def test_settings_button_binds_named_group_without_webui_entry(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"] = []
+        event = FakeEvent(client)
+        api = SimpleNamespace(
+            get_group_info=AsyncMock(return_value={"group_name": "测试群"}),
+            list_strategies=AsyncMock(return_value={"strategies": []}),
+        )
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            results = [result async for result in plugin.review_settings(event)]
+        self.assertEqual(results, [])
+        self.assertEqual(plugin.config["auto_review_groups"], [])
+
+        buttons = [
+            button
+            for row in client.api.messages[0]["keyboard"]["content"]["rows"]
+            for button in row["buttons"]
+        ]
+        self.assertEqual(
+            [button["action"]["data"].rsplit(":", 1)[1] for button in buttons],
+            ["bind", "uid", "sync", "off"],
+        )
+        self.assertTrue(
+            all(button["action"]["permission"] == {"type": 1} for button in buttons)
+        )
+
+        uid_data = buttons[1]["action"]["data"]
+        interaction = SimpleNamespace(
+            id="settings-wrong-group",
+            type=11,
+            chat_type=1,
+            group_openid="other-group",
+            data=SimpleNamespace(resolved=SimpleNamespace(button_data=uid_data)),
+        )
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            self.assertTrue(await plugin._handle_interaction(client, interaction))
+        self.assertEqual(plugin.config["auto_review_groups"], [])
+        self.assertEqual(client.api.acks[-1], ("settings-wrong-group", 4))
+
+        interaction.id = "settings-uid"
+        interaction.group_openid = "group-1"
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            self.assertTrue(await plugin._handle_interaction(client, interaction))
+        entry = plugin.config["auto_review_groups"][0]
+        self.assertEqual(entry["group_name"], "测试群")
+        self.assertEqual(entry["group_openid"], "group-1")
+        self.assertEqual(entry["platform_id"], "platform-1")
+        self.assertTrue(entry["uid_review_enabled"])
+        self.assertFalse(entry["enabled"])
+
+        interaction.id = "settings-off"
+        interaction.data.resolved.button_data = uid_data.rsplit(":", 1)[0] + ":off"
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            self.assertTrue(await plugin._handle_interaction(client, interaction))
+        self.assertFalse(entry["uid_review_enabled"])
+        self.assertFalse(entry["enabled"])
+        self.assertEqual(client.api.acks[-1], ("settings-off", 0))
+        self.assertGreater(plugin.config.save_count, 0)
+
+    async def test_uid_button_does_not_take_over_unmanaged_strategy(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            {
+                "enabled": False,
+                "uid_review_enabled": False,
+                "platform_id": "platform-1",
+                "managed_strategy_id": "",
+            }
+        )
+        api = SimpleNamespace(
+            list_strategies=AsyncMock(
+                return_value={
+                    "strategies": [
+                        {
+                            "strategy_id": "external-strategy",
+                            "group_openids": ["group-1"],
+                        }
+                    ]
+                }
+            ),
+            delete_strategy=AsyncMock(),
+        )
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            self.assertRaisesRegex(ValueError, "未由本插件管理"),
+        ):
+            await plugin._sync_group_config(
+                client,
+                "group-1",
+                entry,
+                "platform-1",
+                native_enabled=False,
+                uid_enabled=True,
+            )
+
+        self.assertFalse(entry["uid_review_enabled"])
+        api.delete_strategy.assert_not_awaited()
+
+    def test_web_payload_validation_normalizes_lists(self):
+        payload = module.GroupAdminWeb._validated_save(
+            {
+                "group_openid": "group-1",
+                "mode": "uid",
+                "whitelist_qq_numbers": "123, 456",
+                "uid_reject_keywords": "广告, 引流",
+                "scan_pending": True,
+                "button_reject_reason": "资料不完整",
+            }
+        )
+        self.assertEqual(payload["whitelist_qq_numbers"], "123\n456")
+        self.assertEqual(payload["uid_reject_keywords"], "广告\n引流")
+        with self.assertRaises(ValueError):
+            module.GroupAdminWeb._validated_save(
+                {
+                    **payload,
+                    "group_openid": "bad group",
+                }
+            )
 
     def test_uid_review_waits_for_native_strategy_sync(self):
         plugin, _ = self.plugin()

@@ -30,6 +30,7 @@ from .review import (
     parse_request_bilibili_uid,
     verification_text,
 )
+from .web import GroupAdminWeb
 
 QQ_PLATFORM_TYPES = (
     filter.PlatformAdapterType.QQOFFICIAL
@@ -67,6 +68,18 @@ def qq_admin_command(name: str):
     return decorator
 
 
+def qq_group_command(name: str):
+    def decorator(handler):
+        wrapped = guarded(handler)
+        wrapped = filter.command(name)(wrapped)
+        wrapped = filter.platform_adapter_type(QQ_PLATFORM_TYPES)(wrapped)
+        return filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE)(
+            wrapped
+        )
+
+    return decorator
+
+
 def split_message(text: str, limit: int = 3000) -> list[str]:
     chunks = []
     while len(text) > limit:
@@ -85,6 +98,7 @@ class QQGroupAdmin(Star):
 /群信息
 /机器人状态
 /申请列表 [游标]
+/审核设置
 /禁言状态
 /禁言 <成员OpenID|@成员> <30m|2h|7d>
 /解禁 <成员OpenID|@成员>
@@ -102,11 +116,14 @@ class QQGroupAdmin(Star):
         self._approval_lock = asyncio.Lock()
         self._last_approval_at = 0.0
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
+        self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._poll_cursors: dict[tuple[str, str], str] = {}
-        self._patched_clients: set[Any] = set()
+        self._patched_clients: dict[Any, Any] = {}
         self._bilibili_retry_at = 0.0
+        self._web = GroupAdminWeb(self, context)
 
     async def initialize(self) -> None:
+        self._web.register_routes()
         self._patch_qq_clients()
         self._review_task = asyncio.create_task(
             self._uid_review_loop(),
@@ -119,10 +136,13 @@ class QQGroupAdmin(Star):
             with suppress(asyncio.CancelledError):
                 await self._review_task
             self._review_task = None
-        for client in self._patched_clients:
+        for client, previous in self._patched_clients.items():
             handler = getattr(client, "on_interaction_create", None)
             if getattr(handler, "__qqgroup_admin_owner__", None) is self:
-                delattr(client, "on_interaction_create")
+                if previous is None:
+                    delattr(client, "on_interaction_create")
+                else:
+                    client.on_interaction_create = previous
         self._patched_clients.clear()
 
     @filter.on_platform_loaded()
@@ -167,31 +187,50 @@ class QQGroupAdmin(Star):
                 client = platform.get_client()
                 existing = getattr(client, "on_interaction_create", None)
                 owner = getattr(existing, "__qqgroup_admin_owner__", None)
-                if existing and owner is None:
-                    self.logger.warning(
-                        "QQ client 已有互动事件处理器，QQ 群管理插件不会覆盖它。"
-                    )
+                if owner is self:
                     continue
+                if owner is not None:
+                    existing = getattr(
+                        existing,
+                        "__qqgroup_admin_previous__",
+                        existing,
+                    )
                 if hasattr(client, "intents"):
                     client.intents |= INTERACTION_INTENT
 
                 async def interaction_handler(
                     interaction: Any,
                     bound_client: Any = client,
+                    previous_handler: Any = existing,
                 ) -> None:
-                    await self._handle_interaction(bound_client, interaction)
+                    handled = await self._handle_interaction(
+                        bound_client,
+                        interaction,
+                    )
+                    if not handled and previous_handler is not None:
+                        await previous_handler(interaction)
 
-                interaction_handler.__qqgroup_admin_owner__ = self  # type: ignore[attr-defined]
+                setattr(interaction_handler, "__qqgroup_admin_owner__", self)
+                setattr(
+                    interaction_handler,
+                    "__qqgroup_admin_previous__",
+                    existing,
+                )
                 client.on_interaction_create = interaction_handler
-                self._patched_clients.add(client)
-            except Exception as exc:  # noqa: BLE001 - private botpy integration boundary
-                self.logger.warning("安装 QQ 审批按钮回调失败：%s", exc)
+                self._patched_clients[client] = existing
+            except Exception as exc:  # noqa: BLE001 - private botpy boundary
+                self.logger.warning("安装 QQ 群管理按钮回调失败：%s", exc)
 
-    def _cleanup_approval_tokens(self) -> None:
+    def _cleanup_tokens(self) -> None:
         now = time.monotonic()
         self._approval_tokens = {
             token: data
             for token, data in self._approval_tokens.items()
+            if data[0] > now
+        }
+        self._settings_tokens = {
+            token: data
+            for token, data in self._settings_tokens.items()
             if data[0] > now
         }
 
@@ -201,13 +240,29 @@ class QQGroupAdmin(Star):
         member_openid: str,
         join_request_id: str,
     ) -> str:
-        self._cleanup_approval_tokens()
+        self._cleanup_tokens()
         token = secrets.token_urlsafe(12)
         self._approval_tokens[token] = (
             time.monotonic() + BUTTON_TOKEN_TTL,
             group_openid,
             member_openid,
             join_request_id,
+        )
+        return token
+
+    def _settings_token(
+        self,
+        group_openid: str,
+        platform_id: str,
+        group_name: str,
+    ) -> str:
+        self._cleanup_tokens()
+        token = secrets.token_urlsafe(12)
+        self._settings_tokens[token] = (
+            time.monotonic() + BUTTON_TOKEN_TTL,
+            group_openid,
+            platform_id,
+            group_name,
         )
         return token
 
@@ -249,52 +304,73 @@ class QQGroupAdmin(Star):
                 self._last_approval_at = time.monotonic()
         self._forget_request_tokens(group_openid, join_request_id)
 
-    async def _handle_interaction(self, client: Any, interaction: Any) -> None:
+    async def _handle_interaction(self, client: Any, interaction: Any) -> bool:
         interaction_id = str(getattr(interaction, "id", "") or "")
+        data = getattr(interaction, "data", None)
+        resolved = getattr(data, "resolved", None)
+        button_data = str(getattr(resolved, "button_data", "") or "")
+        parts = button_data.split(":")
+        group_openid = str(getattr(interaction, "group_openid", "") or "")
+        if (
+            getattr(interaction, "type", None) != 11
+            or getattr(interaction, "chat_type", None) != 1
+            or not group_openid
+            or len(parts) != 3
+            or parts[0] not in {"qqga", "qqgs"}
+            or parts[2]
+            not in (
+                {"approve", "decline"}
+                if parts[0] == "qqga"
+                else {"bind", "uid", "sync", "off"}
+            )
+        ):
+            return False
+
         response_code = 1
         try:
-            data = getattr(interaction, "data", None)
-            resolved = getattr(data, "resolved", None)
-            button_data = str(getattr(resolved, "button_data", "") or "")
-            parts = button_data.split(":")
-            group_openid = str(getattr(interaction, "group_openid", "") or "")
-            if (
-                getattr(interaction, "type", None) != 11
-                or getattr(interaction, "chat_type", None) != 1
-                or not group_openid
-                or len(parts) != 3
-                or parts[0] != "qqga"
-                or parts[2] not in {"approve", "decline"}
-            ):
-                return
-
-            self._cleanup_approval_tokens()
-            token_data = self._approval_tokens.get(parts[1])
-            if token_data is None:
-                response_code = 3
-                return
-            _, expected_group, member_openid, join_request_id = token_data
-            if expected_group != group_openid:
-                response_code = 4
-                return
-
-            entry = self._group_config(group_openid)
-            reason = str((entry or {}).get("button_reject_reason") or "管理员拒绝")
-            await self._approve_request(
-                QQGroupAPI(client),
-                group_openid,
-                member_openid,
-                join_request_id,
-                op=parts[2],
-                reject_reason=reason if parts[2] == "decline" else "",
-            )
-            response_code = 0
+            self._cleanup_tokens()
+            if parts[0] == "qqga":
+                token_data = self._approval_tokens.get(parts[1])
+                if token_data is None:
+                    response_code = 3
+                elif token_data[1] != group_openid:
+                    response_code = 4
+                else:
+                    _, _, member_openid, join_request_id = token_data
+                    entry = self._group_config(group_openid)
+                    reason = str(
+                        (entry or {}).get("button_reject_reason") or "管理员拒绝"
+                    )
+                    await self._approve_request(
+                        QQGroupAPI(client),
+                        group_openid,
+                        member_openid,
+                        join_request_id,
+                        op=parts[2],
+                        reject_reason=reason if parts[2] == "decline" else "",
+                    )
+                    response_code = 0
+            else:
+                token_data = self._settings_tokens.get(parts[1])
+                if token_data is None:
+                    response_code = 3
+                elif token_data[1] != group_openid:
+                    response_code = 4
+                else:
+                    await self._apply_settings_button(
+                        client,
+                        group_openid,
+                        token_data[2],
+                        parts[2],
+                        token_data[3],
+                    )
+                    response_code = 0
         except QQAPIError as exc:
             if exc.status == 429:
                 response_code = 2
-            self.logger.warning("处理 QQ 入群审批按钮失败：%s", exc)
+            self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
         except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
-            self.logger.warning("处理 QQ 入群审批按钮失败：%s", exc)
+            self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
         finally:
             if interaction_id:
                 try:
@@ -304,6 +380,7 @@ class QQGroupAdmin(Star):
                     )
                 except Exception as exc:  # noqa: BLE001 - botpy raises transport errors
                     self.logger.warning("回应 QQ 按钮互动事件失败：%s", exc)
+        return True
 
     def _target_member(self, event: AstrMessageEvent, value: str) -> str:
         raw, _, _ = self._context(event)
@@ -363,8 +440,49 @@ class QQGroupAdmin(Star):
         if len(matches) > 1:
             raise ValueError("WebUI 中当前群存在重复的自动审核配置")
         if required and not matches:
-            raise ValueError("WebUI 尚未配置当前群，请先添加群 OpenID 并保存")
+            raise ValueError("当前群尚未绑定，请发送 /审核设置 并点击绑定")
         return matches[0] if matches else None
+
+    async def _bind_group(
+        self,
+        client: Any,
+        group_openid: str,
+        platform_id: str,
+        group_name: str = "",
+    ) -> dict[str, Any]:
+        if not group_name:
+            data = await QQGroupAPI(client).get_group_info(group_openid)
+            group_name = str(data.get("group_name") or "").strip()
+        if not group_name:
+            raise RuntimeError("QQ API 未返回群名称，无法完成绑定")
+        if any(ord(char) < 32 for char in group_name):
+            raise ValueError("群名称包含非法控制字符")
+
+        entry = self._group_config(group_openid)
+        if entry is None:
+            entries = self.config.get("auto_review_groups") or []
+            if not isinstance(entries, list):
+                raise TypeError("WebUI 自动审核配置格式错误")
+            entry = {
+                "group_name": group_name,
+                "group_openid": group_openid,
+                "enabled": False,
+                "whitelist_qq_numbers": "",
+                "scan_pending": True,
+                "uid_review_enabled": False,
+                "uid_reject_keywords": "",
+                "button_reject_reason": "管理员拒绝",
+                "platform_id": platform_id,
+                "managed_strategy_id": "",
+                "applied_whitelist": "",
+            }
+            entries.append(entry)
+            self.config["auto_review_groups"] = entries
+        else:
+            entry["group_name"] = group_name
+            entry["platform_id"] = platform_id
+        self.config.save_config()
+        return entry
 
     def _uid_settings(self, entry: dict[str, Any] | None) -> tuple[bool, list[str]]:
         if entry is None:
@@ -380,9 +498,6 @@ class QQGroupAdmin(Star):
             raise ValueError(
                 "当前群已启用 B 站 UID 审核，不能同时使用 QQ 号码白名单策略"
             )
-        if entry and entry.get("platform_id"):
-            entry["platform_id"] = ""
-            self.config.save_config()
 
     def _platform_clients(self) -> dict[str, Any]:
         clients = {}
@@ -542,7 +657,6 @@ class QQGroupAdmin(Star):
         users: list[str],
     ) -> None:
         value = ",".join(users)
-        entry["platform_id"] = ""
         entry["managed_strategy_id"] = strategy_id
         entry["applied_whitelist"] = value
         self.config.save_config()
@@ -577,7 +691,6 @@ class QQGroupAdmin(Star):
         )
         entry["whitelist_qq_numbers"] = ",".join(desired)
         entry["enabled"] = True
-        entry["platform_id"] = ""
         entry["managed_strategy_id"] = strategy_id
         entry["applied_whitelist"] = ",".join(applied)
         self.config.save_config()
@@ -638,6 +751,73 @@ class QQGroupAdmin(Star):
                 ]
             )
         )
+
+    @qq_group_command("审核设置")
+    async def review_settings(self, event: AstrMessageEvent):
+        """发送仅 QQ 群主或管理员可操作的审核设置按钮。"""
+        _, group_openid, _ = self._context(event)
+        client = self._client(event)
+        info = await QQGroupAPI(client).get_group_info(group_openid)
+        group_name = str(info.get("group_name") or "").strip()
+        if not group_name:
+            yield event.plain_result("操作失败：QQ API 未返回群名称")
+            return
+        token = self._settings_token(
+            group_openid,
+            str(event.get_platform_id()),
+            group_name,
+        )
+
+        def button(button_id: str, label: str, action: str, style: int) -> dict:
+            return {
+                "id": button_id,
+                "render_data": {
+                    "label": label,
+                    "visited_label": f"已{label}",
+                    "style": style,
+                },
+                "action": {
+                    "type": 1,
+                    "permission": {"type": 1},
+                    "data": f"qqgs:{token}:{action}",
+                    "unsupport_tips": "当前 QQ 版本不支持设置按钮",
+                },
+            }
+
+        rows = [
+            {
+                "buttons": [
+                    button("bind", "绑定此群", "bind", 1),
+                    button("uid", "启用 UID 审核", "uid", 1),
+                ]
+            },
+            {
+                "buttons": [
+                    button("sync", "应用页面配置", "sync", 0),
+                    button("off", "停用自动审核", "off", 0),
+                ]
+            },
+        ]
+        kwargs = {
+            "group_openid": group_openid,
+            "msg_type": 2,
+            "markdown": {
+                "content": (
+                    f"# {self._markdown_text(group_name)}\n"
+                    "选择当前群的自动审核操作。设置按钮仅群主或群管理员可用。"
+                )
+            },
+            "keyboard": {"content": {"rows": rows}},
+        }
+        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        if message_id:
+            kwargs["msg_id"] = message_id
+        try:
+            await client.api.post_group_message(**kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                "发送审核设置按钮失败；请确认机器人已开通 Markdown 和自定义按钮权限"
+            ) from exc
 
     @qq_admin_command("机器人状态")
     async def bot_state(self, event: AstrMessageEvent):
@@ -857,6 +1037,227 @@ class QQGroupAdmin(Star):
             return f"\n白名单已保存，但待审申请扫描未启动：{exc}"
         return "\n已启动待审申请扫描，QQ 官方预计约 10 分钟完成。"
 
+    async def _sync_group_config(
+        self,
+        client: Any,
+        group_openid: str,
+        entry: dict[str, Any],
+        platform_id: str,
+        *,
+        native_enabled: bool | None = None,
+        uid_enabled: bool | None = None,
+    ) -> str:
+        native_enabled = (
+            bool(entry.get("enabled", False))
+            if native_enabled is None
+            else native_enabled
+        )
+        uid_enabled = (
+            self._uid_settings(entry)[0] if uid_enabled is None else uid_enabled
+        )
+        if uid_enabled and native_enabled:
+            raise ValueError(
+                "QQ 号码白名单会绕过 UID 和关键词检查，两种自动审核不能同时启用"
+            )
+
+        api = QQGroupAPI(client)
+        data = await api.list_strategies(limit=100)
+        strategy = select_group_strategy(data.get("strategies") or [], group_openid)
+        strategy_id = self._strategy_id(strategy) if strategy else ""
+        managed_id = str(entry.get("managed_strategy_id") or "")
+        if strategy is not None and managed_id != strategy_id:
+            raise ValueError(
+                "当前群已有未由本插件管理的 QQ 官方策略，不能自动接管或删除"
+            )
+
+        entry["enabled"] = native_enabled
+        entry["uid_review_enabled"] = uid_enabled
+        entry["platform_id"] = platform_id
+        if not native_enabled:
+            if strategy is not None:
+                await api.delete_strategy(strategy_id)
+            entry["managed_strategy_id"] = ""
+            entry["applied_whitelist"] = ""
+            self.config.save_config()
+            return (
+                "B 站 UID 与关键词自动审核已启用。"
+                if uid_enabled
+                else "两种自动审核均已关闭，群绑定已保留。"
+            )
+
+        desired = parse_qq_number_text(
+            str(entry.get("whitelist_qq_numbers") or "")
+        )
+        if strategy is None:
+            strategy = await api.create_strategy(
+                group_openids=[group_openid],
+                is_enable="on",
+                remark="AstrBot WebUI 自动审核",
+            )
+            strategy_id = self._strategy_id(strategy)
+            self._save_group_config(entry, strategy_id, [])
+        else:
+            await api.update_strategy(strategy_id, {"is_enable": "on"})
+
+        applied = parse_qq_number_text(str(entry.get("applied_whitelist") or ""))
+        additions, removals = whitelist_diff(desired, applied)
+        current = list(applied)
+        for start in range(0, len(removals), 10_000):
+            batch = removals[start : start + 10_000]
+            await api.update_whitelist(strategy_id, op="del", users=batch)
+            removed = set(batch)
+            current = [user for user in current if user not in removed]
+            self._save_group_config(entry, strategy_id, current)
+        for start in range(0, len(additions), 10_000):
+            batch = additions[start : start + 10_000]
+            await api.update_whitelist(strategy_id, op="add", users=batch)
+            current.extend(batch)
+            self._save_group_config(entry, strategy_id, current)
+        scan_result = (
+            await self._scan_pending(api, strategy_id)
+            if bool(entry.get("scan_pending", True)) and desired
+            else ""
+        )
+        self._save_group_config(entry, strategy_id, desired)
+        return (
+            f"QQ 号码白名单已同步：{len(desired)} 人，"
+            f"新增 {len(additions)} 人，移除 {len(removals)} 人。{scan_result}"
+        )
+
+    async def _apply_settings_button(
+        self,
+        client: Any,
+        group_openid: str,
+        platform_id: str,
+        action: str,
+        group_name: str,
+    ) -> None:
+        entry = await self._bind_group(
+            client,
+            group_openid,
+            platform_id,
+            group_name,
+        )
+        if action == "bind":
+            return
+        if action == "uid":
+            await self._sync_group_config(
+                client,
+                group_openid,
+                entry,
+                platform_id,
+                native_enabled=False,
+                uid_enabled=True,
+            )
+        elif action == "off":
+            await self._sync_group_config(
+                client,
+                group_openid,
+                entry,
+                platform_id,
+                native_enabled=False,
+                uid_enabled=False,
+            )
+        else:
+            await self._sync_group_config(
+                client,
+                group_openid,
+                entry,
+                platform_id,
+            )
+
+    def _web_group(self, entry: dict[str, Any]) -> dict[str, Any]:
+        group_openid = str(entry.get("group_openid") or "").strip()
+        group_name = str(entry.get("group_name") or "").strip()
+        native_enabled = bool(entry.get("enabled", False))
+        uid_enabled = bool(entry.get("uid_review_enabled", False))
+        mode = "native" if native_enabled else "uid" if uid_enabled else "off"
+        bound = bool(entry.get("platform_id"))
+        managed = bool(entry.get("managed_strategy_id"))
+        desired = parse_qq_number_text(
+            str(entry.get("whitelist_qq_numbers") or "")
+        )
+        applied = parse_qq_number_text(str(entry.get("applied_whitelist") or ""))
+        synchronized = (
+            bound and managed and desired == applied
+            if mode == "native"
+            else bound and not managed
+            if mode == "uid"
+            else not managed
+        )
+        return {
+            "group_name": group_name or f"未绑定群 {group_openid[:8]}",
+            "group_openid": group_openid,
+            "mode": mode,
+            "bound": bound,
+            "synchronized": synchronized,
+            "whitelist_qq_numbers": "\n".join(desired),
+            "uid_reject_keywords": str(entry.get("uid_reject_keywords") or ""),
+            "scan_pending": bool(entry.get("scan_pending", True)),
+            "button_reject_reason": str(
+                entry.get("button_reject_reason") or "管理员拒绝"
+            ),
+        }
+
+    async def web_groups(self) -> list[dict[str, Any]]:
+        entries = self.config.get("auto_review_groups") or []
+        if not isinstance(entries, list):
+            raise TypeError("WebUI 自动审核配置格式错误")
+        return [
+            self._web_group(entry)
+            for entry in entries
+            if isinstance(entry, dict)
+            and str(entry.get("group_openid") or "").strip()
+        ]
+
+    async def web_save_group(self, payload: dict[str, Any]) -> dict[str, Any]:
+        group_openid = str(payload["group_openid"])
+        entry = self._group_config(group_openid, required=True)
+        mode = str(payload["mode"])
+        entry.update(
+            {
+                "enabled": mode == "native",
+                "uid_review_enabled": mode == "uid",
+                "whitelist_qq_numbers": str(payload["whitelist_qq_numbers"]),
+                "uid_reject_keywords": str(payload["uid_reject_keywords"]),
+                "scan_pending": bool(payload["scan_pending"]),
+                "button_reject_reason": str(payload["button_reject_reason"]),
+            }
+        )
+        self.config.save_config()
+        return self._web_group(entry)
+
+    async def web_sync_group(self, group_openid: str) -> dict[str, Any]:
+        entry = self._group_config(group_openid, required=True)
+        platform_id = str(entry.get("platform_id") or "")
+        client = self._platform_clients().get(platform_id)
+        if client is None:
+            raise RuntimeError("请先在目标群发送 /审核设置 并点击绑定此群")
+        message = await self._sync_group_config(
+            client,
+            group_openid,
+            entry,
+            platform_id,
+        )
+        result = self._web_group(entry)
+        result["result"] = message
+        return result
+
+    async def web_delete_group(self, group_openid: str) -> dict[str, Any]:
+        entry = self._group_config(group_openid, required=True)
+        if (
+            entry.get("enabled")
+            or entry.get("uid_review_enabled")
+            or entry.get("managed_strategy_id")
+        ):
+            raise RuntimeError("请先将审核方式改为关闭、应用成功后再移除")
+        entries = self.config.get("auto_review_groups") or []
+        self.config["auto_review_groups"] = [
+            item for item in entries if item is not entry
+        ]
+        self.config.save_config()
+        return {"group_openid": group_openid}
+
     @qq_admin_command("自动审核状态")
     async def auto_review_state(self, event: AstrMessageEvent):
         """查询当前群的两种自动审核状态。"""
@@ -993,75 +1394,13 @@ class QQGroupAdmin(Star):
         self._confirm(confirmation)
         _, group_openid, _ = self._context(event)
         entry = self._group_config(group_openid, required=True)
-        uid_enabled, _ = self._uid_settings(entry)
-        native_enabled = bool(entry.get("enabled", False))
-        if uid_enabled and native_enabled:
-            raise ValueError(
-                "QQ 号码白名单会绕过 UID 和关键词检查，两种自动审核不能同时启用"
-            )
-        api, _, strategy = await self._auto_strategy(event, required=False)
-        strategy_id = self._strategy_id(strategy) if strategy else ""
-        managed_id = str(entry.get("managed_strategy_id") or "")
-        if strategy is not None and managed_id != strategy_id:
-            raise ValueError(
-                "当前群已有未由 WebUI 配置管理的策略；请先使用 /自动审核关闭 确认"
-            )
-
-        if native_enabled and entry.get("platform_id"):
-            entry["platform_id"] = ""
-            self.config.save_config()
-        if not native_enabled:
-            if strategy is not None:
-                await api.delete_strategy(strategy_id)
-            entry["platform_id"] = str(event.get_platform_id()) if uid_enabled else ""
-            self._clear_group_config(group_openid)
-            yield event.plain_result(
-                "WebUI 配置已同步："
-                + (
-                    "B 站 UID 与关键词自动审核已启用。"
-                    if uid_enabled
-                    else "两种自动审核均已关闭。"
-                )
-            )
-            return
-
-        desired = parse_qq_number_text(str(entry.get("whitelist_qq_numbers") or ""))
-        if strategy is None:
-            strategy = await api.create_strategy(
-                group_openids=[group_openid],
-                is_enable="on",
-                remark="AstrBot WebUI 自动审核",
-            )
-            strategy_id = self._strategy_id(strategy)
-            self._save_group_config(entry, strategy_id, [])
-        else:
-            await api.update_strategy(strategy_id, {"is_enable": "on"})
-
-        applied = parse_qq_number_text(str(entry.get("applied_whitelist") or ""))
-        additions, removals = whitelist_diff(desired, applied)
-        current = list(applied)
-        for start in range(0, len(removals), 10_000):
-            batch = removals[start : start + 10_000]
-            await api.update_whitelist(strategy_id, op="del", users=batch)
-            removed = set(batch)
-            current = [user for user in current if user not in removed]
-            self._save_group_config(entry, strategy_id, current)
-        for start in range(0, len(additions), 10_000):
-            batch = additions[start : start + 10_000]
-            await api.update_whitelist(strategy_id, op="add", users=batch)
-            current.extend(batch)
-            self._save_group_config(entry, strategy_id, current)
-        scan_result = (
-            await self._scan_pending(api, strategy_id)
-            if bool(entry.get("scan_pending", True)) and desired
-            else ""
+        result = await self._sync_group_config(
+            self._client(event),
+            group_openid,
+            entry,
+            str(event.get_platform_id()),
         )
-        self._save_group_config(entry, strategy_id, desired)
-        yield event.plain_result(
-            "WebUI 配置已同步："
-            f"白名单 {len(desired)} 人，新增 {len(additions)} 人，"
-            f"移除 {len(removals)} 人。{scan_result}"
-        )
+        yield event.plain_result(f"配置已同步：{result}")
 
     @qq_admin_command("自动审核关闭")
     async def auto_review_close(

@@ -1,0 +1,114 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>QQ群审核管理</title>
+    <link rel="stylesheet" href="./styles.css">
+  </head>
+  <body>
+    <main class="page">
+      <header class="page-header">
+        <div>
+          <h1>QQ群审核管理</h1>
+          <p>优先在目标群发送 <code>/审核设置</code> 并点击按钮绑定，此处统一调整已绑定群。</p>
+        </div>
+        <div class="header-actions">
+          <button class="button icon-button" id="refresh-button" type="button" aria-label="刷新" title="刷新">&#8635;</button>
+        </div>
+      </header>
+
+      <section class="stats" aria-label="审核概览">
+        <div class="stat"><strong id="stat-total">-</strong><span>群总数</span></div>
+        <div class="stat"><strong id="stat-bound">-</strong><span>已绑定</span></div>
+        <div class="stat"><strong id="stat-active">-</strong><span>运行中</span></div>
+        <div class="stat"><strong id="stat-pending">-</strong><span>待应用</span></div>
+      </section>
+
+      <section class="group-list" aria-labelledby="groups-heading">
+        <div class="list-header">
+          <h2 id="groups-heading">群列表</h2>
+          <label class="search">
+            <span class="sr-only">搜索群</span>
+            <input id="search-input" type="search" placeholder="搜索群名称或 OpenID" autocomplete="off">
+          </label>
+        </div>
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>群</th>
+                <th>审核方式</th>
+                <th>绑定状态</th>
+                <th>应用状态</th>
+                <th class="actions-column">操作</th>
+              </tr>
+            </thead>
+            <tbody id="group-rows">
+              <tr><td class="empty" colspan="5">正在加载...</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </main>
+
+    <dialog id="edit-dialog">
+      <form id="edit-form">
+        <header class="dialog-header">
+          <div>
+            <h2 id="dialog-title">编辑群审核</h2>
+            <p id="dialog-subtitle"></p>
+          </div>
+          <button class="close-button" id="close-dialog" type="button" aria-label="关闭">&times;</button>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>审核方式</span>
+            <select id="mode" name="mode">
+              <option value="off">关闭自动审核</option>
+              <option value="uid">B站 UID 审核</option>
+              <option value="native">QQ 号码白名单</option>
+            </select>
+          </label>
+          <label id="whitelist-field" class="wide conditional">
+            <span>白名单 QQ 号码</span>
+            <textarea id="whitelist" name="whitelist_qq_numbers" rows="5" placeholder="每行一个 QQ 号"></textarea>
+          </label>
+          <label id="keywords-field" class="wide conditional">
+            <span>验证消息拒绝关键词</span>
+            <textarea id="keywords" name="uid_reject_keywords" rows="4" placeholder="每行一个关键词"></textarea>
+          </label>
+          <label class="wide">
+            <span>按钮拒绝理由</span>
+            <input id="reject-reason" name="button_reject_reason" maxlength="128" value="管理员拒绝">
+          </label>
+          <label class="checkbox wide" id="scan-field">
+            <input id="scan-pending" name="scan_pending" type="checkbox">
+            <span>应用白名单策略后扫描待审申请</span>
+          </label>
+        </div>
+
+        <footer class="dialog-actions">
+          <button class="button secondary" id="cancel-edit" type="button">取消</button>
+          <button class="button" id="save-button" type="submit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="confirm-dialog" class="confirm-dialog">
+      <form method="dialog">
+        <h2 id="confirm-title">确认操作</h2>
+        <p id="confirm-text"></p>
+        <div class="dialog-actions">
+          <button class="button secondary" value="cancel">取消</button>
+          <button class="button danger" id="confirm-button" value="confirm">确认</button>
+        </div>
+      </form>
+    </dialog>
+
+    <div class="toast" id="toast" role="status" aria-live="polite"></div>
+    <script src="/api/plugin/page/bridge-sdk.js"></script>
+    <script src="./app.js"></script>
+  </body>
+</html>
