@@ -91,6 +91,7 @@ class FakeClientAPI:
 
     async def post_group_message(self, **kwargs):
         self.messages.append(kwargs)
+        return SimpleNamespace(id=f"sent-{len(self.messages)}")
 
     async def on_interaction_result(self, interaction_id, code):
         self.acks.append((interaction_id, code))
@@ -257,7 +258,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             get_group_info=AsyncMock(return_value={"group_name": "测试群"}),
             list_strategies=AsyncMock(return_value={"strategies": []}),
         )
-        with patch.object(module, "QQGroupAPI", return_value=api):
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(plugin, "_schedule_settings_recall") as schedule_recall,
+        ):
             results = [result async for result in plugin.review_settings(event)]
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
@@ -273,13 +277,29 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         ]
         self.assertEqual(
             [button["action"]["data"].rsplit(":", 1)[1] for button in buttons],
-            ["bind", "uid", "sync", "off"],
+            [
+                "bind",
+                "native",
+                "conditional",
+                "off",
+                "uid_on",
+                "uid_off",
+                "direct_on",
+                "direct_off",
+                "all",
+                "any",
+                "pending",
+                "decline",
+                "approve",
+                "sync",
+            ],
         )
         self.assertTrue(
             all(button["action"]["permission"] == {"type": 1} for button in buttons)
         )
 
-        uid_data = buttons[1]["action"]["data"]
+        schedule_recall.assert_called_once_with(client, "group-1", "sent-1")
+        uid_data = buttons[2]["action"]["data"]
         interaction = SimpleNamespace(
             id="settings-wrong-group",
             type=11,
@@ -312,6 +332,35 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(entry["enabled"])
         self.assertEqual(client.api.acks[-1], ("settings-off", 0))
         self.assertGreater(plugin.config.save_count, 0)
+
+    async def test_settings_buttons_update_conditions_and_recall(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+
+        for action, expected in (
+            ("direct_on", ("uid_exists_auto_approve", True)),
+            ("any", ("condition_logic", "any")),
+            ("approve", ("fallback_action", "approve")),
+            ("uid_off", ("uid_check_enabled", False)),
+        ):
+            await plugin._apply_settings_button(
+                client,
+                "group-1",
+                "platform-1",
+                action,
+                "测试群",
+            )
+            self.assertEqual(entry[expected[0]], expected[1])
+        self.assertFalse(entry["uid_exists_auto_approve"])
+
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        with (
+            patch.object(module.asyncio, "sleep", AsyncMock()) as sleep,
+            patch.object(module, "QQGroupAPI", return_value=api),
+        ):
+            await plugin._recall_settings_message(client, "group-1", "sent-1")
+        sleep.assert_awaited_once_with(module.SETTINGS_MESSAGE_TTL)
+        api.recall_group_message.assert_awaited_once_with("group-1", "sent-1")
 
     async def test_uid_button_does_not_take_over_unmanaged_strategy(self):
         plugin, client = self.plugin()

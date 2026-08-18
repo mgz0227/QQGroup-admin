@@ -144,6 +144,19 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(kwargs["json"], {"limit": 100, "cursor": "next"})
 
+    async def test_recall_group_message(self):
+        client = FakeClient(FakeResponse(200))
+
+        await QQGroupAPI(client).recall_group_message("group/openid", "message/id")
+
+        method, url, kwargs = client.http._session.calls[0]
+        self.assertEqual(method, "DELETE")
+        self.assertEqual(
+            url,
+            "https://api.bot.qq.com/v2/groups/group%2Fopenid/messages/message%2Fid",
+        )
+        self.assertNotIn("json", kwargs)
+
     async def test_error_keeps_code_and_trace_id(self):
         client = FakeClient(
             FakeResponse(

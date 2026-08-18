@@ -257,6 +257,18 @@ class QQGroupAPI:
         group = self._id(group_openid, "群 OpenID")
         return await self._request("GET", f"/v2/groups/{group}/info")
 
+    async def recall_group_message(
+        self,
+        group_openid: str,
+        message_id: str,
+    ) -> Any:
+        group = self._id(group_openid, "群 OpenID")
+        message = self._id(message_id, "消息 ID")
+        return await self._request(
+            "DELETE",
+            f"/v2/groups/{group}/messages/{message}",
+        )
+
     async def get_bot_state(self, group_openid: str) -> dict[str, Any]:
         group = self._id(group_openid, "群 OpenID")
         return await self._request("GET", f"/v2/groups/{group}/bot_state")

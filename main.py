@@ -40,10 +40,28 @@ QQ_PLATFORM_TYPES = (
 QQ_PLATFORM_NAMES = {"qq_official", "qq_official_webhook"}
 INTERACTION_INTENT = 1 << 26
 BUTTON_TOKEN_TTL = 15 * 60
+SETTINGS_MESSAGE_TTL = 45
 JOIN_LIST_LIMIT = 5
 GROUP_TEMPLATE_KEY = "qq_group"
 CONDITION_LOGICS = {"all", "any"}
 FALLBACK_ACTIONS = {"pending", "decline", "approve"}
+SETTINGS_ACTIONS = {
+    "bind",
+    "native",
+    "uid",
+    "conditional",
+    "uid_on",
+    "uid_off",
+    "direct_on",
+    "direct_off",
+    "all",
+    "any",
+    "pending",
+    "decline",
+    "approve",
+    "sync",
+    "off",
+}
 
 
 class WakeCommandFilter(filter.CustomFilter):
@@ -134,6 +152,7 @@ class QQGroupAdmin(Star):
         super().__init__(context)
         self.config = config
         self._review_task: asyncio.Task[None] | None = None
+        self._recall_tasks: set[asyncio.Task[None]] = set()
         self._approval_lock = asyncio.Lock()
         self._last_approval_at = 0.0
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
@@ -196,6 +215,12 @@ class QQGroupAdmin(Star):
             with suppress(asyncio.CancelledError):
                 await self._review_task
             self._review_task = None
+        recall_tasks = tuple(self._recall_tasks)
+        for task in recall_tasks:
+            task.cancel()
+        if recall_tasks:
+            await asyncio.gather(*recall_tasks, return_exceptions=True)
+        self._recall_tasks.clear()
         for client, previous in self._patched_clients.items():
             handler = getattr(client, "on_interaction_create", None)
             if getattr(handler, "__qqgroup_admin_owner__", None) is self:
@@ -374,11 +399,7 @@ class QQGroupAdmin(Star):
             or len(parts) != 3
             or parts[0] not in {"qqga", "qqgs"}
             or parts[2]
-            not in (
-                {"approve", "decline"}
-                if parts[0] == "qqga"
-                else {"bind", "uid", "sync", "off"}
-            )
+            not in ({"approve", "decline"} if parts[0] == "qqga" else SETTINGS_ACTIONS)
         ):
             return False
 
@@ -917,23 +938,65 @@ class QQGroupAdmin(Star):
             {
                 "buttons": [
                     button("bind", "绑定此群", "bind", 1),
-                    button("uid", "启用条件审核", "uid", 1),
+                    button("native", "QQ 白名单", "native", 1),
+                    button("conditional", "条件审核", "conditional", 1),
+                    button("off", "关闭审核", "off", 0),
                 ]
             },
             {
                 "buttons": [
-                    button("sync", "应用页面配置", "sync", 0),
-                    button("off", "停用自动审核", "off", 0),
+                    button("uid_on", "UID 检查开", "uid_on", 1),
+                    button("uid_off", "UID 检查关", "uid_off", 0),
+                    button("direct_on", "UID 直通开", "direct_on", 1),
+                    button("direct_off", "UID 直通关", "direct_off", 0),
                 ]
             },
+            {
+                "buttons": [
+                    button("all", "全部满足", "all", 1),
+                    button("any", "任一满足", "any", 1),
+                ]
+            },
+            {
+                "buttons": [
+                    button("pending", "未通过待审", "pending", 0),
+                    button("decline", "未通过拒绝", "decline", 0),
+                    button("approve", "未通过同意", "approve", 0),
+                ]
+            },
+            {"buttons": [button("sync", "应用当前配置", "sync", 1)]},
         ]
+        entry = self._group_config(group_openid)
+        settings = self._condition_settings(entry) if entry else {}
+        mode = (
+            "QQ 白名单"
+            if entry and entry.get("enabled")
+            else "条件审核"
+            if settings.get("enabled")
+            else "已关闭"
+            if entry
+            else "未绑定"
+        )
+        logic = (
+            "全部满足"
+            if settings.get("condition_logic", "all") == "all"
+            else "任一满足"
+        )
+        fallback = {
+            "pending": "保留待审",
+            "decline": "拒绝",
+            "approve": "同意",
+        }.get(settings.get("fallback_action", "pending"), "保留待审")
         kwargs = {
             "group_openid": group_openid,
             "msg_type": 2,
             "markdown": {
                 "content": (
                     f"# {self._markdown_text(group_name)}\n"
-                    "选择当前群的自动审核操作。设置按钮仅群主或群管理员可用。"
+                    f"审核：{mode}；UID 检查：{'开' if settings.get('uid_check_enabled', True) else '关'}；"
+                    f"UID 直通：{'开' if settings.get('uid_exists_auto_approve') else '关'}\n"
+                    f"条件：{logic}；未通过：{fallback}\n"
+                    f"设置按钮仅群主或群管理员可用，{SETTINGS_MESSAGE_TTL} 秒后自动撤回。"
                 )
             },
             "keyboard": {"content": {"rows": rows}},
@@ -942,7 +1005,7 @@ class QQGroupAdmin(Star):
         if message_id:
             kwargs["msg_id"] = message_id
         try:
-            await client.api.post_group_message(**kwargs)
+            sent = await client.api.post_group_message(**kwargs)
         except Exception as exc:
             detail = self._plain_text(exc, 240)
             self.logger.warning("发送审核设置按钮失败：%s", exc)
@@ -950,8 +1013,41 @@ class QQGroupAdmin(Star):
                 "发送审核设置按钮失败；请确认 Markdown 和自定义按钮权限"
                 f"（QQ 返回：{detail}）"
             ) from exc
+        raw_sent_id = (
+            sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "")
+        )
+        sent_id = str(raw_sent_id or "")
+        if sent_id:
+            self._schedule_settings_recall(client, group_openid, sent_id)
+        else:
+            self.logger.warning("QQ 未返回审核设置消息 ID，无法自动撤回")
         if hasattr(event, "stop_event"):
             event.stop_event()
+
+    def _schedule_settings_recall(
+        self,
+        client: Any,
+        group_openid: str,
+        message_id: str,
+    ) -> None:
+        task = asyncio.create_task(
+            self._recall_settings_message(client, group_openid, message_id),
+            name="qqgroup-admin-settings-recall",
+        )
+        self._recall_tasks.add(task)
+        task.add_done_callback(self._recall_tasks.discard)
+
+    async def _recall_settings_message(
+        self,
+        client: Any,
+        group_openid: str,
+        message_id: str,
+    ) -> None:
+        await asyncio.sleep(SETTINGS_MESSAGE_TTL)
+        try:
+            await QQGroupAPI(client).recall_group_message(group_openid, message_id)
+        except QQAPIError as exc:
+            self.logger.warning("自动撤回审核设置消息失败：%s", exc)
 
     @qq_admin_command("机器人状态")
     async def bot_state(self, event: AstrMessageEvent):
@@ -1361,7 +1457,27 @@ class QQGroupAdmin(Star):
         )
         if action == "bind":
             return
-        if action == "uid":
+        updates = {
+            "uid_on": ("uid_check_enabled", True),
+            "uid_off": ("uid_check_enabled", False),
+            "direct_on": ("uid_exists_auto_approve", True),
+            "direct_off": ("uid_exists_auto_approve", False),
+            "all": ("condition_logic", "all"),
+            "any": ("condition_logic", "any"),
+            "pending": ("fallback_action", "pending"),
+            "decline": ("fallback_action", "decline"),
+            "approve": ("fallback_action", "approve"),
+        }
+        if action in updates:
+            key, value = updates[action]
+            entry[key] = value
+            if action == "uid_off":
+                entry["uid_exists_auto_approve"] = False
+            elif action == "direct_on":
+                entry["uid_check_enabled"] = True
+            self.config.save_config()
+            return
+        if action in {"uid", "conditional"}:
             await self._sync_group_config(
                 client,
                 group_openid,
@@ -1369,6 +1485,15 @@ class QQGroupAdmin(Star):
                 platform_id,
                 native_enabled=False,
                 uid_enabled=True,
+            )
+        elif action == "native":
+            await self._sync_group_config(
+                client,
+                group_openid,
+                entry,
+                platform_id,
+                native_enabled=True,
+                uid_enabled=False,
             )
         elif action == "off":
             await self._sync_group_config(
