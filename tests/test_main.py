@@ -294,6 +294,16 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "sync",
             ],
         )
+        self.assertEqual(
+            [button["render_data"]["label"] for button in buttons[:8]],
+            ["绑定", "白名单", "条件", "关闭", "UID开", "UID关", "直通开", "直通关"],
+        )
+        self.assertTrue(
+            all(
+                button["render_data"]["visited_label"] == button["render_data"]["label"]
+                for button in buttons
+            )
+        )
         self.assertTrue(
             all(button["action"]["permission"] == {"type": 1} for button in buttons)
         )

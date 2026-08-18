@@ -923,7 +923,7 @@ class QQGroupAdmin(Star):
                 "id": button_id,
                 "render_data": {
                     "label": label,
-                    "visited_label": f"已{label}",
+                    "visited_label": label,
                     "style": style,
                 },
                 "action": {
@@ -937,18 +937,18 @@ class QQGroupAdmin(Star):
         rows = [
             {
                 "buttons": [
-                    button("bind", "绑定此群", "bind", 1),
-                    button("native", "QQ 白名单", "native", 1),
-                    button("conditional", "条件审核", "conditional", 1),
-                    button("off", "关闭审核", "off", 0),
+                    button("bind", "绑定", "bind", 1),
+                    button("native", "白名单", "native", 1),
+                    button("conditional", "条件", "conditional", 1),
+                    button("off", "关闭", "off", 0),
                 ]
             },
             {
                 "buttons": [
-                    button("uid_on", "UID 检查开", "uid_on", 1),
-                    button("uid_off", "UID 检查关", "uid_off", 0),
-                    button("direct_on", "UID 直通开", "direct_on", 1),
-                    button("direct_off", "UID 直通关", "direct_off", 0),
+                    button("uid_on", "UID开", "uid_on", 1),
+                    button("uid_off", "UID关", "uid_off", 0),
+                    button("direct_on", "直通开", "direct_on", 1),
+                    button("direct_off", "直通关", "direct_off", 0),
                 ]
             },
             {
