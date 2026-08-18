@@ -504,6 +504,62 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].kwargs["op"], "approve")
         self.assertEqual(calls[0].args[1], "member-2")
 
+    async def test_bilibili_failure_does_not_skip_later_hard_reject(self):
+        plugin, _ = self.plugin()
+        api = SimpleNamespace(
+            list_join_requests=AsyncMock(
+                return_value={
+                    "list": [
+                        {
+                            "member_openid": "member-1",
+                            "join_request_id": "request-1",
+                            "apply_source": "self_apply",
+                            "verify_info": {"verify_message": "UID:188144093"},
+                        },
+                        {
+                            "member_openid": "member-2",
+                            "join_request_id": "request-2",
+                            "apply_source": "self_apply",
+                            "verify_info": {"verify_message": "广告"},
+                        },
+                    ],
+                    "next_cursor": "",
+                }
+            ),
+            approve_join_request=AsyncMock(),
+        )
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(
+                module,
+                "bilibili_uid_exists",
+                AsyncMock(side_effect=module.BilibiliLookupError("限流")),
+            ),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+        ):
+            await plugin._poll_uid_group(
+                object(),
+                "platform-1",
+                "group-1",
+                {
+                    "uid_check_enabled": True,
+                    "approve_keywords": [],
+                    "reject_keywords": ["广告"],
+                    "condition_logic": "all",
+                    "fallback_action": "decline",
+                },
+            )
+
+        api.approve_join_request.assert_awaited_once()
+        self.assertEqual(
+            api.approve_join_request.await_args.args[1],
+            "member-2",
+        )
+        self.assertEqual(
+            api.approve_join_request.await_args.kwargs["reject_reason"],
+            "验证消息包含拒绝关键词",
+        )
+
     async def test_compact_mute_uses_seconds_and_custom_mention_reply(self):
         plugin, client = self.plugin()
         plugin.config.update(

@@ -688,7 +688,7 @@ class QQGroupAdmin(Star):
                         failure_reason = "未提供有效的 B 站 UID"
                     else:
                         if time.monotonic() < self._bilibili_retry_at:
-                            return
+                            continue
                         try:
                             exists = await bilibili_uid_exists(uid)
                         except BilibiliLookupError as exc:
@@ -700,7 +700,7 @@ class QQGroupAdmin(Star):
                                 "B 站 UID 查询暂不可用，本轮保留待审申请：%s",
                                 exc,
                             )
-                            return
+                            continue
                         checks.append(exists)
                         if not exists:
                             failure_reason = "B 站 UID 不存在"
