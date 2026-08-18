@@ -372,6 +372,37 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         sleep.assert_awaited_once_with(module.SETTINGS_MESSAGE_TTL)
         api.recall_group_message.assert_awaited_once_with("group-1", "sent-1")
 
+    async def test_settings_panel_can_disable_auto_recall(self):
+        plugin, client = self.plugin()
+        plugin.config["settings_panel_auto_recall"] = False
+        event = FakeEvent(client)
+        api = SimpleNamespace(
+            get_group_info=AsyncMock(return_value={"group_name": "测试群"}),
+        )
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(plugin, "_schedule_settings_recall") as schedule_recall,
+        ):
+            results = [result async for result in plugin.review_settings(event)]
+
+        self.assertEqual(results, [])
+        schedule_recall.assert_not_called()
+        self.assertIn(
+            "面板不会自动撤回",
+            client.api.messages[-1]["markdown"]["content"],
+        )
+
+    async def test_settings_command_can_be_disabled(self):
+        plugin, client = self.plugin()
+        plugin.config["settings_command_enabled"] = False
+        event = FakeEvent(client)
+
+        results = [result async for result in plugin.review_settings(event)]
+
+        self.assertEqual(results, [])
+        self.assertTrue(event.stopped)
+        self.assertEqual(client.api.messages, [])
+
     async def test_uid_button_does_not_take_over_unmanaged_strategy(self):
         plugin, client = self.plugin()
         entry = plugin.config["auto_review_groups"][0]
@@ -703,10 +734,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_compact_mute_uses_seconds_and_custom_mention_reply(self):
         plugin, client = self.plugin()
-        plugin.config.update(
-            mute_success_message="已禁言 {duration} 秒",
-            mute_reply_at_member=True,
-        )
+        plugin.config["mute_success_message"] = "已禁言 {duration} 秒：{at_user}"
         event = FakeEvent(client, "/禁言<@member-1> 45")
         event.message_obj.raw_message.mentions = [
             SimpleNamespace(member_openid="member-1", is_you=False)
@@ -724,7 +752,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         mute = api.set_member_mutes.await_args.args[1][0]
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
-        self.assertEqual(client.api.messages[-1]["content"], "<@member-1> 已禁言 45 秒")
+        self.assertEqual(
+            client.api.messages[-1]["content"],
+            '已禁言 45 秒：<qqbot-at-user id="member-1" />',
+        )
 
     async def test_standard_mute_stops_after_direct_mention_reply(self):
         plugin, client = self.plugin()
@@ -742,6 +773,102 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
+        self.assertTrue(
+            client.api.messages[-1]["content"].startswith(
+                '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
+            )
+        )
+
+    async def test_mute_template_keeps_at_tag_when_text_is_long(self):
+        plugin, client = self.plugin()
+        plugin.config["mute_success_message"] = "x" * 995 + " {at_user}"
+        event = FakeEvent(client)
+
+        result = await plugin._send_mute_success(
+            event,
+            "member-1",
+            "45",
+            "2026-08-19T00:00:00+08:00",
+        )
+
+        self.assertIsNone(result)
+        content = client.api.messages[-1]["content"]
+        self.assertLessEqual(len(content), 1000)
+        self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
+
+        plugin.config["mute_success_message"] = "{at_user}" * 40
+        await plugin._send_mute_success(event, "member-1", "45", "ignored")
+        content = client.api.messages[-1]["content"]
+        mention = '<qqbot-at-user id="member-1" />'
+        self.assertEqual(content, mention * (1000 // len(mention)))
+
+    async def test_web_batch_save_and_sync(self):
+        plugin, _client = self.plugin()
+        plugin.config["auto_review_groups"] = [
+            {
+                "group_openid": "group-1",
+                "group_name": "一群",
+                "platform_id": "platform-1",
+            },
+            {
+                "group_openid": "group-2",
+                "group_name": "二群",
+                "platform_id": "platform-1",
+            },
+        ]
+        web = module.GroupAdminWeb(plugin, plugin.context)
+        payloads = await web._validated_batch_save(
+            {
+                "group_openids": ["group-1", "group-2"],
+                "changes": {
+                    "mode": "conditional",
+                    "uid_exists_auto_approve": True,
+                    "reject_keywords": "广告,推广",
+                },
+            }
+        )
+        saves_before = plugin.config.save_count
+
+        updated = await plugin.web_batch_save(payloads)
+        groups = await plugin.web_groups()
+
+        self.assertEqual(plugin.config.save_count, saves_before + 1)
+        self.assertEqual(updated, ["group-1", "group-2"])
+        self.assertEqual([group["mode"] for group in groups], ["conditional"] * 2)
+        for entry in plugin.config["auto_review_groups"]:
+            self.assertTrue(entry["uid_check_enabled"])
+            self.assertTrue(entry["uid_exists_auto_approve"])
+            self.assertEqual(entry["reject_keywords"], "广告\n推广")
+
+        plugin.web_sync_group = AsyncMock(
+            side_effect=[groups[0], AssertionError("unexpected"), groups[1]]
+        )
+        results = await plugin.web_batch_sync(["group-1", "group-2", "group-3"])
+        self.assertTrue(results[0]["ok"])
+        self.assertNotIn("group", results[0])
+        self.assertFalse(results[1]["ok"])
+        self.assertEqual(results[1]["error"], "服务器处理失败，请查看 AstrBot 日志")
+        self.assertTrue(results[2]["ok"])
+
+        web_module = sys.modules[module.GroupAdminWeb.__module__]
+        with (
+            patch.object(web_module, "BATCH_TEXT_BUDGET", 1),
+            self.assertRaisesRegex(ValueError, "批量配置内容过大"),
+        ):
+            await web._validated_batch_save(
+                {
+                    "group_openids": ["group-1"],
+                    "changes": {"mode": "conditional"},
+                }
+            )
+
+        with self.assertRaisesRegex(ValueError, "不支持批量修改字段"):
+            await web._validated_batch_save(
+                {
+                    "group_openids": ["group-1"],
+                    "changes": {"platform_id": "other"},
+                }
+            )
 
     def test_compact_commands_require_wake_prefix(self):
         _plugin, client = self.plugin()
@@ -756,13 +883,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
     def test_legacy_config_is_migrated_once(self):
         config = TestConfig(
+            mute_success_message="已禁言 {duration} 秒",
+            mute_reply_at_member=True,
             auto_review_groups=[
                 {
                     "group_openid": "group-1",
                     "uid_review_enabled": True,
                     "uid_reject_keywords": "广告",
                 }
-            ]
+            ],
         )
         context = SimpleNamespace(get_platform_inst=lambda _platform_id: None)
 
@@ -774,6 +903,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(entry["uid_exists_auto_approve"])
         self.assertEqual(entry["fallback_action"], "decline")
         self.assertNotIn("uid_reject_keywords", entry)
+        self.assertEqual(
+            config["mute_success_message"],
+            "{at_user} 已禁言 {duration} 秒",
+        )
+        self.assertFalse(config["mute_reply_at_member"])
         self.assertEqual(config.save_count, 1)
 
 

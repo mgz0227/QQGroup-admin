@@ -46,7 +46,7 @@ https://github.com/mgz0227/QQGroup-admin
 | `/群信息` | 查询群信息，并显示当前群和自己的 OpenID |
 | `/机器人状态` | 查询机器人群角色和消息接收状态 |
 | `/申请列表 [游标]` | 每页查询 5 条待审申请，并显示同意/拒绝按钮 |
-| `/审核设置` | 显示审核模式、UID、条件组合、兜底动作和应用按钮，45 秒后自动撤回 |
+| `/审核设置` | 显示审核模式、UID、条件组合、兜底动作和应用按钮；默认 45 秒后自动撤回 |
 | `/禁言状态` | 查询全员规则和当前成员禁言 |
 | `/禁言 <成员OpenID\|@成员> <时长>` | 新增或更新禁言；纯数字按秒，也支持 `30m`、`2h`、`7d` |
 | `/禁言@成员 <时长>` | 无空格写法，纯数字按秒 |
@@ -60,7 +60,7 @@ https://github.com/mgz0227/QQGroup-admin
 
 ## 多群管理页面
 
-插件会在 AstrBot WebUI 的“插件页面”中增加“QQ群审核管理”。页面按真实群名称列出所有已绑定群，支持搜索，并为每个群独立配置：
+插件会在 AstrBot WebUI 的“插件页面”中增加“QQ群审核管理”。页面按真实群名称列出所有已绑定群，支持搜索、多选、批量编辑和批量应用，也可为每个群独立配置：
 
 - 群 OpenID
 - 是否启用 QQ 号码白名单策略
@@ -81,7 +81,11 @@ https://github.com/mgz0227/QQGroup-admin
 
 两种自动审核不能在同一群同时启用。QQ 原生白名单可能在插件读取验证消息前直接放行，因此同步命令会拒绝这种配置。
 
-WebUI 保存的是期望状态。绑定后修改条件会在下个周期生效；切换 QQ 白名单策略需点击“应用”。插件隐藏记录策略 ID、平台 ID 和上次成功应用的白名单，后续只增删名单差异。通用插件配置页还可设置最高优先级的全局拒绝关键词、自定义禁言成功回复，并决定是否艾特被禁言成员。
+WebUI 保存的是期望状态。绑定后修改条件会在下个周期生效；切换 QQ 白名单策略需点击“应用”。插件隐藏记录策略 ID、平台 ID 和上次成功应用的白名单，后续只增删名单差异。批量编辑只覆盖明确选择的字段，空文本只有勾选“覆盖”时才会清空原值；单次最多选择 100 个群，超大白名单需分批处理。批量应用会逐群执行，汇总成功/失败数量并显示首个失败原因。
+
+通用插件配置页还可设置最高优先级的全局拒绝关键词、审核设置面板是否在 45 秒后自动撤回，以及禁言成功回复。禁言回复支持 `{at_user}`、`{duration}`、`{expire_at}`、`{member_openid}` 变量；将 `{at_user}` 放在模板任意位置即可使用 QQ 原生艾特，不填写则不艾特。
+
+通用配置中的“启用审核设置命令”默认开启；关闭后群内 `/审核设置` 不会发送面板，重新开启需在 AstrBot 插件配置中操作。
 
 ## 自动审核
 
@@ -101,7 +105,7 @@ WebUI 保存的是期望状态。绑定后修改条件会在下个周期生效�
 
 `/申请列表` 使用 QQ 原生回调按钮，只有 QQ 群主或管理员能点击，没有文字审批命令回退。按钮凭据 15 分钟后失效，AstrBot 重启后旧按钮也会失效，重新查询即可。
 
-`/审核设置` 本身允许群成员唤出面板，但所有设置按钮均使用 QQ 的管理员按钮权限，普通群成员不能执行。群内可选择审核模式、UID 检查、有效 UID 直通、AND/OR 和兜底动作；关键词仍在 WebUI 中编辑。设置面板发送 45 秒后自动撤回。停用时仅删除本插件记录的 QQ 官方策略，不会接管或删除未托管策略。
+`/审核设置` 本身允许群成员唤出面板，但所有设置按钮均使用 QQ 的管理员按钮权限，普通群成员不能执行。群内可选择审核模式、UID 检查、有效 UID 直通、AND/OR 和兜底动作；关键词仍在 WebUI 中编辑。设置面板默认在发送 45 秒后自动撤回，可在通用插件配置中关闭。停用时仅删除本插件记录的 QQ 官方策略，不会接管或删除未托管策略。
 
 AstrBot `4.27.3` 尚未公开按钮组件和互动事件插件接口，本插件在 QQ 适配器启动前启用互动 intent，并复用其 botpy 客户端发送键盘。插件只消费自己的按钮，其他互动事件会继续交给原处理器。首次安装、热重载插件或修改平台后请重启 AstrBot（或重载 QQ 适配器）；Webhook 模式还需在 QQ 开放平台订阅 `INTERACTION_CREATE`。该兼容桥已锁定 AstrBot `4.27.3 <= version < 5`，升级 AstrBot 后应重新验证。
 
@@ -116,8 +120,10 @@ QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转�
 - [QQ 机器人群聊管理接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_info.get.html)
 - [QQ 入群自动审批策略](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_join_approval_strategy.post.html)
 - [QQ 群消息与按钮](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
+- [QQ 文本交互与艾特格式](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/text-chain.html)
 - [QQ 互动事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)
 - [Bilibili API Collect：用户名片信息](https://github.com/Goooler/bilibili-API-collect/blob/trunk/docs/user/info.md#用户名片信息)
+- [astrbot_plugin_qq_group_admin](https://github.com/CyreneLian/astrbot_plugin_qq_group_admin)（插件管理页面入口的设计参考）
 - [AstrBot 插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)
 - [AstrBot 插件配置指南](https://docs.astrbot.app/dev/star/guides/plugin-config.html)
 

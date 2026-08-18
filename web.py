@@ -11,6 +11,26 @@ from .qq_api import parse_qq_number_text
 from .review import parse_keywords
 
 PLUGIN_NAME = "astrbot_plugin_qqgroup_admin"
+BATCH_GROUP_LIMIT = 100
+BATCH_TEXT_BUDGET = 4_000_000
+BATCH_FIELDS = {
+    "mode",
+    "whitelist_qq_numbers",
+    "uid_check_enabled",
+    "uid_exists_auto_approve",
+    "approve_keywords",
+    "reject_keywords",
+    "condition_logic",
+    "fallback_action",
+    "scan_pending",
+    "button_reject_reason",
+}
+BATCH_TEXT_FIELDS = {
+    "whitelist_qq_numbers",
+    "approve_keywords",
+    "reject_keywords",
+    "button_reject_reason",
+}
 
 
 class GroupAdminWeb:
@@ -141,6 +161,57 @@ class GroupAdminWeb:
             raise ValueError("群 OpenID 不能包含空白字符")
         return group_openid
 
+    @classmethod
+    def _validated_groups(cls, value: Any) -> list[str]:
+        if not isinstance(value, list) or not value:
+            raise ValueError("请至少选择一个群")
+        if len(value) > BATCH_GROUP_LIMIT:
+            raise ValueError(f"单次最多处理 {BATCH_GROUP_LIMIT} 个群")
+        group_openids = [cls._validated_group({"group_openid": item}) for item in value]
+        if len(set(group_openids)) != len(group_openids):
+            raise ValueError("群列表不能包含重复项")
+        return group_openids
+
+    async def _validated_batch_save(self, payload: Any) -> list[dict[str, Any]]:
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        group_openids = self._validated_groups(payload.get("group_openids"))
+        changes = payload.get("changes")
+        if not isinstance(changes, dict) or not changes:
+            raise ValueError("请至少选择一项批量修改内容")
+        unknown = set(changes) - BATCH_FIELDS
+        if unknown:
+            raise ValueError(f"不支持批量修改字段：{', '.join(sorted(unknown))}")
+
+        current = {
+            str(group.get("group_openid") or ""): group
+            for group in await self._groups()
+        }
+        missing = [group_id for group_id in group_openids if group_id not in current]
+        if missing:
+            raise LookupError(f"找不到群配置：{missing[0]}")
+        validated = []
+        text_size = 0
+        for group_id in group_openids:
+            merged = {
+                **current[group_id],
+                **changes,
+                **(
+                    {"uid_check_enabled": True}
+                    if changes.get("uid_exists_auto_approve") is True
+                    and "uid_check_enabled" not in changes
+                    else {}
+                ),
+                "group_openid": group_id,
+            }
+            text_size += sum(
+                len(str(merged.get(key) or "")) for key in BATCH_TEXT_FIELDS
+            )
+            if text_size > BATCH_TEXT_BUDGET:
+                raise ValueError("批量配置内容过大，请减少群数量后分批处理")
+            validated.append(self._validated_save(merged))
+        return validated
+
     async def _payload(self) -> Any:
         return await request.json(default=None)
 
@@ -186,6 +257,25 @@ class GroupAdminWeb:
         )
         return self._response(result, message="配置已应用")
 
+    async def page_batch_save(self) -> Any:
+        result = await self.plugin.web_batch_save(
+            await self._validated_batch_save(await self._payload())
+        )
+        return self._response(result, message=f"已更新 {len(result)} 个群")
+
+    async def page_batch_sync(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        result = await self.plugin.web_batch_sync(
+            self._validated_groups(payload.get("group_openids"))
+        )
+        succeeded = sum(bool(item.get("ok")) for item in result)
+        return self._response(
+            result,
+            message=f"应用完成：成功 {succeeded} 个，失败 {len(result) - succeeded} 个",
+        )
+
     def _wrap(
         self, handler: Callable[[], Awaitable[Any]]
     ) -> Callable[[], Awaitable[Any]]:
@@ -212,6 +302,8 @@ class GroupAdminWeb:
             ("/save", self.page_save, ["POST"], "保存QQ群审核配置"),
             ("/delete", self.page_delete, ["POST"], "移除QQ群审核配置"),
             ("/sync", self.page_sync, ["POST"], "应用QQ群审核配置"),
+            ("/batch-save", self.page_batch_save, ["POST"], "批量保存QQ群审核配置"),
+            ("/batch-sync", self.page_batch_sync, ["POST"], "批量应用QQ群审核配置"),
         )
         for path, handler, methods, description in routes:
             self.context.register_web_api(

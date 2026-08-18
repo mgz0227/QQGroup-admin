@@ -33,10 +33,24 @@
             <input id="search-input" type="search" placeholder="搜索群名称或 OpenID" autocomplete="off">
           </label>
         </div>
+        <div class="batch-toolbar" id="batch-toolbar" hidden>
+          <span>已选择 <strong id="selected-count">0</strong> 个群</span>
+          <div class="batch-actions">
+            <button class="button secondary" id="batch-edit-button" type="button">批量编辑</button>
+            <button class="button" id="batch-sync-button" type="button">批量应用</button>
+            <button class="text-button" id="clear-selection-button" type="button">清除选择</button>
+          </div>
+        </div>
         <div class="table-wrap">
           <table>
             <thead>
               <tr>
+                <th class="selection-column">
+                  <label>
+                    <span class="sr-only">选择当前筛选结果</span>
+                    <input class="selection-checkbox" id="select-visible" type="checkbox" disabled>
+                  </label>
+                </th>
                 <th>群</th>
                 <th>审核方式</th>
                 <th>绑定状态</th>
@@ -45,7 +59,7 @@
               </tr>
             </thead>
             <tbody id="group-rows">
-              <tr><td class="empty" colspan="5">正在加载...</td></tr>
+              <tr><td class="empty" colspan="6">正在加载...</td></tr>
             </tbody>
           </table>
         </div>
@@ -119,6 +133,105 @@
         <footer class="dialog-actions">
           <button class="button secondary" id="cancel-edit" type="button">取消</button>
           <button class="button" id="save-button" type="submit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
+    <dialog id="batch-edit-dialog">
+      <form id="batch-edit-form">
+        <header class="dialog-header">
+          <div>
+            <h2>批量编辑群审核</h2>
+            <p>仅覆盖明确选择的字段，其余配置保持不变。</p>
+          </div>
+          <button class="close-button" id="close-batch-dialog" type="button" aria-label="关闭">&times;</button>
+        </header>
+
+        <div class="form-grid">
+          <label>
+            <span>审核方式</span>
+            <select id="batch-mode">
+              <option value="">不修改</option>
+              <option value="off">关闭自动审核</option>
+              <option value="conditional">条件审核</option>
+              <option value="native">QQ 号码白名单</option>
+            </select>
+          </label>
+          <label>
+            <span>检查 B站 UID</span>
+            <select id="batch-uid-check-enabled">
+              <option value="">不修改</option>
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </label>
+          <label>
+            <span>有效 UID 直接通过</span>
+            <select id="batch-uid-exists-auto-approve">
+              <option value="">不修改</option>
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </label>
+          <label>
+            <span>条件组合</span>
+            <select id="batch-condition-logic">
+              <option value="">不修改</option>
+              <option value="all">全部满足</option>
+              <option value="any">任一满足</option>
+            </select>
+          </label>
+          <label>
+            <span>条件未通过时</span>
+            <select id="batch-fallback-action">
+              <option value="">不修改</option>
+              <option value="pending">保留待审</option>
+              <option value="decline">拒绝申请</option>
+              <option value="approve">同意申请</option>
+            </select>
+          </label>
+          <label>
+            <span>应用后扫描待审申请</span>
+            <select id="batch-scan-pending">
+              <option value="">不修改</option>
+              <option value="true">开启</option>
+              <option value="false">关闭</option>
+            </select>
+          </label>
+
+          <fieldset class="batch-overwrite wide">
+            <label class="checkbox">
+              <input type="checkbox" data-controls="batch-whitelist" data-field="whitelist_qq_numbers">
+              <span>覆盖白名单 QQ 号码</span>
+            </label>
+            <textarea id="batch-whitelist" rows="4" placeholder="每行一个 QQ 号" disabled></textarea>
+          </fieldset>
+          <fieldset class="batch-overwrite wide">
+            <label class="checkbox">
+              <input type="checkbox" data-controls="batch-approve-keywords" data-field="approve_keywords">
+              <span>覆盖通过关键词</span>
+            </label>
+            <textarea id="batch-approve-keywords" rows="3" placeholder="每行一个关键词" disabled></textarea>
+          </fieldset>
+          <fieldset class="batch-overwrite wide">
+            <label class="checkbox">
+              <input type="checkbox" data-controls="batch-reject-keywords" data-field="reject_keywords">
+              <span>覆盖硬拒绝关键词</span>
+            </label>
+            <textarea id="batch-reject-keywords" rows="3" placeholder="每行一个关键词" disabled></textarea>
+          </fieldset>
+          <fieldset class="batch-overwrite wide">
+            <label class="checkbox">
+              <input type="checkbox" data-controls="batch-reject-reason" data-field="button_reject_reason">
+              <span>覆盖按钮拒绝理由</span>
+            </label>
+            <input id="batch-reject-reason" maxlength="128" value="管理员拒绝" disabled>
+          </fieldset>
+        </div>
+
+        <footer class="dialog-actions">
+          <button class="button secondary" id="cancel-batch-edit" type="button">取消</button>
+          <button class="button" id="batch-save-button" type="submit">保存到所选群</button>
         </footer>
       </form>
     </dialog>

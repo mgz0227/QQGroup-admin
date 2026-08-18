@@ -13,14 +13,27 @@
   "mute_success_message": {
     "type": "string",
     "description": "禁言成功回复",
-    "hint": "支持 {duration}、{expire_at}、{member_openid} 占位符。",
+    "hint": "支持 {at_user}、{duration}、{expire_at}、{member_openid}。{at_user} 可放在回复任意位置；不填写则不艾特。",
     "default": "已设置禁言，至 {expire_at}。"
+  },
+  "settings_panel_auto_recall": {
+    "type": "bool",
+    "description": "审核设置面板自动撤回",
+    "hint": "开启后，/审核设置 发送的按钮面板会在 45 秒后自动撤回。",
+    "default": true
+  },
+  "settings_command_enabled": {
+    "type": "bool",
+    "description": "启用审核设置命令",
+    "hint": "关闭后群内 /审核设置 不会发送设置面板；可在此配置中重新开启。",
+    "default": true
   },
   "mute_reply_at_member": {
     "type": "bool",
-    "description": "禁言成功后 @成员",
-    "hint": "启用后在成功回复开头提及被禁言成员。",
-    "default": false
+    "description": "禁言成功后 @成员（旧配置）",
+    "hint": "兼容旧版本；保存后会自动转换为禁言回复中的 {at_user} 变量。",
+    "default": false,
+    "invisible": true
   },
   "global_reject_keywords": {
     "type": "text",

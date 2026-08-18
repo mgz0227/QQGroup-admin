@@ -7,6 +7,7 @@ import time
 from contextlib import suppress
 from functools import wraps
 from typing import Any
+from xml.sax.saxutils import quoteattr
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
@@ -164,10 +165,25 @@ class QQGroupAdmin(Star):
         self._web = GroupAdminWeb(self, context)
 
     def _migrate_config(self) -> None:
+        changed = False
+        if bool(self.config.get("mute_reply_at_member", False)):
+            template = str(
+                self.config.get(
+                    "mute_success_message",
+                    "已设置禁言，至 {expire_at}。",
+                )
+                or "已设置禁言，至 {expire_at}。"
+            )
+            if "{at_user}" not in template:
+                self.config["mute_success_message"] = f"{{at_user}} {template}"
+            self.config["mute_reply_at_member"] = False
+            changed = True
+
         entries = self.config.get("auto_review_groups") or []
         if not isinstance(entries, list):
+            if changed:
+                self.config.save_config()
             return
-        changed = False
         for entry in entries:
             if not isinstance(entry, dict):
                 continue
@@ -905,6 +921,10 @@ class QQGroupAdmin(Star):
     @qq_group_command("审核设置")
     async def review_settings(self, event: AstrMessageEvent):
         """发送仅 QQ 群主或管理员可操作的审核设置按钮。"""
+        if not bool(self.config.get("settings_command_enabled", True)):
+            if hasattr(event, "stop_event"):
+                event.stop_event()
+            return
         _, group_openid, _ = self._context(event)
         client = self._client(event)
         info = await QQGroupAPI(client).get_group_info(group_openid)
@@ -987,6 +1007,12 @@ class QQGroupAdmin(Star):
             "decline": "拒绝",
             "approve": "同意",
         }.get(settings.get("fallback_action", "pending"), "保留待审")
+        auto_recall = bool(self.config.get("settings_panel_auto_recall", True))
+        recall_hint = (
+            f"{SETTINGS_MESSAGE_TTL} 秒后自动撤回。"
+            if auto_recall
+            else "面板不会自动撤回。"
+        )
         kwargs = {
             "group_openid": group_openid,
             "msg_type": 2,
@@ -996,7 +1022,7 @@ class QQGroupAdmin(Star):
                     f"审核：{mode}；UID 检查：{'开' if settings.get('uid_check_enabled', True) else '关'}；"
                     f"UID 直通：{'开' if settings.get('uid_exists_auto_approve') else '关'}\n"
                     f"条件：{logic}；未通过：{fallback}\n"
-                    f"设置按钮仅群主或群管理员可用，{SETTINGS_MESSAGE_TTL} 秒后自动撤回。"
+                    f"设置按钮仅群主或群管理员可用，{recall_hint}"
                 )
             },
             "keyboard": {"content": {"rows": rows}},
@@ -1017,9 +1043,9 @@ class QQGroupAdmin(Star):
             sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "")
         )
         sent_id = str(raw_sent_id or "")
-        if sent_id:
+        if sent_id and auto_recall:
             self._schedule_settings_recall(client, group_openid, sent_id)
-        else:
+        elif not sent_id and auto_recall:
             self.logger.warning("QQ 未返回审核设置消息 ID，无法自动撤回")
         if hasattr(event, "stop_event"):
             event.stop_event()
@@ -1240,19 +1266,40 @@ class QQGroupAdmin(Star):
             )
             or "已设置禁言，至 {expire_at}。"
         )
-        text = (
+        mention = f"<qqbot-at-user id={quoteattr(member_openid)} />"
+        legacy_at = bool(self.config.get("mute_reply_at_member", False))
+        has_at_variable = "{at_user}" in template
+        if legacy_at and not has_at_variable:
+            template = "{at_user} " + template
+            has_at_variable = True
+        template = (
             template.replace("{duration}", duration)
             .replace("{expire_at}", expire_at)
             .replace("{member_openid}", member_openid)
-        )[:1000]
-        if not bool(self.config.get("mute_reply_at_member", False)):
+        )
+        if not has_at_variable and not legacy_at:
+            return event.plain_result(template[:1000])
+
+        # Preserve every complete QQ tag while bounding custom text to 1000 chars.
+        parts = template.split("{at_user}")
+        tag_count = min(len(parts) - 1, 1000 // len(mention))
+        raw_limit = max(0, 1000 - tag_count * len(mention))
+        rendered_parts = []
+        for index, part in enumerate(parts):
+            chunk = part[:raw_limit]
+            rendered_parts.append(chunk)
+            raw_limit -= len(chunk)
+            if index < tag_count:
+                rendered_parts.append(mention)
+        text = "".join(rendered_parts)
+        if not text:
             return event.plain_result(text)
 
         _, group_openid, _ = self._context(event)
         kwargs = {
             "group_openid": group_openid,
             "msg_type": 0,
-            "content": f"<@{member_openid}> {text}",
+            "content": text,
         }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if message_id:
@@ -1568,6 +1615,15 @@ class QQGroupAdmin(Star):
     async def web_save_group(self, payload: dict[str, Any]) -> dict[str, Any]:
         group_openid = str(payload["group_openid"])
         entry = self._group_config(group_openid, required=True)
+        self._update_web_group(entry, payload)
+        self.config.save_config()
+        return self._web_group(entry)
+
+    @staticmethod
+    def _update_web_group(
+        entry: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> None:
         mode = str(payload["mode"])
         entry.update(
             {
@@ -1584,8 +1640,19 @@ class QQGroupAdmin(Star):
                 "button_reject_reason": str(payload["button_reject_reason"]),
             }
         )
+
+    async def web_batch_save(
+        self,
+        payloads: list[dict[str, Any]],
+    ) -> list[str]:
+        entries = [
+            self._group_config(str(payload["group_openid"]), required=True)
+            for payload in payloads
+        ]
+        for entry, payload in zip(entries, payloads, strict=True):
+            self._update_web_group(entry, payload)
         self.config.save_config()
-        return self._web_group(entry)
+        return [str(payload["group_openid"]) for payload in payloads]
 
     async def web_sync_group(self, group_openid: str) -> dict[str, Any]:
         entry = self._group_config(group_openid, required=True)
@@ -1602,6 +1669,32 @@ class QQGroupAdmin(Star):
         result = self._web_group(entry)
         result["result"] = message
         return result
+
+    async def web_batch_sync(self, group_openids: list[str]) -> list[dict[str, Any]]:
+        results = []
+        for group_openid in group_openids:
+            try:
+                await self.web_sync_group(group_openid)
+            except (QQAPIError, TypeError, ValueError, RuntimeError) as exc:
+                results.append(
+                    {
+                        "group_openid": group_openid,
+                        "ok": False,
+                        "error": str(exc)[:240],
+                    }
+                )
+            except Exception:
+                self.logger.exception("批量应用群审核配置失败：%s", group_openid)
+                results.append(
+                    {
+                        "group_openid": group_openid,
+                        "ok": False,
+                        "error": "服务器处理失败，请查看 AstrBot 日志",
+                    }
+                )
+            else:
+                results.append({"group_openid": group_openid, "ok": True})
+        return results
 
     async def web_delete_group(self, group_openid: str) -> dict[str, Any]:
         entry = self._group_config(group_openid, required=True)
