@@ -826,8 +826,20 @@ class QQGroupAdmin(Star):
                     )
         except QQAPIError as exc:
             self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
+            with suppress(Exception):
+                await self._send_group_text(
+                    client,
+                    group_openid,
+                    f"按钮操作失败：{self._plain_text(exc, 200)}",
+                )
         except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
             self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
+            with suppress(Exception):
+                await self._send_group_text(
+                    client,
+                    group_openid,
+                    f"按钮操作失败：{self._plain_text(exc, 200)}",
+                )
         return True
 
     def _target_member(self, event: AstrMessageEvent, value: str) -> str:
