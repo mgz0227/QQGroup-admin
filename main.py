@@ -46,6 +46,8 @@ JOIN_LIST_LIMIT = 5
 GROUP_TEMPLATE_KEY = "qq_group"
 CONDITION_LOGICS = {"all", "any"}
 FALLBACK_ACTIONS = {"pending", "decline", "approve"}
+GROUP_ADMIN_ROLES = {"admin", "owner"}
+GROUP_PERMISSION_ERROR_CODES = {11282, 40011030}
 SETTINGS_ACTIONS = {
     "bind",
     "native",
@@ -159,6 +161,7 @@ class QQGroupAdmin(Star):
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._poll_cursors: dict[tuple[str, str], str] = {}
+        self._permission_diagnostics: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
         self._bilibili_retry_at = 0.0
         self._migrate_config()
@@ -772,7 +775,12 @@ class QQGroupAdmin(Star):
                     reject_reason=reason,
                 )
             except QQAPIError as exc:
-                self.logger.warning("自动处理 QQ 入群申请失败：%s", exc)
+                self.logger.warning(
+                    "自动处理 QQ 入群申请失败：group=%s request=%s error=%s",
+                    group_openid,
+                    join_request_id,
+                    exc,
+                )
                 if exc.status == 429:
                     return
                 continue
@@ -782,6 +790,38 @@ class QQGroupAdmin(Star):
                 group_openid,
                 join_request_id,
             )
+
+    async def _log_poll_failure(
+        self,
+        client: Any,
+        platform_id: str,
+        group_openid: str,
+        exc: Exception,
+    ) -> None:
+        entry = self._group_config(group_openid)
+        group_name = str((entry or {}).get("group_name") or "-")
+        key = (platform_id, group_openid)
+        role = self._permission_diagnostics.get(key, "-")
+        if (
+            isinstance(exc, QQAPIError)
+            and exc.err_code in GROUP_PERMISSION_ERROR_CODES
+            and role == "-"
+        ):
+            try:
+                state = await QQGroupAPI(client).get_bot_state(group_openid)
+                role = str(state.get("member_role") or "unknown")
+            except (QQAPIError, AttributeError, TypeError, ValueError) as state_exc:
+                role = f"查询失败：{state_exc}"
+            self._permission_diagnostics[key] = role
+        self.logger.warning(
+            "轮询 QQ 入群申请失败：group_name=%s group=%s platform=%s "
+            "bot_role=%s error=%s",
+            group_name,
+            group_openid,
+            platform_id,
+            role,
+            exc,
+        )
 
     async def _uid_review_loop(self) -> None:
         await asyncio.sleep(5)
@@ -806,7 +846,12 @@ class QQGroupAdmin(Star):
                         ValueError,
                         RuntimeError,
                     ) as exc:
-                        self.logger.warning("轮询 QQ 入群申请失败：%s", exc)
+                        await self._log_poll_failure(
+                            client,
+                            platform_id,
+                            group_openid,
+                            exc,
+                        )
                     await asyncio.sleep(2.1)
             except Exception as exc:  # noqa: BLE001 - keep the background task alive
                 self.logger.warning("QQ 入群审核后台任务本轮失败：%s", exc)
@@ -1427,6 +1472,14 @@ class QQGroupAdmin(Star):
             )
 
         api = QQGroupAPI(client)
+        if native_enabled or uid_enabled:
+            state = await api.get_bot_state(group_openid)
+            role = str(state.get("member_role") or "unknown")
+            if role not in GROUP_ADMIN_ROLES:
+                raise RuntimeError(
+                    f"QQ 返回机器人在当前群的角色为 {role}，"
+                    "启用自动审核需要 admin 或 owner"
+                )
         data = await api.list_strategies(limit=100)
         strategy = select_group_strategy(data.get("strategies") or [], group_openid)
         strategy_id = self._strategy_id(strategy) if strategy else ""

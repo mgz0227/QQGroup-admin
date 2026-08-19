@@ -256,6 +256,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         event = FakeEvent(client)
         api = SimpleNamespace(
             get_group_info=AsyncMock(return_value={"group_name": "测试群"}),
+            get_bot_state=AsyncMock(return_value={"member_role": "admin"}),
             list_strategies=AsyncMock(return_value={"strategies": []}),
         )
         with (
@@ -415,6 +416,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             }
         )
         api = SimpleNamespace(
+            get_bot_state=AsyncMock(return_value={"member_role": "admin"}),
             list_strategies=AsyncMock(
                 return_value={
                     "strategies": [
@@ -442,6 +444,70 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(entry["uid_review_enabled"])
         api.delete_strategy.assert_not_awaited()
+
+    async def test_sync_rejects_non_admin_role_before_changing_config(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        api = SimpleNamespace(
+            get_bot_state=AsyncMock(return_value={"member_role": "member"}),
+            list_strategies=AsyncMock(),
+        )
+
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            self.assertRaisesRegex(RuntimeError, "角色为 member"),
+        ):
+            await plugin._sync_group_config(
+                client,
+                "group-1",
+                entry,
+                "platform-1",
+                native_enabled=False,
+                uid_enabled=True,
+            )
+
+        self.assertNotIn("uid_review_enabled", entry)
+        self.assertNotIn("enabled", entry)
+        api.list_strategies.assert_not_awaited()
+
+    async def test_permission_failure_logs_group_context_and_diagnoses_once(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update({"group_name": "测试群", "platform_id": "platform-1"})
+        api = SimpleNamespace(
+            get_bot_state=AsyncMock(return_value={"member_role": "admin"}),
+        )
+        error = module.QQAPIError(
+            status=403,
+            err_code=40011030,
+            message="机器人不是群管理员",
+            trace_id="trace-1",
+        )
+
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            self.assertLogs(plugin.logger, level="WARNING") as captured,
+        ):
+            await plugin._log_poll_failure(
+                client,
+                "platform-1",
+                "group-1",
+                error,
+            )
+            await plugin._log_poll_failure(
+                client,
+                "platform-1",
+                "group-1",
+                error,
+            )
+
+        self.assertEqual(api.get_bot_state.await_count, 1)
+        output = "\n".join(captured.output)
+        self.assertEqual(output.count("bot_role=admin"), 2)
+        self.assertIn("group_name=测试群", output)
+        self.assertIn("group=group-1", output)
+        self.assertIn("platform=platform-1", output)
+        self.assertIn("trace-1", output)
 
     def test_web_payload_validation_normalizes_lists(self):
         payload = module.GroupAdminWeb._validated_save(

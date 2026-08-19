@@ -115,6 +115,8 @@ QQ 当前没有开放成员列表、踢人、管理员设置、修改群资料�
 
 QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转发到插件事件总线。QQ 号码白名单使用官方持久化策略；需要读取验证文字的 UID 模式则以 30 QPM 限额内的错峰轮询实现。
 
+启用自动审核时，插件会先通过 QQ `bot_state.member_role` 校验机器人在该群的角色。若申请列表接口仍返回 `40011030`，警告日志会同时给出群名称、群 OpenID、平台实例和 QQ 返回的 `bot_role`；`bot_role=admin` 但申请接口仍拒绝时，说明 QQ 两个接口的权限状态不一致，应携带日志中的 `trace_id` 向 QQ 开放平台反馈。
+
 参考：
 
 - [QQ 机器人群聊管理接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_info.get.html)
