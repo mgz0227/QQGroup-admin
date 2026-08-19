@@ -13,6 +13,17 @@ from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
 
+from .bilibili import (
+    BilibiliAPIError,
+    BilibiliConfigError,
+    fetch_live_statuses,
+    fetch_space_dynamics,
+    fetch_wbi_keys,
+    live_transition,
+    parse_bilibili_uids,
+    parse_dynamic_items,
+)
+from .moderation import ModerationWindows, normalize_message, valid_state_dict
 from .qq_api import (
     QQAPIError,
     QQGroupAPI,
@@ -42,6 +53,7 @@ QQ_PLATFORM_NAMES = {"qq_official", "qq_official_webhook"}
 INTERACTION_INTENT = 1 << 26
 BUTTON_TOKEN_TTL = 15 * 60
 SETTINGS_MESSAGE_TTL = 45
+VERIFICATION_TOKEN_TTL = 5 * 60
 JOIN_LIST_LIMIT = 5
 GROUP_TEMPLATE_KEY = "qq_group"
 CONDITION_LOGICS = {"all", "any"}
@@ -64,7 +76,19 @@ SETTINGS_ACTIONS = {
     "approve",
     "sync",
     "off",
+    "moderation",
+    "mod_on",
+    "mod_off",
+    "ai_on",
+    "ai_off",
+    "image_on",
+    "image_off",
+    "repeat_on",
+    "repeat_off",
+    "verify_on",
+    "verify_off",
 }
+STATE_KEY = "qqgroup_admin_state_v1"
 
 
 class WakeCommandFilter(filter.CustomFilter):
@@ -158,12 +182,29 @@ class QQGroupAdmin(Star):
         self._recall_tasks: set[asyncio.Task[None]] = set()
         self._approval_lock = asyncio.Lock()
         self._last_approval_at = 0.0
+        self._recall_lock = asyncio.Lock()
+        self._last_recall_at = 0.0
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
+        self._verification_tokens: dict[str, tuple[float, str, str, int]] = {}
         self._poll_cursors: dict[tuple[str, str], str] = {}
         self._permission_diagnostics: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
         self._bilibili_retry_at = 0.0
+        self._bilibili_live_retry_at = 0.0
+        self._bilibili_dynamic_retry_at: dict[str, float] = {}
+        self._bilibili_push_warning_at = 0.0
+        self._bilibili_task: asyncio.Task[None] | None = None
+        self._state_lock = asyncio.Lock()
+        self._uid_bindings: dict[str, dict[str, Any]] = {}
+        self._suspicious_members: dict[str, dict[str, Any]] = {}
+        self._bilibili_state: dict[str, dict[str, Any]] = {
+            "live": {},
+            "dynamic": {},
+        }
+        self._moderation = ModerationWindows()
+        self._ai_semaphore = asyncio.Semaphore(2)
+        self._ai_warning_at = 0.0
         self._migrate_config()
         self._web = GroupAdminWeb(self, context)
 
@@ -213,6 +254,22 @@ class QQGroupAdmin(Star):
                     "fallback_action",
                     "decline" if entry.get("uid_review_enabled") else "pending",
                 ),
+                ("fallback_human_verify_enabled", False),
+                ("moderation_enabled", False),
+                ("moderation_exempt_admins", True),
+                ("message_reject_keywords", ""),
+                ("ai_review_enabled", False),
+                ("image_spam_enabled", False),
+                ("image_spam_count", 5),
+                ("image_spam_window_seconds", 15),
+                ("repeat_review_enabled", False),
+                ("repeat_count", 4),
+                ("repeat_window_seconds", 30),
+                ("repeat_mute_min_seconds", 60),
+                ("repeat_mute_max_seconds", 600),
+                ("bilibili_uids", ""),
+                ("bilibili_dynamic_enabled", False),
+                ("bilibili_live_enabled", False),
             ):
                 if key not in entry:
                     entry[key] = default
@@ -221,12 +278,19 @@ class QQGroupAdmin(Star):
             self.config.save_config()
 
     async def initialize(self) -> None:
+        await self._load_state()
         self._web.register_routes()
         self._patch_qq_clients()
-        self._review_task = asyncio.create_task(
-            self._uid_review_loop(),
-            name="qqgroup-admin-uid-review",
-        )
+        if self._review_task is None or self._review_task.done():
+            self._review_task = asyncio.create_task(
+                self._uid_review_loop(),
+                name="qqgroup-admin-uid-review",
+            )
+        if self._bilibili_task is None or self._bilibili_task.done():
+            self._bilibili_task = asyncio.create_task(
+                self._bilibili_loop(),
+                name="qqgroup-admin-bilibili-push",
+            )
 
     async def terminate(self) -> None:
         if self._review_task:
@@ -234,6 +298,11 @@ class QQGroupAdmin(Star):
             with suppress(asyncio.CancelledError):
                 await self._review_task
             self._review_task = None
+        if self._bilibili_task:
+            self._bilibili_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._bilibili_task
+            self._bilibili_task = None
         recall_tasks = tuple(self._recall_tasks)
         for task in recall_tasks:
             task.cancel()
@@ -248,6 +317,35 @@ class QQGroupAdmin(Star):
                 else:
                     client.on_interaction_create = previous
         self._patched_clients.clear()
+
+    async def _load_state(self) -> None:
+        getter = getattr(self, "get_kv_data", None)
+        value = await getter(STATE_KEY, {}) if getter else {}
+        if not isinstance(value, dict):
+            self.logger.warning("QQ群管理持久状态格式错误，已忽略")
+            return
+        self._uid_bindings = valid_state_dict(value.get("uid_bindings"))
+        self._suspicious_members = valid_state_dict(value.get("suspicious_members"))
+        bili = value.get("bilibili")
+        if isinstance(bili, dict):
+            self._bilibili_state = {
+                "live": valid_state_dict(bili.get("live")),
+                "dynamic": valid_state_dict(bili.get("dynamic")),
+            }
+
+    async def _save_state(self) -> None:
+        setter = getattr(self, "put_kv_data", None)
+        if setter is None:
+            return
+        async with self._state_lock:
+            await setter(
+                STATE_KEY,
+                {
+                    "uid_bindings": self._uid_bindings,
+                    "suspicious_members": self._suspicious_members,
+                    "bilibili": self._bilibili_state,
+                },
+            )
 
     @filter.on_platform_loaded()
     async def on_platform_loaded(self) -> None:
@@ -276,6 +374,208 @@ class QQGroupAdmin(Star):
 
     def _api(self, event: AstrMessageEvent) -> QQGroupAPI:
         return QQGroupAPI(self._client(event))
+
+    @staticmethod
+    def _mention(member_openid: str) -> str:
+        return f"<qqbot-at-user id={quoteattr(member_openid)} />"
+
+    async def _send_group_text(
+        self,
+        client: Any,
+        group_openid: str,
+        text: str,
+        *,
+        message_id: str = "",
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "group_openid": group_openid,
+            "msg_type": 0,
+            "content": text[:1000],
+        }
+        if message_id:
+            kwargs["msg_id"] = message_id
+        return await client.api.post_group_message(**kwargs)
+
+    async def _send_group_markdown(
+        self,
+        client: Any,
+        group_openid: str,
+        text: str,
+        *,
+        message_id: str = "",
+        keyboard: dict[str, Any] | None = None,
+    ) -> Any:
+        kwargs: dict[str, Any] = {
+            "group_openid": group_openid,
+            "msg_type": 2,
+            "markdown": {"content": text[:4000]},
+        }
+        if keyboard:
+            kwargs["keyboard"] = keyboard
+        if message_id:
+            kwargs["msg_id"] = message_id
+        return await client.api.post_group_message(**kwargs)
+
+    @staticmethod
+    def _member_state_key(group_openid: str, member_openid: str) -> str:
+        return f"{group_openid}:{member_openid}"
+
+    @staticmethod
+    def _request_identity(
+        request: dict[str, Any],
+        group_openid: str,
+        member_openid: str,
+    ) -> str:
+        union_openid = str(request.get("union_openid") or "").strip()
+        return (
+            f"union:{union_openid}"
+            if union_openid
+            else f"member:{group_openid}:{member_openid}"
+        )
+
+    def _uid_binding_conflict(
+        self,
+        uid: str,
+        identity: str,
+    ) -> dict[str, Any] | None:
+        binding = self._uid_bindings.get(uid)
+        return binding if binding and binding.get("identity") != identity else None
+
+    async def _bind_uid_identity(
+        self,
+        uid: str,
+        request: dict[str, Any],
+        group_openid: str,
+        member_openid: str,
+    ) -> None:
+        identity = self._request_identity(request, group_openid, member_openid)
+        current = self._uid_bindings.get(uid) or {}
+        groups = list(dict.fromkeys([*(current.get("groups") or []), group_openid]))
+        members = dict(current.get("members") or {})
+        members[group_openid] = member_openid
+        self._uid_bindings[uid] = {
+            "uid": uid,
+            "identity": identity,
+            "union_openid": str(request.get("union_openid") or ""),
+            "member_openid": member_openid,
+            "members": members,
+            "username": str(request.get("username") or ""),
+            "groups": groups,
+            "bound_at": current.get("bound_at") or int(time.time()),
+            "last_seen_at": int(time.time()),
+        }
+        await self._save_state()
+
+    def _uid_for_member(self, group_openid: str, member_openid: str) -> str:
+        for uid, binding in self._uid_bindings.items():
+            members = binding.get("members")
+            if isinstance(members, dict) and members.get(group_openid) == member_openid:
+                return uid
+            if binding.get("member_openid") == member_openid and group_openid in (
+                binding.get("groups") or []
+            ):
+                return uid
+        return ""
+
+    async def _record_uid_violation(
+        self,
+        uid: str,
+        group_openid: str,
+        member_openid: str,
+        reason: str,
+    ) -> None:
+        binding = self._uid_bindings.get(uid)
+        if not binding:
+            return
+        binding["violation_count"] = int(binding.get("violation_count") or 0) + 1
+        binding["last_violation_at"] = int(time.time())
+        binding["last_violation_group"] = group_openid
+        binding["last_violation_member"] = member_openid
+        binding["last_violation_reason"] = reason[:200]
+        await self._save_state()
+
+    async def _mark_suspicious(
+        self,
+        request: dict[str, Any],
+        group_openid: str,
+        member_openid: str,
+        reason: str,
+    ) -> None:
+        key = self._member_state_key(group_openid, member_openid)
+        self._suspicious_members[key] = {
+            "group_openid": group_openid,
+            "member_openid": member_openid,
+            "union_openid": str(request.get("union_openid") or ""),
+            "username": str(request.get("username") or ""),
+            "reason": reason,
+            "created_at": int(time.time()),
+        }
+        await self._save_state()
+
+    async def _clear_suspicious(
+        self,
+        group_openid: str,
+        member_openid: str,
+    ) -> None:
+        key = self._member_state_key(group_openid, member_openid)
+        if self._suspicious_members.pop(key, None) is not None:
+            await self._save_state()
+
+    async def _send_verification_challenge(
+        self,
+        client: Any,
+        group_openid: str,
+        member_openid: str,
+        *,
+        message_id: str = "",
+    ) -> None:
+        left = 2 + secrets.randbelow(8)
+        right = 2 + secrets.randbelow(8)
+        answer = left + right
+        options = [answer, answer - 2, answer - 1, answer + 1]
+        secrets.SystemRandom().shuffle(options)
+        previous = {
+            key: value
+            for key, value in self._verification_tokens.items()
+            if value[1:3] == (group_openid, member_openid)
+        }
+        token = self._verification_token(group_openid, member_openid, answer)
+        buttons = []
+        for index, value in enumerate(options):
+            buttons.append(
+                {
+                    "id": f"verify-{index}",
+                    "render_data": {
+                        "label": str(value),
+                        "visited_label": str(value),
+                        "style": 1,
+                    },
+                    "action": {
+                        "type": 1,
+                        "permission": {
+                            "type": 0,
+                            "specify_user_ids": [member_openid],
+                        },
+                        "data": f"qqgv:{token}:{value}",
+                        "unsupport_tips": "请升级 QQ 后完成真人验证",
+                    },
+                }
+            )
+        try:
+            await self._send_group_markdown(
+                client,
+                group_openid,
+                (
+                    f"# 真人验证\n{self._mention(member_openid)} 请计算 "
+                    f"**{left} + {right}**，验证通过前发送的消息会被撤回。"
+                ),
+                message_id=message_id,
+                keyboard={"content": {"rows": [{"buttons": buttons}]}},
+            )
+        except Exception:
+            self._verification_tokens.pop(token, None)
+            self._verification_tokens.update(previous)
+            raise
 
     def _qq_platforms(self) -> list[Any]:
         manager = getattr(self.context, "platform_manager", None)
@@ -333,6 +633,11 @@ class QQGroupAdmin(Star):
             for token, data in self._settings_tokens.items()
             if data[0] > now
         }
+        self._verification_tokens = {
+            token: data
+            for token, data in self._verification_tokens.items()
+            if data[0] > now
+        }
 
     def _approval_token(
         self,
@@ -363,6 +668,27 @@ class QQGroupAdmin(Star):
             group_openid,
             platform_id,
             group_name,
+        )
+        return token
+
+    def _verification_token(
+        self,
+        group_openid: str,
+        member_openid: str,
+        answer: int,
+    ) -> str:
+        self._cleanup_tokens()
+        self._verification_tokens = {
+            token: data
+            for token, data in self._verification_tokens.items()
+            if data[1:3] != (group_openid, member_openid)
+        }
+        token = secrets.token_urlsafe(12)
+        self._verification_tokens[token] = (
+            time.monotonic() + VERIFICATION_TOKEN_TTL,
+            group_openid,
+            member_openid,
+            answer,
         )
         return token
 
@@ -411,47 +737,70 @@ class QQGroupAdmin(Star):
         button_data = str(getattr(resolved, "button_data", "") or "")
         parts = button_data.split(":")
         group_openid = str(getattr(interaction, "group_openid", "") or "")
+        prefix = parts[0] if parts else ""
+        valid_action = (
+            parts[2] in {"approve", "decline"}
+            if prefix == "qqga" and len(parts) == 3
+            else parts[2] in SETTINGS_ACTIONS
+            if prefix == "qqgs" and len(parts) == 3
+            else parts[2].isdigit()
+            if prefix == "qqgv" and len(parts) == 3
+            else False
+        )
         if (
             getattr(interaction, "type", None) != 11
             or getattr(interaction, "chat_type", None) != 1
+            or not interaction_id
             or not group_openid
             or len(parts) != 3
-            or parts[0] not in {"qqga", "qqgs"}
-            or parts[2]
-            not in ({"approve", "decline"} if parts[0] == "qqga" else SETTINGS_ACTIONS)
+            or prefix not in {"qqga", "qqgs", "qqgv"}
+            or not valid_action
         ):
             return False
 
-        response_code = 1
+        self._cleanup_tokens()
+        clicker = str(getattr(interaction, "group_member_openid", "") or "")
+        token_data = (
+            self._approval_tokens.get(parts[1])
+            if prefix == "qqga"
+            else self._settings_tokens.get(parts[1])
+            if prefix == "qqgs"
+            else self._verification_tokens.get(parts[1])
+        )
+        response_code = 3 if token_data is None else 0
+        if token_data is not None and (
+            token_data[1] != group_openid
+            or (prefix == "qqgv" and token_data[2] != clicker)
+        ):
+            response_code = 4
         try:
-            self._cleanup_tokens()
-            if parts[0] == "qqga":
-                token_data = self._approval_tokens.get(parts[1])
-                if token_data is None:
-                    response_code = 3
-                elif token_data[1] != group_openid:
-                    response_code = 4
-                else:
-                    _, _, member_openid, join_request_id = token_data
-                    entry = self._group_config(group_openid)
-                    reason = str(
-                        (entry or {}).get("button_reject_reason") or "管理员拒绝"
-                    )
-                    await self._approve_request(
-                        QQGroupAPI(client),
+            await client.api.on_interaction_result(interaction_id, response_code)
+        except Exception as exc:  # noqa: BLE001 - botpy raises transport errors
+            self.logger.warning("回应 QQ 按钮互动事件失败：%s", exc)
+        if response_code:
+            return True
+
+        try:
+            if prefix == "qqga":
+                _, _, member_openid, join_request_id = token_data
+                entry = self._group_config(group_openid)
+                reason = str((entry or {}).get("button_reject_reason") or "管理员拒绝")
+                await self._approve_request(
+                    QQGroupAPI(client),
+                    group_openid,
+                    member_openid,
+                    join_request_id,
+                    op=parts[2],
+                    reject_reason=reason if parts[2] == "decline" else "",
+                )
+            elif prefix == "qqgs":
+                if parts[2] == "moderation":
+                    await self._send_moderation_settings(
+                        client,
                         group_openid,
-                        member_openid,
-                        join_request_id,
-                        op=parts[2],
-                        reject_reason=reason if parts[2] == "decline" else "",
+                        parts[1],
+                        token_data[3],
                     )
-                    response_code = 0
-            else:
-                token_data = self._settings_tokens.get(parts[1])
-                if token_data is None:
-                    response_code = 3
-                elif token_data[1] != group_openid:
-                    response_code = 4
                 else:
                     await self._apply_settings_button(
                         client,
@@ -460,22 +809,25 @@ class QQGroupAdmin(Star):
                         parts[2],
                         token_data[3],
                     )
-                    response_code = 0
+            else:
+                self._verification_tokens.pop(parts[1], None)
+                if int(parts[2]) != token_data[3]:
+                    await self._send_verification_challenge(
+                        client,
+                        group_openid,
+                        clicker,
+                    )
+                else:
+                    await self._clear_suspicious(group_openid, clicker)
+                    await self._send_group_markdown(
+                        client,
+                        group_openid,
+                        f"{self._mention(clicker)} 真人验证已通过，可以正常发言。",
+                    )
         except QQAPIError as exc:
-            if exc.status == 429:
-                response_code = 2
             self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
         except (AttributeError, TypeError, ValueError, RuntimeError) as exc:
             self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
-        finally:
-            if interaction_id:
-                try:
-                    await client.api.on_interaction_result(
-                        interaction_id,
-                        response_code,
-                    )
-                except Exception as exc:  # noqa: BLE001 - botpy raises transport errors
-                    self.logger.warning("回应 QQ 按钮互动事件失败：%s", exc)
         return True
 
     def _target_member(self, event: AstrMessageEvent, value: str) -> str:
@@ -573,7 +925,23 @@ class QQGroupAdmin(Star):
                 "reject_keywords": "",
                 "condition_logic": "all",
                 "fallback_action": "pending",
+                "fallback_human_verify_enabled": False,
                 "button_reject_reason": "管理员拒绝",
+                "moderation_enabled": False,
+                "moderation_exempt_admins": True,
+                "message_reject_keywords": "",
+                "ai_review_enabled": False,
+                "image_spam_enabled": False,
+                "image_spam_count": 5,
+                "image_spam_window_seconds": 15,
+                "repeat_review_enabled": False,
+                "repeat_count": 4,
+                "repeat_window_seconds": 30,
+                "repeat_mute_min_seconds": 60,
+                "repeat_mute_max_seconds": 600,
+                "bilibili_uids": "",
+                "bilibili_dynamic_enabled": False,
+                "bilibili_live_enabled": False,
                 "platform_id": platform_id,
                 "managed_strategy_id": "",
                 "applied_whitelist": "",
@@ -616,7 +984,57 @@ class QQGroupAdmin(Star):
             ),
             "condition_logic": logic,
             "fallback_action": fallback,
+            "fallback_human_verify_enabled": bool(
+                entry.get("fallback_human_verify_enabled", False)
+            ),
         }
+
+    @staticmethod
+    def _bounded_int(
+        value: Any,
+        default: int,
+        minimum: int,
+        maximum: int,
+    ) -> int:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            return default
+        return min(maximum, max(minimum, value))
+
+    def _moderation_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
+        entry = entry or {}
+        minimum = self._bounded_int(
+            entry.get("repeat_mute_min_seconds"), 60, 1, 2_592_000
+        )
+        maximum = self._bounded_int(
+            entry.get("repeat_mute_max_seconds"), 600, minimum, 2_592_000
+        )
+        return {
+            "enabled": bool(entry.get("moderation_enabled", False)),
+            "exempt_admins": bool(entry.get("moderation_exempt_admins", True)),
+            "global_keywords": parse_keywords(
+                str(self.config.get("global_message_reject_keywords") or "")
+            ),
+            "keywords": parse_keywords(str(entry.get("message_reject_keywords") or "")),
+            "ai_enabled": bool(entry.get("ai_review_enabled", False)),
+            "image_enabled": bool(entry.get("image_spam_enabled", False)),
+            "image_count": self._bounded_int(entry.get("image_spam_count"), 5, 2, 20),
+            "image_window": self._bounded_int(
+                entry.get("image_spam_window_seconds"), 15, 3, 120
+            ),
+            "repeat_enabled": bool(entry.get("repeat_review_enabled", False)),
+            "repeat_count": self._bounded_int(entry.get("repeat_count"), 4, 3, 20),
+            "repeat_window": self._bounded_int(
+                entry.get("repeat_window_seconds"), 30, 5, 120
+            ),
+            "repeat_mute_min": minimum,
+            "repeat_mute_max": maximum,
+        }
+
+    @staticmethod
+    def _bilibili_uids(entry: dict[str, Any]) -> list[str]:
+        return parse_bilibili_uids(str(entry.get("bilibili_uids") or ""))
 
     def _ensure_native_mode(self, group_openid: str) -> None:
         entry = self._group_config(group_openid)
@@ -699,6 +1117,9 @@ class QQGroupAdmin(Star):
             join_request_id = str(request.get("join_request_id") or "")
             if not member_openid or not join_request_id:
                 continue
+            verified_uid: str | None = None
+            approved_by_conditions = False
+            fallback_approved = False
 
             text = verification_text(request)
             global_keyword = matched_keyword(
@@ -713,6 +1134,7 @@ class QQGroupAdmin(Star):
                 checks = []
                 uid_direct = bool(settings.get("uid_exists_auto_approve", False))
                 uid_direct_passed = False
+                binding_conflict = False
                 failure_reason = "未满足自动审核条件"
                 approve_keywords = settings["approve_keywords"]
                 if approve_keywords:
@@ -734,36 +1156,58 @@ class QQGroupAdmin(Star):
                         checks.append(False)
                         failure_reason = "未提供有效的 B 站 UID"
                     else:
-                        if time.monotonic() < self._bilibili_retry_at:
-                            continue
-                        try:
-                            exists = await bilibili_uid_exists(uid)
-                        except BilibiliLookupError as exc:
-                            self._bilibili_retry_at = time.monotonic() + max(
-                                60,
-                                self._review_interval(),
-                            )
-                            self.logger.warning(
-                                "B 站 UID 查询暂不可用，本轮保留待审申请：%s",
-                                exc,
-                            )
-                            continue
-                        checks.append(exists)
+                        identity = self._request_identity(
+                            request,
+                            group_openid,
+                            member_openid,
+                        )
+                        conflict = self._uid_binding_conflict(uid, identity)
+                        if conflict is not None:
+                            checks.append(False)
+                            binding_conflict = True
+                            failure_reason = "该 B 站 UID 已绑定其他 QQ 用户"
+                            exists = False
+                        else:
+                            exists = None
+                        if exists is None:
+                            if time.monotonic() < self._bilibili_retry_at:
+                                continue
+                            try:
+                                exists = await bilibili_uid_exists(uid)
+                            except BilibiliLookupError as exc:
+                                self._bilibili_retry_at = time.monotonic() + max(
+                                    60,
+                                    self._review_interval(),
+                                )
+                                self.logger.warning(
+                                    "B 站 UID 查询暂不可用，本轮保留待审申请：%s",
+                                    exc,
+                                )
+                                continue
+                            checks.append(exists)
                         if exists and uid_direct:
                             uid_direct_passed = True
+                            verified_uid = uid
+                        elif exists:
+                            verified_uid = uid
                         elif not exists:
-                            failure_reason = "B 站 UID 不存在"
+                            if not binding_conflict:
+                                failure_reason = "B 站 UID 不存在"
 
                 passed = uid_direct_passed or (
                     bool(checks) and (all(checks) if logic == "all" else any(checks))
                 )
-                if passed:
+                if binding_conflict:
+                    op, reason = "decline", failure_reason
+                elif passed:
                     op, reason = "approve", ""
+                    approved_by_conditions = True
                 else:
                     op = settings["fallback_action"]
                     if op == "pending":
                         continue
                     reason = failure_reason if op == "decline" else ""
+                    fallback_approved = op == "approve"
 
             try:
                 await self._approve_request(
@@ -790,6 +1234,37 @@ class QQGroupAdmin(Star):
                 group_openid,
                 join_request_id,
             )
+            if op == "approve" and verified_uid and approved_by_conditions:
+                try:
+                    await self._bind_uid_identity(
+                        verified_uid,
+                        request,
+                        group_openid,
+                        member_openid,
+                    )
+                except Exception:
+                    self.logger.exception("保存 UID 身份绑定失败")
+            if (
+                op == "approve"
+                and fallback_approved
+                and settings.get("fallback_human_verify_enabled")
+            ):
+                try:
+                    await self._mark_suspicious(
+                        request,
+                        group_openid,
+                        member_openid,
+                        "入群条件未通过，由兜底规则同意",
+                    )
+                    await self._send_verification_challenge(
+                        client,
+                        group_openid,
+                        member_openid,
+                    )
+                except Exception as exc:  # noqa: BLE001 - retry on first message
+                    self.logger.warning(
+                        "发送入群真人验证失败，将在用户发言时重试：%s", exc
+                    )
 
     async def _log_poll_failure(
         self,
@@ -856,6 +1331,564 @@ class QQGroupAdmin(Star):
             except Exception as exc:  # noqa: BLE001 - keep the background task alive
                 self.logger.warning("QQ 入群审核后台任务本轮失败：%s", exc)
             await asyncio.sleep(self._review_interval())
+
+    def _bilibili_subscriptions(self) -> dict[str, list[dict[str, Any]]]:
+        result: dict[str, list[dict[str, Any]]] = {}
+        entries = self.config.get("auto_review_groups") or []
+        if not isinstance(entries, list):
+            return result
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            group_openid = str(entry.get("group_openid") or "").strip()
+            platform_id = str(entry.get("platform_id") or "").strip()
+            if not group_openid or not platform_id:
+                continue
+            dynamic = bool(entry.get("bilibili_dynamic_enabled", False))
+            live = bool(entry.get("bilibili_live_enabled", False))
+            if not dynamic and not live:
+                continue
+            try:
+                uids = self._bilibili_uids(entry)
+            except ValueError as exc:
+                self.logger.warning(
+                    "跳过无效 B 站订阅配置：group=%s error=%s", group_openid, exc
+                )
+                continue
+            for uid in uids:
+                result.setdefault(uid, []).append(
+                    {
+                        "group_openid": group_openid,
+                        "platform_id": platform_id,
+                        "dynamic": dynamic,
+                        "live": live,
+                    }
+                )
+        return result
+
+    async def _push_bilibili_message(
+        self,
+        targets: list[dict[str, Any]],
+        text: str,
+        kind: str,
+    ) -> bool:
+        clients = self._platform_clients()
+        success = True
+        for target in targets:
+            if not target.get(kind):
+                continue
+            client = clients.get(str(target.get("platform_id") or ""))
+            if client is None:
+                success = False
+                continue
+            try:
+                await self._send_group_markdown(
+                    client,
+                    str(target["group_openid"]),
+                    text,
+                )
+            except Exception as exc:  # noqa: BLE001 - proactive QQ boundary
+                try:
+                    await self._send_group_text(
+                        client,
+                        str(target["group_openid"]),
+                        text,
+                    )
+                except Exception as fallback_exc:  # noqa: BLE001 - QQ boundary
+                    success = False
+                    self.logger.warning(
+                        "发送 B 站推送失败：group=%s markdown=%s text=%s",
+                        target.get("group_openid"),
+                        exc,
+                        fallback_exc,
+                    )
+        return success
+
+    async def _poll_bilibili_live(
+        self,
+        subscriptions: dict[str, list[dict[str, Any]]],
+    ) -> bool:
+        changed = False
+        uids = [
+            uid
+            for uid, targets in subscriptions.items()
+            if any(target.get("live") for target in targets)
+        ]
+        for start in range(0, len(uids), 100):
+            statuses = await asyncio.to_thread(
+                fetch_live_statuses, uids[start : start + 100]
+            )
+            for uid, current in statuses.items():
+                previous = self._bilibili_state["live"].get(uid)
+                transition = live_transition(previous, current)
+                current_state = {
+                    key: current.get(key)
+                    for key in ("live_status", "live_time", "room_id", "uname", "title")
+                }
+                if transition is None:
+                    delivered = True
+                else:
+                    name = self._markdown_text(current.get("uname") or f"UID {uid}")
+                    title = self._markdown_text(
+                        current.get("title") or "未设置标题", 300
+                    )
+                    room_id = str(current.get("room_id") or "").strip()
+                    if transition == "start":
+                        text = (
+                            f"# {name} 开播了\n{title}\n"
+                            f"https://live.bilibili.com/{room_id}"
+                        )
+                    else:
+                        text = f"# {name} 已下播\n本场直播已结束。"
+                    delivered = await self._push_bilibili_message(
+                        subscriptions.get(uid, []), text, "live"
+                    )
+                if delivered and previous != current_state:
+                    self._bilibili_state["live"][uid] = current_state
+                    changed = True
+        return changed
+
+    async def _poll_bilibili_dynamics(
+        self,
+        subscriptions: dict[str, list[dict[str, Any]]],
+    ) -> bool:
+        cookie = str(self.config.get("bilibili_cookie") or "").strip()
+        if not cookie:
+            if time.monotonic() >= self._bilibili_push_warning_at:
+                self.logger.warning("已启用 B 站动态推送，但尚未配置 B 站 Cookie")
+                self._bilibili_push_warning_at = time.monotonic() + 600
+            return False
+        keys = await asyncio.to_thread(fetch_wbi_keys, cookie)
+        changed = False
+        now = time.monotonic()
+        for uid, targets in subscriptions.items():
+            if not any(target.get("dynamic") for target in targets):
+                continue
+            if now < self._bilibili_dynamic_retry_at.get(uid, 0):
+                continue
+            try:
+                payload = await asyncio.to_thread(
+                    fetch_space_dynamics,
+                    uid,
+                    cookie,
+                    wbi_keys=keys,
+                )
+                items = parse_dynamic_items(payload)
+            except (BilibiliAPIError, BilibiliConfigError, ValueError) as exc:
+                self._bilibili_dynamic_retry_at[uid] = now + 600
+                self.logger.warning("B 站动态轮询失败：uid=%s error=%s", uid, exc)
+                continue
+            state = self._bilibili_state["dynamic"].get(uid)
+            if state is None:
+                self._bilibili_state["dynamic"][uid] = {
+                    "seen": [item["id"] for item in items[:100]],
+                    "max_pub_ts": max(
+                        (int(item.get("pub_ts") or 0) for item in items),
+                        default=0,
+                    ),
+                }
+                changed = True
+                continue
+            seen = {str(item) for item in state.get("seen") or []}
+            baseline = self._bounded_int(state.get("max_pub_ts"), 0, 0, 4_000_000_000)
+            new_items = sorted(
+                (
+                    item
+                    for item in items
+                    if item["id"] not in seen
+                    and int(item.get("pub_ts") or 0) >= baseline
+                ),
+                key=lambda item: (int(item.get("pub_ts") or 0), item["id"]),
+            )[:10]
+            delivered_items = []
+            for item in new_items:
+                name = self._markdown_text(item.get("author") or f"UID {uid}")
+                title = self._markdown_text(
+                    item.get("title") or item.get("text") or "发布了新动态", 300
+                )
+                summary = self._markdown_text(item.get("text") or "", 500)
+                text = f"# {name} 发布了新动态\n{title}"
+                if summary and summary != title:
+                    text += f"\n{summary}"
+                text += f"\n{item['url']}"
+                if not await self._push_bilibili_message(targets, text, "dynamic"):
+                    break
+                delivered_items.append(item)
+            new_seen = list(
+                dict.fromkeys([item["id"] for item in delivered_items] + list(seen))
+            )[:100]
+            new_max = max(
+                [baseline, *(int(item.get("pub_ts") or 0) for item in delivered_items)]
+            )
+            if state.get("seen") != new_seen or state.get("max_pub_ts") != new_max:
+                state["seen"] = new_seen
+                state["max_pub_ts"] = new_max
+                changed = True
+            await asyncio.sleep(1)
+        return changed
+
+    async def _bilibili_loop(self) -> None:
+        await asyncio.sleep(10)
+        next_dynamic_at = 0.0
+        while True:
+            subscriptions = self._bilibili_subscriptions()
+            changed = False
+            now = time.monotonic()
+            live_uids = {
+                uid
+                for uid, targets in subscriptions.items()
+                if any(target.get("live") for target in targets)
+            }
+            dynamic_uids = {
+                uid
+                for uid, targets in subscriptions.items()
+                if any(target.get("dynamic") for target in targets)
+            }
+            for uid in set(self._bilibili_state["live"]) - live_uids:
+                self._bilibili_state["live"].pop(uid, None)
+                changed = True
+            for uid in set(self._bilibili_state["dynamic"]) - dynamic_uids:
+                self._bilibili_state["dynamic"].pop(uid, None)
+                self._bilibili_dynamic_retry_at.pop(uid, None)
+                changed = True
+            if live_uids and now >= self._bilibili_live_retry_at:
+                try:
+                    changed |= await self._poll_bilibili_live(subscriptions)
+                except (BilibiliAPIError, BilibiliConfigError, ValueError) as exc:
+                    self._bilibili_live_retry_at = now + 600
+                    if now >= self._bilibili_push_warning_at:
+                        self.logger.warning("B 站直播轮询失败，10 分钟后重试：%s", exc)
+                        self._bilibili_push_warning_at = now + 600
+                except Exception as exc:  # noqa: BLE001 - keep push loop alive
+                    self._bilibili_live_retry_at = now + 60
+                    self.logger.warning("B 站直播后台任务本轮失败：%s", exc)
+            if dynamic_uids and now >= next_dynamic_at:
+                try:
+                    changed |= await self._poll_bilibili_dynamics(subscriptions)
+                    next_dynamic_at = now + self._bounded_int(
+                        self.config.get("bilibili_dynamic_interval_seconds"),
+                        180,
+                        60,
+                        3600,
+                    )
+                except (BilibiliAPIError, BilibiliConfigError, ValueError) as exc:
+                    next_dynamic_at = now + 600
+                    if now >= self._bilibili_push_warning_at:
+                        self.logger.warning("B 站动态轮询失败，10 分钟后重试：%s", exc)
+                        self._bilibili_push_warning_at = now + 600
+                except Exception as exc:  # noqa: BLE001 - keep push loop alive
+                    next_dynamic_at = now + 60
+                    self.logger.warning("B 站动态后台任务本轮失败：%s", exc)
+            if changed:
+                try:
+                    await self._save_state()
+                except Exception as exc:  # noqa: BLE001 - keep push loop alive
+                    self.logger.warning("保存 B 站推送状态失败，下轮继续：%s", exc)
+            await asyncio.sleep(
+                self._bounded_int(
+                    self.config.get("bilibili_live_interval_seconds"),
+                    60,
+                    30,
+                    600,
+                )
+            )
+
+    @staticmethod
+    def _raw_data(event: AstrMessageEvent) -> dict[str, Any]:
+        raw = event.message_obj.raw_message
+        value = getattr(raw, "raw_data", None)
+        return value if isinstance(value, dict) else {}
+
+    @staticmethod
+    def _message_role(event: AstrMessageEvent) -> str:
+        author = QQGroupAdmin._raw_data(event).get("author")
+        return (
+            str(author.get("member_role") or "member")
+            if isinstance(author, dict)
+            else "member"
+        )
+
+    @staticmethod
+    def _image_urls(event: AstrMessageEvent) -> list[str]:
+        urls = []
+        for component in getattr(event.message_obj, "message", None) or []:
+            if type(component).__name__ == "Image":
+                url = str(
+                    getattr(component, "url", "")
+                    or getattr(component, "file", "")
+                    or ""
+                ).strip()
+                if url:
+                    urls.append(url)
+        if urls:
+            return urls
+        for attachment in QQGroupAdmin._raw_data(event).get("attachments") or []:
+            if not isinstance(attachment, dict):
+                continue
+            content_type = str(attachment.get("content_type") or "").lower()
+            filename = str(attachment.get("filename") or "").lower()
+            if content_type.startswith("image/") or filename.endswith(
+                (".jpg", ".jpeg", ".png", ".gif", ".webp")
+            ):
+                url = str(attachment.get("url") or "").strip()
+                if url:
+                    if url.startswith("//"):
+                        url = "https:" + url
+                    urls.append(url)
+        return urls
+
+    async def _ai_blocks_message(
+        self,
+        event: AstrMessageEvent,
+        text: str,
+        image_urls: list[str],
+    ) -> bool:
+        if not text and not image_urls:
+            return False
+        prompt = (
+            "审核以下 QQ 群消息是否包含色情、暴力威胁、违法交易、诈骗引流、"
+            "人身攻击或泄露隐私。只输出 ALLOW 或 BLOCK。\n消息：" + (text or "[仅图片]")
+        )
+        try:
+            async with asyncio.timeout(15):
+                async with self._ai_semaphore:
+                    provider_id = await self.context.get_current_chat_provider_id(
+                        event.unified_msg_origin
+                    )
+                    response = await self.context.llm_generate(
+                        chat_provider_id=provider_id,
+                        prompt=prompt,
+                        image_urls=image_urls or None,
+                        system_prompt="你是严格但不误伤正常讨论的群消息审核器。",
+                    )
+        except Exception as exc:  # noqa: BLE001 - moderation is fail-open
+            if time.monotonic() >= self._ai_warning_at:
+                self.logger.warning("AI 群消息审核失败，本条已放行：%s", exc)
+                self._ai_warning_at = time.monotonic() + 300
+            return False
+        return (
+            str(getattr(response, "completion_text", ""))
+            .strip()
+            .upper()
+            .startswith("BLOCK")
+        )
+
+    async def _recall_messages(
+        self,
+        api: QQGroupAPI,
+        group_openid: str,
+        message_ids: list[str],
+    ) -> list[str]:
+        failed = []
+        for message_id in dict.fromkeys(message_ids):
+            try:
+                async with self._recall_lock:
+                    wait = 0.11 - (time.monotonic() - self._last_recall_at)
+                    if wait > 0:
+                        await asyncio.sleep(wait)
+                    try:
+                        await api.recall_group_message(group_openid, message_id)
+                    finally:
+                        self._last_recall_at = time.monotonic()
+            except QQAPIError as exc:
+                failed.append(message_id)
+                self.logger.warning(
+                    "撤回群消息失败：group=%s message=%s error=%s",
+                    group_openid,
+                    message_id,
+                    exc,
+                )
+        return failed
+
+    async def _warn_member(
+        self,
+        event: AstrMessageEvent,
+        member_openid: str,
+        reason: str,
+        *,
+        message_id: str = "",
+    ) -> None:
+        _, group_openid, _ = self._context(event)
+        await self._send_group_markdown(
+            self._client(event),
+            group_openid,
+            f"{self._mention(member_openid)} {reason}",
+            message_id=message_id,
+        )
+
+    @filter.platform_adapter_type(QQ_PLATFORM_TYPES)
+    @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)
+    async def audit_group_message(self, event: AstrMessageEvent) -> None:
+        try:
+            await self._audit_group_message_impl(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - moderation must fail open
+            self.logger.warning("群消息审核失败，本条已放行：%s", exc)
+
+    async def _audit_group_message_impl(self, event: AstrMessageEvent) -> None:
+        try:
+            raw, group_openid, member_openid = self._context(event)
+        except ValueError:
+            return
+        message_id = str(getattr(event.message_obj, "message_id", "") or "")
+        if not message_id:
+            return
+        raw_data = self._raw_data(event)
+        author = raw_data.get("author")
+        if isinstance(author, dict) and author.get("bot") is True:
+            return
+        msg_seq = str(getattr(raw, "msg_seq", "") or raw_data.get("msg_seq") or "")
+        delivery_key = (
+            str(event.get_platform_id()),
+            group_openid,
+            message_id,
+            msg_seq,
+        )
+        duplicate = self._moderation.duplicate(delivery_key)
+        if duplicate is not None:
+            if hasattr(event, "stop_event"):
+                event.stop_event()
+            return
+
+        suspicious_key = self._member_state_key(group_openid, member_openid)
+        if suspicious_key in self._suspicious_members:
+            if hasattr(event, "stop_event"):
+                event.stop_event()
+            try:
+                self._cleanup_tokens()
+                if not any(
+                    data[1:3] == (group_openid, member_openid)
+                    for data in self._verification_tokens.values()
+                ):
+                    await self._send_verification_challenge(
+                        self._client(event),
+                        group_openid,
+                        member_openid,
+                        message_id=message_id,
+                    )
+            except Exception as exc:  # noqa: BLE001 - QQ keyboard boundary
+                self.logger.warning("发送真人验证按钮失败：%s", exc)
+            failed = await self._recall_messages(
+                self._api(event), group_openid, [message_id]
+            )
+            if not failed:
+                self._moderation.remember(delivery_key, True)
+            return
+
+        entry = self._group_config(group_openid)
+        settings = self._moderation_settings(entry)
+        if not settings["enabled"]:
+            self._moderation.remember(delivery_key, False)
+            return
+        role = self._message_role(event)
+        if settings["exempt_admins"] and role in GROUP_ADMIN_ROLES:
+            self._moderation.remember(delivery_key, False)
+            return
+
+        text = str(event.get_message_str() or "").strip()
+        images = self._image_urls(event)
+        reason = ""
+        recall_ids: list[str] = []
+        if matched_keyword(text, settings["global_keywords"]):
+            reason = "消息命中全局禁止关键词，已撤回。"
+        elif matched_keyword(text, settings["keywords"]):
+            reason = "消息命中本群禁止关键词，已撤回。"
+        elif settings["image_enabled"]:
+            recall_ids = self._moderation.add_images(
+                group_openid,
+                member_openid,
+                message_id,
+                len(images),
+                threshold=settings["image_count"],
+                window=settings["image_window"],
+            )
+            if recall_ids:
+                reason = "短时间连续发送图片，相关消息已撤回。"
+
+        repeat_members: list[str] = []
+        if not reason and settings["repeat_enabled"]:
+            signature = normalize_message(text, len(images))
+            repeat_members = self._moderation.add_repeat(
+                group_openid,
+                signature,
+                member_openid,
+                role,
+                message_id,
+                threshold=settings["repeat_count"],
+                window=settings["repeat_window"],
+            )
+            if repeat_members:
+                reason = "检测到集中复读，已随机禁言一名参与者。"
+                recall_ids = [message_id]
+        if (
+            not reason
+            and settings["ai_enabled"]
+            and await self._ai_blocks_message(event, text, images)
+        ):
+            reason = "消息未通过 AI 内容审核，已撤回。"
+
+        if not reason:
+            self._moderation.remember(delivery_key, False)
+            return
+        if hasattr(event, "stop_event"):
+            event.stop_event()
+        target_member = member_openid
+        if repeat_members:
+            target_member = secrets.choice(repeat_members)
+            duration = (
+                secrets.randbelow(
+                    settings["repeat_mute_max"] - settings["repeat_mute_min"] + 1
+                )
+                + settings["repeat_mute_min"]
+            )
+            try:
+                await self._api(event).set_member_mutes(
+                    group_openid,
+                    [
+                        {
+                            "op": "add",
+                            "member_openid": target_member,
+                            "mute_expire_at": future_rfc3339(
+                                parse_duration(str(duration))
+                            ),
+                        }
+                    ],
+                )
+            except (QQAPIError, ValueError) as exc:
+                self.logger.warning("复读随机禁言失败：%s", exc)
+                reason = "检测到集中复读，相关消息已撤回；随机禁言失败。"
+            else:
+                reason = f"参与集中复读，已随机禁言 {duration} 秒。"
+        uid = self._uid_for_member(group_openid, target_member)
+        self.logger.info(
+            "已处理违规群消息：group=%s member=%s uid=%s reason=%s",
+            group_openid,
+            target_member,
+            uid or "-",
+            reason,
+        )
+        if uid:
+            await self._record_uid_violation(
+                uid,
+                group_openid,
+                target_member,
+                reason,
+            )
+        try:
+            await self._warn_member(
+                event,
+                target_member,
+                reason,
+                message_id=message_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - warning should not reopen event
+            self.logger.warning("发送群消息审核警告失败：%s", exc)
+        failed = await self._recall_messages(
+            self._api(event), group_openid, recall_ids or [message_id]
+        )
+        if not failed:
+            self._moderation.remember(delivery_key, True)
 
     def _save_group_config(
         self,
@@ -1029,7 +2062,12 @@ class QQGroupAdmin(Star):
                     button("approve", "未通过同意", "approve", 0),
                 ]
             },
-            {"buttons": [button("sync", "应用当前配置", "sync", 1)]},
+            {
+                "buttons": [
+                    button("moderation", "消息审查", "moderation", 1),
+                    button("sync", "应用审核配置", "sync", 1),
+                ]
+            },
         ]
         entry = self._group_config(group_openid)
         settings = self._condition_settings(entry) if entry else {}
@@ -1094,6 +2132,86 @@ class QQGroupAdmin(Star):
             self.logger.warning("QQ 未返回审核设置消息 ID，无法自动撤回")
         if hasattr(event, "stop_event"):
             event.stop_event()
+
+    async def _send_moderation_settings(
+        self,
+        client: Any,
+        group_openid: str,
+        token: str,
+        group_name: str,
+    ) -> None:
+        def button(
+            button_id: str, label: str, action: str, style: int
+        ) -> dict[str, Any]:
+            return {
+                "id": button_id,
+                "render_data": {
+                    "label": label,
+                    "visited_label": label,
+                    "style": style,
+                },
+                "action": {
+                    "type": 1,
+                    "permission": {"type": 1},
+                    "data": f"qqgs:{token}:{action}",
+                    "unsupport_tips": "当前 QQ 版本不支持设置按钮",
+                },
+            }
+
+        entry = self._group_config(group_openid, required=True)
+        settings = self._moderation_settings(entry)
+        rows = [
+            {
+                "buttons": [
+                    button("mod-on", "审查开启", "mod_on", 1),
+                    button("mod-off", "审查关闭", "mod_off", 0),
+                ]
+            },
+            {
+                "buttons": [
+                    button("ai-on", "AI开启", "ai_on", 1),
+                    button("ai-off", "AI关闭", "ai_off", 0),
+                ]
+            },
+            {
+                "buttons": [
+                    button("image-on", "连图开启", "image_on", 1),
+                    button("image-off", "连图关闭", "image_off", 0),
+                ]
+            },
+            {
+                "buttons": [
+                    button("repeat-on", "复读开启", "repeat_on", 1),
+                    button("repeat-off", "复读关闭", "repeat_off", 0),
+                ]
+            },
+            {
+                "buttons": [
+                    button("verify-on", "兜底验证开", "verify_on", 1),
+                    button("verify-off", "兜底验证关", "verify_off", 0),
+                ]
+            },
+        ]
+        text = (
+            f"# {self._markdown_text(group_name)} 消息审查\n"
+            f"总开关：{'开' if settings['enabled'] else '关'}；"
+            f"AI：{'开' if settings['ai_enabled'] else '关'}；"
+            f"连图：{'开' if settings['image_enabled'] else '关'}；"
+            f"复读：{'开' if settings['repeat_enabled'] else '关'}\n"
+            f"兜底真人验证：{'开' if entry.get('fallback_human_verify_enabled') else '关'}；"
+            "关键词和阈值请在插件页面配置。"
+        )
+        sent = await self._send_group_markdown(
+            client,
+            group_openid,
+            text,
+            keyboard={"content": {"rows": rows}},
+        )
+        sent_id = str(
+            sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
+        )
+        if sent_id and bool(self.config.get("settings_panel_auto_recall", True)):
+            self._schedule_settings_recall(client, group_openid, sent_id)
 
     def _schedule_settings_recall(
         self,
@@ -1343,15 +2461,28 @@ class QQGroupAdmin(Star):
         _, group_openid, _ = self._context(event)
         kwargs = {
             "group_openid": group_openid,
-            "msg_type": 0,
-            "content": text,
+            "msg_type": 2,
+            "markdown": {"content": text},
         }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if message_id:
             kwargs["msg_id"] = message_id
-        await self._client(event).api.post_group_message(**kwargs)
         if hasattr(event, "stop_event"):
             event.stop_event()
+        try:
+            await self._client(event).api.post_group_message(**kwargs)
+        except Exception as exc:  # noqa: BLE001 - mute already succeeded
+            self.logger.warning("发送禁言成功艾特回复失败，改发普通文本：%s", exc)
+            fallback = text.replace(mention, member_openid)
+            try:
+                await self._send_group_text(
+                    self._client(event),
+                    group_openid,
+                    fallback,
+                    message_id=message_id,
+                )
+            except Exception as fallback_exc:  # noqa: BLE001 - do not report mute failure
+                self.logger.warning("发送禁言成功回复失败：%s", fallback_exc)
         return None
 
     @qq_admin_command("禁言")
@@ -1394,10 +2525,10 @@ class QQGroupAdmin(Star):
             yield result
 
     @qq_admin_command("解禁")
-    async def mute_remove(self, event: AstrMessageEvent, member_openid: str):
+    async def mute_remove(self, event: AstrMessageEvent, member_openid: str = ""):
         """立即解除成员禁言。"""
         _, group_openid, _ = self._context(event)
-        member = self._target_member(event, member_openid)
+        member = self._target_member(event, member_openid or "@")
         await self._api(event).set_member_mutes(
             group_openid,
             [{"op": "del", "member_openid": member, "mute_expire_at": ""}],
@@ -1407,11 +2538,6 @@ class QQGroupAdmin(Star):
     @qq_admin_regex(r"^/?解禁(?=<@!?[^>]+>|@\S+)")
     async def mute_remove_compact(self, event: AstrMessageEvent):
         """兼容命令与 @成员 之间不留空格。"""
-        if not re.fullmatch(
-            r"/?解禁(?:<@!?[^>]+>|@\S+)",
-            event.get_message_str().strip(),
-        ):
-            raise ValueError("用法：/解禁@成员")
         _, group_openid, _ = self._context(event)
         member = self._target_member(event, "@")
         await self._api(event).set_member_mutes(
@@ -1567,6 +2693,16 @@ class QQGroupAdmin(Star):
             "pending": ("fallback_action", "pending"),
             "decline": ("fallback_action", "decline"),
             "approve": ("fallback_action", "approve"),
+            "mod_on": ("moderation_enabled", True),
+            "mod_off": ("moderation_enabled", False),
+            "ai_on": ("ai_review_enabled", True),
+            "ai_off": ("ai_review_enabled", False),
+            "image_on": ("image_spam_enabled", True),
+            "image_off": ("image_spam_enabled", False),
+            "repeat_on": ("repeat_review_enabled", True),
+            "repeat_off": ("repeat_review_enabled", False),
+            "verify_on": ("fallback_human_verify_enabled", True),
+            "verify_off": ("fallback_human_verify_enabled", False),
         }
         if action in updates:
             key, value = updates[action]
@@ -1617,6 +2753,7 @@ class QQGroupAdmin(Star):
         group_name = str(entry.get("group_name") or "").strip()
         native_enabled = bool(entry.get("enabled", False))
         settings = self._condition_settings(entry)
+        moderation = self._moderation_settings(entry)
         condition_enabled = settings["enabled"]
         mode = (
             "native"
@@ -1649,6 +2786,24 @@ class QQGroupAdmin(Star):
             "reject_keywords": "\n".join(settings["reject_keywords"]),
             "condition_logic": settings["condition_logic"],
             "fallback_action": settings["fallback_action"],
+            "fallback_human_verify_enabled": settings["fallback_human_verify_enabled"],
+            "moderation_enabled": moderation["enabled"],
+            "moderation_exempt_admins": moderation["exempt_admins"],
+            "message_reject_keywords": "\n".join(moderation["keywords"]),
+            "ai_review_enabled": moderation["ai_enabled"],
+            "image_spam_enabled": moderation["image_enabled"],
+            "image_spam_count": moderation["image_count"],
+            "image_spam_window_seconds": moderation["image_window"],
+            "repeat_review_enabled": moderation["repeat_enabled"],
+            "repeat_count": moderation["repeat_count"],
+            "repeat_window_seconds": moderation["repeat_window"],
+            "repeat_mute_min_seconds": moderation["repeat_mute_min"],
+            "repeat_mute_max_seconds": moderation["repeat_mute_max"],
+            "bilibili_uids": "\n".join(self._bilibili_uids(entry)),
+            "bilibili_dynamic_enabled": bool(
+                entry.get("bilibili_dynamic_enabled", False)
+            ),
+            "bilibili_live_enabled": bool(entry.get("bilibili_live_enabled", False)),
             "scan_pending": bool(entry.get("scan_pending", True)),
             "button_reject_reason": str(
                 entry.get("button_reject_reason") or "管理员拒绝"
@@ -1691,8 +2846,55 @@ class QQGroupAdmin(Star):
                 "fallback_action": str(payload["fallback_action"]),
                 "scan_pending": bool(payload["scan_pending"]),
                 "button_reject_reason": str(payload["button_reject_reason"]),
+                "fallback_human_verify_enabled": bool(
+                    payload["fallback_human_verify_enabled"]
+                ),
+                "moderation_enabled": bool(payload["moderation_enabled"]),
+                "moderation_exempt_admins": bool(payload["moderation_exempt_admins"]),
+                "message_reject_keywords": str(payload["message_reject_keywords"]),
+                "ai_review_enabled": bool(payload["ai_review_enabled"]),
+                "image_spam_enabled": bool(payload["image_spam_enabled"]),
+                "image_spam_count": int(payload["image_spam_count"]),
+                "image_spam_window_seconds": int(payload["image_spam_window_seconds"]),
+                "repeat_review_enabled": bool(payload["repeat_review_enabled"]),
+                "repeat_count": int(payload["repeat_count"]),
+                "repeat_window_seconds": int(payload["repeat_window_seconds"]),
+                "repeat_mute_min_seconds": int(payload["repeat_mute_min_seconds"]),
+                "repeat_mute_max_seconds": int(payload["repeat_mute_max_seconds"]),
+                "bilibili_uids": str(payload["bilibili_uids"]),
+                "bilibili_dynamic_enabled": bool(payload["bilibili_dynamic_enabled"]),
+                "bilibili_live_enabled": bool(payload["bilibili_live_enabled"]),
             }
         )
+
+    async def web_identities(self) -> dict[str, list[dict[str, Any]]]:
+        bindings = sorted(
+            (dict(binding) for binding in self._uid_bindings.values()),
+            key=lambda item: str(item.get("uid") or ""),
+        )
+        suspicious = sorted(
+            (dict(item) for item in self._suspicious_members.values()),
+            key=lambda item: int(item.get("created_at") or 0),
+            reverse=True,
+        )
+        return {"bindings": bindings, "suspicious": suspicious}
+
+    async def web_delete_binding(self, uid: str) -> dict[str, str]:
+        if self._uid_bindings.pop(uid, None) is None:
+            raise LookupError("找不到该 UID 绑定")
+        await self._save_state()
+        return {"uid": uid}
+
+    async def web_clear_suspicious(
+        self,
+        group_openid: str,
+        member_openid: str,
+    ) -> dict[str, str]:
+        key = self._member_state_key(group_openid, member_openid)
+        if self._suspicious_members.pop(key, None) is None:
+            raise LookupError("找不到该待验证成员")
+        await self._save_state()
+        return {"group_openid": group_openid, "member_openid": member_openid}
 
     async def web_batch_save(
         self,

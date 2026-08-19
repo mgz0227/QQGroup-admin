@@ -36,6 +36,10 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-sp
 .stat span { display: block; margin-top: 10px; color: #697386; font-size: 14px; }
 
 .group-list { border-top: 1px solid #dce2e8; background: #fff; }
+.identity-list { margin-top: 24px; }
+.identity-list .list-header p { margin: 6px 0 0; color: #697386; font-size: 13px; }
+.sub-list-header { padding: 20px 24px 8px; border-top: 1px solid #e5e9ee; }
+.sub-list-header h3 { margin: 0; font-size: 16px; }
 .list-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #e5e9ee; }
 .batch-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 20px; border-bottom: 1px solid #e5e9ee; background: #f7f9fb; color: #475467; font-size: 14px; }
 .batch-toolbar strong { color: #101828; }
@@ -77,6 +81,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .form-grid label { display: block; min-width: 0; color: #344054; font-size: 13px; font-weight: 600; }
 .form-grid label > span { display: block; margin-bottom: 7px; }
 .form-grid .wide { grid-column: 1 / -1; }
+.section-title { padding-top: 8px; border-top: 1px solid #e5e9ee; color: #18212f; font-size: 15px; font-weight: 700; }
 .batch-overwrite { min-width: 0; margin: 0; padding: 0; border: 0; }
 .batch-overwrite .checkbox { margin-bottom: 8px; color: #344054; font-size: 13px; font-weight: 600; }
 .checkbox { display: flex !important; align-items: center; gap: 9px; }
@@ -132,7 +137,9 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .button.secondary, .stat, .group-list, input, select, textarea, dialog { border-color: #39424d; background: #20262e; color: #e8edf3; }
   .button.secondary:hover, input[readonly] { background: #2a313a; }
   .stat strong, .group-identity strong { color: #f4f6f8; }
-  .group-list, .list-header, .batch-toolbar, th, td, .dialog-header { border-color: #343c46; }
+  .group-list, .list-header, .batch-toolbar, th, td, .dialog-header, .sub-list-header, .section-title { border-color: #343c46; }
+  .identity-list .list-header p { color: #9ca7b5; }
+  .section-title { color: #e8edf3; }
   .batch-toolbar { background: #1b2128; color: #aeb8c4; }
   .batch-toolbar strong { color: #f4f6f8; }
   .form-grid label, .batch-overwrite .checkbox { color: #c3ccd7; }

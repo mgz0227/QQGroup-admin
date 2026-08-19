@@ -87,6 +87,27 @@ WebUI 保存的是期望状态。绑定后修改条件会在下个周期生效�
 
 通用配置中的“启用审核设置命令”默认开启；关闭后群内 `/审核设置` 不会发送面板，重新开启需在 AstrBot 插件配置中操作。
 
+## 群消息审查
+
+每个已绑定群都可以独立启用消息审查，并在群内 `/审核设置 -> 消息审查` 或 WebUI 中开关关键词、AI、连续发图和复读检测。全局消息拒绝关键词优先于群级关键词；命中后立即停止后续插件和默认模型处理并撤回消息。
+
+- AI 审核只处理未命中本地规则的消息，使用当前会话模型；超时、没有可用模型或返回异常时放行，避免模型故障阻塞整群。
+- 连续发图按成员和时间窗统计，达到阈值后撤回该轮图片并发出警告。
+- 集中复读达到阈值后撤回该轮消息，从参与的普通成员中随机选择一人，并在配置区间内随机禁言。
+- 默认不审查群主、管理员和机器人自身消息。QQ 开放平台必须开启“接收所有群消息”，否则插件只能看到 @机器人的消息。
+
+## 真人验证与 UID 身份
+
+当自动审核条件未通过但兜底动作选择“同意”时，可开启兜底真人验证。用户入群后会被标记为可疑；验证前发送的消息会被撤回并重新显示一道仅本人可点击的算术按钮题，答对后恢复正常。
+
+通过 B 站 UID 审核的用户会与 UID 绑定。同一个 UID 只能绑定一个 QQ 联合身份；冲突申请会被拒绝。WebUI 的身份记录可查看 UID、关联群和违规次数，也可以手动解除绑定；可疑用户列表支持管理员手动解除状态。
+
+## B 站推送
+
+每个群可绑定多个 UP 主 UID，并分别启用直播和动态推送。直播状态使用 B 站匿名批量接口，不需要 Cookie；动态推送需要在插件全局配置中填写有效的 B 站 Cookie，并通过 WBI 签名访问。Cookie 会保存在 AstrBot 插件配置中，但不会写入插件日志或群消息。
+
+首次成功轮询只建立状态，不补发历史动态或当前直播。后续会推送新动态、开播和下播；同一 UID 被多个群订阅时只请求一次再分发。网络失败、限流或风控不会清空游标，也不会误报下播。
+
 ## 自动审核
 
 `/自动审核开启 123456,789012` 会为当前群创建 QQ 官方白名单自动审核策略。白名单中的后续入群申请由 QQ 平台自动通过，不依赖 AstrBot 入群事件，也不需要插件后台轮询。
@@ -125,6 +146,8 @@ QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转�
 - [QQ 文本交互与艾特格式](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/text-chain.html)
 - [QQ 互动事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)
 - [Bilibili API Collect：用户名片信息](https://github.com/Goooler/bilibili-API-collect/blob/trunk/docs/user/info.md#用户名片信息)
+- [Bilibili API Collect：空间动态](https://github.com/Goooler/bilibili-API-collect/blob/trunk/docs/dynamic/space.md)
+- [Bilibili API Collect：直播状态](https://github.com/Goooler/bilibili-API-collect/blob/trunk/docs/live/info.md)
 - [astrbot_plugin_qq_group_admin](https://github.com/CyreneLian/astrbot_plugin_qq_group_admin)（插件管理页面入口的设计参考）
 - [AstrBot 插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)
 - [AstrBot 插件配置指南](https://docs.astrbot.app/dev/star/guides/plugin-config.html)
@@ -133,5 +156,5 @@ QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转�
 
 ```bash
 python -m unittest discover -s tests -v
-python -m py_compile main.py web.py qq_api.py review.py
+python -m py_compile main.py web.py qq_api.py review.py moderation.py bilibili.py
 ```

@@ -41,6 +41,31 @@
     "hint": "逗号、分号或换行分隔，最多 100 个。命中后立即拒绝，优先于群级规则、有效 UID 直通和其他条件。",
     "default": ""
   },
+  "global_message_reject_keywords": {
+    "type": "text",
+    "description": "全局消息撤回关键词",
+    "hint": "命中后撤回所有已开启消息审查群中的普通成员消息，优先于群级规则。",
+    "default": ""
+  },
+  "bilibili_cookie": {
+    "type": "string",
+    "description": "B站 Cookie（动态推送）",
+    "hint": "仅动态推送需要完整 Cookie；直播推送不需要。Cookie 会保存在 AstrBot 插件配置中，但不会写入日志。",
+    "obvious_hint": true,
+    "default": ""
+  },
+  "bilibili_live_interval_seconds": {
+    "type": "int",
+    "description": "B站直播轮询间隔（秒）",
+    "default": 60,
+    "slider": {"min": 30, "max": 600, "step": 30}
+  },
+  "bilibili_dynamic_interval_seconds": {
+    "type": "int",
+    "description": "B站动态轮询间隔（秒）",
+    "default": 180,
+    "slider": {"min": 60, "max": 3600, "step": 60}
+  },
   "auto_review_groups": {
     "type": "template_list",
     "description": "QQ群自动审核配置",
@@ -127,6 +152,97 @@
             "default": "pending",
             "options": ["pending", "decline", "approve"],
             "labels": ["保留待审", "拒绝申请", "同意申请"]
+          },
+          "fallback_human_verify_enabled": {
+            "type": "bool",
+            "description": "兜底同意后真人验证",
+            "hint": "仅条件未通过但兜底同意的用户会被标记为可疑；验证前发言会撤回并弹出算术按钮。",
+            "default": false
+          },
+          "moderation_enabled": {
+            "type": "bool",
+            "description": "启用群消息审查",
+            "hint": "需要在 QQ 开放平台开启接收所有群消息。",
+            "default": false
+          },
+          "moderation_exempt_admins": {
+            "type": "bool",
+            "description": "群主和管理员免审",
+            "default": true
+          },
+          "message_reject_keywords": {
+            "type": "text",
+            "description": "消息撤回关键词",
+            "hint": "逗号、分号或换行分隔，命中后立即撤回。全局关键词优先。",
+            "default": ""
+          },
+          "ai_review_enabled": {
+            "type": "bool",
+            "description": "启用 AI 内容审核",
+            "hint": "使用当前会话模型审核未命中本地规则的消息；模型异常时放行。",
+            "default": false
+          },
+          "image_spam_enabled": {
+            "type": "bool",
+            "description": "检测连续发图",
+            "default": false
+          },
+          "image_spam_count": {
+            "type": "int",
+            "description": "连续图片触发数量",
+            "default": 5,
+            "slider": {"min": 2, "max": 20, "step": 1}
+          },
+          "image_spam_window_seconds": {
+            "type": "int",
+            "description": "连续发图时间窗（秒）",
+            "default": 15,
+            "slider": {"min": 3, "max": 120, "step": 3}
+          },
+          "repeat_review_enabled": {
+            "type": "bool",
+            "description": "检测集中复读",
+            "default": false
+          },
+          "repeat_count": {
+            "type": "int",
+            "description": "复读触发次数",
+            "default": 4,
+            "slider": {"min": 3, "max": 20, "step": 1}
+          },
+          "repeat_window_seconds": {
+            "type": "int",
+            "description": "复读时间窗（秒）",
+            "default": 30,
+            "slider": {"min": 5, "max": 120, "step": 5}
+          },
+          "repeat_mute_min_seconds": {
+            "type": "int",
+            "description": "复读随机禁言最短秒数",
+            "default": 60
+          },
+          "repeat_mute_max_seconds": {
+            "type": "int",
+            "description": "复读随机禁言最长秒数",
+            "default": 600
+          },
+          "bilibili_uids": {
+            "type": "text",
+            "description": "B站 UP 主 UID",
+            "hint": "空格、逗号或换行分隔，每群最多 100 个。",
+            "default": ""
+          },
+          "bilibili_dynamic_enabled": {
+            "type": "bool",
+            "description": "推送 B站动态",
+            "hint": "需要配置全局 B站 Cookie；首次轮询只建立游标，不推送历史动态。",
+            "default": false
+          },
+          "bilibili_live_enabled": {
+            "type": "bool",
+            "description": "推送 B站开播和下播",
+            "hint": "无需 B站 Cookie；首次轮询只建立状态。",
+            "default": false
           },
           "button_reject_reason": {
             "type": "string",

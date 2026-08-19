@@ -5,6 +5,7 @@
   var BATCH_GROUP_LIMIT = 100;
   var groups = [];
   var selected = new Set();
+  var identities = { bindings: [], suspicious: [] };
   var editingGroup;
   var toastTimer;
 
@@ -158,6 +159,76 @@
     updateSelectionControls(visible);
   }
 
+  function tableCell(text, code) {
+    var cell = document.createElement("td");
+    var node = code ? document.createElement("code") : document.createElement("span");
+    node.textContent = text == null || text === "" ? "-" : String(text);
+    cell.appendChild(node);
+    return cell;
+  }
+
+  function renderIdentities() {
+    var bindingRows = element("binding-rows");
+    var suspiciousRows = element("suspicious-rows");
+    bindingRows.replaceChildren();
+    suspiciousRows.replaceChildren();
+    var bindings = Array.isArray(identities.bindings) ? identities.bindings : [];
+    var suspicious = Array.isArray(identities.suspicious) ? identities.suspicious : [];
+    if (!bindings.length) {
+      bindingRows.innerHTML = '<tr><td class="empty" colspan="5">暂无 UID 身份绑定</td></tr>';
+    }
+    bindings.forEach(function (binding) {
+      var row = document.createElement("tr");
+      var actions = document.createElement("td");
+      actions.className = "row-actions";
+      actions.appendChild(actionButton("解除绑定", "danger", function () {
+        confirmAction("解除 UID 绑定", "确认解除 UID " + binding.uid + " 的唯一身份绑定？", function () {
+          apiPost("binding-delete", { uid: String(binding.uid) })
+            .then(function () { toast("UID 绑定已解除"); load(); })
+            .catch(function (error) { toast("解除失败：" + error.message, true); });
+        });
+      }));
+      var groupNames = (binding.groups || []).map(function (id) {
+        var group = groups.find(function (item) { return item.group_openid === id; });
+        return group ? group.group_name : id;
+      }).join("、");
+      var violation = Number(binding.violation_count || 0) + " 次";
+      if (binding.last_violation_reason) violation += "；" + binding.last_violation_reason;
+      row.append(
+        tableCell(binding.uid, true),
+        tableCell(binding.username || binding.identity, false),
+        tableCell(groupNames, false),
+        tableCell(violation, false),
+        actions
+      );
+      bindingRows.appendChild(row);
+    });
+    if (!suspicious.length) {
+      suspiciousRows.innerHTML = '<tr><td class="empty" colspan="4">暂无待真人验证成员</td></tr>';
+    }
+    suspicious.forEach(function (member) {
+      var row = document.createElement("tr");
+      var actions = document.createElement("td");
+      actions.className = "row-actions";
+      actions.appendChild(actionButton("解除标记", "danger", function () {
+        confirmAction("解除可疑标记", "确认允许该成员恢复正常发言？", function () {
+          apiPost("suspicious-clear", {
+            group_openid: member.group_openid,
+            member_openid: member.member_openid
+          }).then(function () { toast("可疑标记已解除"); load(); })
+            .catch(function (error) { toast("解除失败：" + error.message, true); });
+        });
+      }));
+      row.append(
+        tableCell(member.username || member.member_openid, false),
+        tableCell(member.group_openid, true),
+        tableCell(member.reason, false),
+        actions
+      );
+      suspiciousRows.appendChild(row);
+    });
+  }
+
   function fillOverview(data) {
     ["total", "bound", "active", "pending"].forEach(function (key) {
       element("stat-" + key).textContent = data[key] == null ? "-" : data[key];
@@ -168,10 +239,11 @@
     element("group-rows").innerHTML = '<tr><td class="empty" colspan="6">正在加载...</td></tr>';
     element("batch-toolbar").hidden = true;
     element("select-visible").disabled = true;
-    Promise.all([apiGet("overview"), apiGet("list")])
+    Promise.all([apiGet("overview"), apiGet("list"), apiGet("identities")])
       .then(function (result) {
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
+        identities = result[2] || { bindings: [], suspicious: [] };
         groups.forEach(function (group) {
           if (group.mode === "uid") {
             group.mode = "conditional";
@@ -186,6 +258,7 @@
           if (!groups.some(function (group) { return group.group_openid === id; })) selected.delete(id);
         });
         render();
+        renderIdentities();
       })
       .catch(function (error) {
         element("group-rows").innerHTML = '<tr><td class="empty error" colspan="6"></td></tr>';
@@ -228,6 +301,22 @@
     if (!element("fallback-action").value) element("fallback-action").value = "pending";
     element("reject-reason").value = group.button_reject_reason || "管理员拒绝";
     element("scan-pending").checked = group.scan_pending !== false;
+    element("fallback-human-verify-enabled").checked = group.fallback_human_verify_enabled === true;
+    element("moderation-enabled").checked = group.moderation_enabled === true;
+    element("moderation-exempt-admins").checked = group.moderation_exempt_admins !== false;
+    element("message-reject-keywords").value = group.message_reject_keywords || "";
+    element("ai-review-enabled").checked = group.ai_review_enabled === true;
+    element("image-spam-enabled").checked = group.image_spam_enabled === true;
+    element("image-spam-count").value = group.image_spam_count || 5;
+    element("image-spam-window").value = group.image_spam_window_seconds || 15;
+    element("repeat-review-enabled").checked = group.repeat_review_enabled === true;
+    element("repeat-count").value = group.repeat_count || 4;
+    element("repeat-window").value = group.repeat_window_seconds || 30;
+    element("repeat-mute-min").value = group.repeat_mute_min_seconds || 60;
+    element("repeat-mute-max").value = group.repeat_mute_max_seconds || 600;
+    element("bilibili-uids").value = group.bilibili_uids || "";
+    element("bilibili-dynamic-enabled").checked = group.bilibili_dynamic_enabled === true;
+    element("bilibili-live-enabled").checked = group.bilibili_live_enabled === true;
     updateConditionalFields();
     element("edit-dialog").showModal();
   }
@@ -246,7 +335,23 @@
       condition_logic: element("condition-logic").value,
       fallback_action: element("fallback-action").value,
       button_reject_reason: element("reject-reason").value,
-      scan_pending: element("scan-pending").checked
+      scan_pending: element("scan-pending").checked,
+      fallback_human_verify_enabled: element("fallback-human-verify-enabled").checked,
+      moderation_enabled: element("moderation-enabled").checked,
+      moderation_exempt_admins: element("moderation-exempt-admins").checked,
+      message_reject_keywords: element("message-reject-keywords").value,
+      ai_review_enabled: element("ai-review-enabled").checked,
+      image_spam_enabled: element("image-spam-enabled").checked,
+      image_spam_count: Number(element("image-spam-count").value),
+      image_spam_window_seconds: Number(element("image-spam-window").value),
+      repeat_review_enabled: element("repeat-review-enabled").checked,
+      repeat_count: Number(element("repeat-count").value),
+      repeat_window_seconds: Number(element("repeat-window").value),
+      repeat_mute_min_seconds: Number(element("repeat-mute-min").value),
+      repeat_mute_max_seconds: Number(element("repeat-mute-max").value),
+      bilibili_uids: element("bilibili-uids").value,
+      bilibili_dynamic_enabled: element("bilibili-dynamic-enabled").checked,
+      bilibili_live_enabled: element("bilibili-live-enabled").checked
     };
     button.disabled = true;
     apiPost("save", body)
@@ -277,13 +382,25 @@
       ["batch-uid-exists-auto-approve", "uid_exists_auto_approve", true],
       ["batch-condition-logic", "condition_logic", false],
       ["batch-fallback-action", "fallback_action", false],
-      ["batch-scan-pending", "scan_pending", true]
+      ["batch-scan-pending", "scan_pending", true],
+      ["batch-fallback-human-verify", "fallback_human_verify_enabled", true],
+      ["batch-moderation-enabled", "moderation_enabled", true],
+      ["batch-moderation-exempt-admins", "moderation_exempt_admins", true],
+      ["batch-ai-review-enabled", "ai_review_enabled", true],
+      ["batch-image-spam-enabled", "image_spam_enabled", true],
+      ["batch-repeat-review-enabled", "repeat_review_enabled", true],
+      ["batch-bilibili-dynamic-enabled", "bilibili_dynamic_enabled", true],
+      ["batch-bilibili-live-enabled", "bilibili_live_enabled", true]
     ].forEach(function (item) {
       var value = element(item[0]).value;
       if (value !== "") changes[item[1]] = item[2] ? value === "true" : value;
     });
     document.querySelectorAll("[data-controls]").forEach(function (toggle) {
-      if (toggle.checked) changes[toggle.dataset.field] = element(toggle.dataset.controls).value;
+      if (!toggle.checked) return;
+      var value = element(toggle.dataset.controls).value;
+      changes[toggle.dataset.field] = element(toggle.dataset.controls).type === "number"
+        ? Number(value)
+        : value;
     });
     return changes;
   }

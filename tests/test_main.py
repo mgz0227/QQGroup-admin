@@ -29,6 +29,13 @@ class TestStar:
         self.logger = logging.getLogger("qqgroup-admin-test")
         self.logger.addHandler(logging.NullHandler())
         self.logger.propagate = False
+        self._kv = {}
+
+    async def get_kv_data(self, key, default=None):
+        return self._kv.get(key, default)
+
+    async def put_kv_data(self, key, value):
+        self._kv[key] = value
 
 
 class TestCustomFilter:
@@ -111,6 +118,7 @@ class FakeEvent:
         self.is_at_or_wake_command = True
         self.message_obj = SimpleNamespace(
             message_id="message-1",
+            message=[],
             raw_message=SimpleNamespace(
                 group_openid="group-1",
                 author=SimpleNamespace(member_openid="admin-1"),
@@ -126,6 +134,15 @@ class FakeEvent:
 
     def get_message_str(self):
         return self.message_str
+
+    def get_messages(self):
+        return self.message_obj.message
+
+    def get_group_id(self):
+        return self.message_obj.raw_message.group_openid
+
+    def get_sender_id(self):
+        return self.message_obj.raw_message.author.member_openid
 
     def stop_event(self):
         self.stopped = True
@@ -187,6 +204,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         approvals = []
 
         async def approve(*args, **kwargs):
+            self.assertEqual(client.api.acks[-1], ("interaction-1", 0))
             approvals.append((args, kwargs))
             plugin._forget_request_tokens(args[1], args[3])
 
@@ -214,7 +232,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         interaction.id = "interaction-3"
         interaction.data.resolved.button_data = f"qqga:{token}:approve"
         self.assertTrue(await plugin._handle_interaction(client, interaction))
-        self.assertEqual(client.api.acks[-1], ("interaction-3", 2))
+        self.assertEqual(client.api.acks[-1], ("interaction-3", 0))
 
         interaction.id = "interaction-4"
         interaction.data.resolved.button_data = "other:token:action"
@@ -292,6 +310,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "pending",
                 "decline",
                 "approve",
+                "moderation",
                 "sync",
             ],
         )
@@ -540,6 +559,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                     "group_openid": "bad group",
                 }
             )
+        with self.assertRaises(ValueError):
+            module.GroupAdminWeb._validated_save(
+                {
+                    **payload,
+                    "bilibili_uids": "",
+                    "bilibili_live_enabled": True,
+                }
+            )
 
     def test_uid_review_waits_for_native_strategy_sync(self):
         plugin, _ = self.plugin()
@@ -742,6 +769,185 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(settings["uid_exists_auto_approve"])
 
+    async def test_uid_binding_is_unique_and_fallback_marks_suspicious(self):
+        plugin, client = self.plugin()
+        plugin._uid_bindings["188144093"] = {"identity": "union:other"}
+        api = SimpleNamespace(
+            list_join_requests=AsyncMock(
+                return_value={
+                    "list": [
+                        {
+                            "member_openid": "member-1",
+                            "union_openid": "union-1",
+                            "join_request_id": "request-1",
+                            "apply_source": "self_apply",
+                            "verify_info": {"verify_message": "UID:188144093"},
+                        },
+                        {
+                            "member_openid": "member-2",
+                            "union_openid": "union-2",
+                            "join_request_id": "request-2",
+                            "apply_source": "self_apply",
+                            "verify_info": {"verify_message": "普通申请"},
+                        },
+                    ],
+                    "next_cursor": "",
+                }
+            ),
+            approve_join_request=AsyncMock(),
+        )
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(plugin, "_send_verification_challenge", AsyncMock()) as send,
+        ):
+            await plugin._poll_uid_group(
+                client,
+                "platform-1",
+                "group-1",
+                {
+                    "uid_check_enabled": True,
+                    "uid_exists_auto_approve": True,
+                    "approve_keywords": [],
+                    "reject_keywords": [],
+                    "condition_logic": "all",
+                    "fallback_action": "approve",
+                    "fallback_human_verify_enabled": True,
+                },
+            )
+
+        calls = api.approve_join_request.await_args_list
+        self.assertEqual([call.kwargs["op"] for call in calls], ["decline", "approve"])
+        self.assertEqual(
+            calls[0].kwargs["reject_reason"], "该 B 站 UID 已绑定其他 QQ 用户"
+        )
+        self.assertIn("group-1:member-2", plugin._suspicious_members)
+        send.assert_awaited_once_with(client, "group-1", "member-2")
+
+    async def test_suspicious_message_is_recalled_and_verified_by_owner(self):
+        plugin, client = self.plugin()
+        plugin._suspicious_members["group-1:admin-1"] = {"reason": "test"}
+        event = FakeEvent(client, "hello")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        message = client.api.messages[-1]
+        self.assertEqual(message["msg_type"], 2)
+        buttons = message["keyboard"]["content"]["rows"][0]["buttons"]
+        self.assertTrue(all(button["render_data"]["style"] == 1 for button in buttons))
+        self.assertTrue(
+            all(
+                button["action"]["permission"]
+                == {"type": 0, "specify_user_ids": ["admin-1"]}
+                for button in buttons
+            )
+        )
+        token = buttons[0]["action"]["data"].split(":")[1]
+        answer = plugin._verification_tokens[token][3]
+        interaction = SimpleNamespace(
+            id="verify-1",
+            type=11,
+            chat_type=1,
+            group_openid="group-1",
+            group_member_openid="admin-1",
+            data=SimpleNamespace(
+                resolved=SimpleNamespace(button_data=f"qqgv:{token}:{answer}")
+            ),
+        )
+        self.assertTrue(await plugin._handle_interaction(client, interaction))
+        self.assertNotIn("group-1:admin-1", plugin._suspicious_members)
+        self.assertEqual(client.api.acks[-1], ("verify-1", 0))
+
+    async def test_bot_message_is_not_moderated(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "禁止词")
+        event.message_obj.raw_message.raw_data = {
+            "author": {"member_openid": "admin-1", "bot": True}
+        }
+        plugin.config["auto_review_groups"][0].update(
+            {"moderation_enabled": True, "message_reject_keywords": "禁止词"}
+        )
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertFalse(event.stopped)
+        api.recall_group_message.assert_not_awaited()
+
+    async def test_duplicate_delivery_never_reaches_later_handlers(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "hello")
+        event.message_obj.raw_message.msg_seq = 1
+        key = ("platform-1", "group-1", "message-1", "1")
+        plugin._moderation.remember(key, False)
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+
+    async def test_bilibili_dynamic_seed_and_delivery_retry(self):
+        plugin, _ = self.plugin()
+        plugin.config["bilibili_cookie"] = "cookie"
+        subscriptions = {
+            "188144093": [
+                {
+                    "group_openid": "group-1",
+                    "platform_id": "platform-1",
+                    "dynamic": True,
+                    "live": False,
+                }
+            ]
+        }
+        item = {
+            "id": "dynamic-1",
+            "uid": "188144093",
+            "author": "UP",
+            "pub_ts": 100,
+            "title": "新动态",
+            "text": "正文",
+            "url": "https://www.bilibili.com/opus/dynamic-1",
+        }
+        with (
+            patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
+            patch.object(module, "fetch_space_dynamics", return_value={}),
+            patch.object(module, "parse_dynamic_items", return_value=[]),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
+        self.assertEqual(
+            plugin._bilibili_state["dynamic"]["188144093"],
+            {"seen": [], "max_pub_ts": 0},
+        )
+
+        with (
+            patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
+            patch.object(module, "fetch_space_dynamics", return_value={}),
+            patch.object(module, "parse_dynamic_items", return_value=[item]),
+            patch.object(
+                plugin, "_push_bilibili_message", AsyncMock(return_value=False)
+            ),
+        ):
+            self.assertFalse(await plugin._poll_bilibili_dynamics(subscriptions))
+        self.assertEqual(plugin._bilibili_state["dynamic"]["188144093"]["seen"], [])
+
+        with (
+            patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
+            patch.object(module, "fetch_space_dynamics", return_value={}),
+            patch.object(module, "parse_dynamic_items", return_value=[item]),
+            patch.object(
+                plugin, "_push_bilibili_message", AsyncMock(return_value=True)
+            ),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
+        self.assertEqual(
+            plugin._bilibili_state["dynamic"]["188144093"]["seen"],
+            ["dynamic-1"],
+        )
+
     async def test_bilibili_failure_does_not_skip_later_hard_reject(self):
         plugin, _ = self.plugin()
         api = SimpleNamespace(
@@ -819,9 +1025,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
-            client.api.messages[-1]["content"],
+            client.api.messages[-1]["markdown"]["content"],
             '已禁言 45 秒：<qqbot-at-user id="member-1" />',
         )
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
 
     async def test_standard_mute_stops_after_direct_mention_reply(self):
         plugin, client = self.plugin()
@@ -840,7 +1047,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         self.assertTrue(
-            client.api.messages[-1]["content"].startswith(
+            client.api.messages[-1]["markdown"]["content"].startswith(
                 '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
             )
         )
@@ -858,13 +1065,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
-        content = client.api.messages[-1]["content"]
+        content = client.api.messages[-1]["markdown"]["content"]
         self.assertLessEqual(len(content), 1000)
         self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
-        content = client.api.messages[-1]["content"]
+        content = client.api.messages[-1]["markdown"]["content"]
         mention = '<qqbot-at-user id="member-1" />'
         self.assertEqual(content, mention * (1000 // len(mention)))
 

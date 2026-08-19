@@ -9,7 +9,10 @@ from urllib.request import Request, urlopen
 
 BILIBILI_CARD_URL = "https://api.bilibili.com/x/web-interface/card?mid={}"
 PURE_UID_PATTERN = re.compile(r"[1-9]\d{0,19}")
-LABELED_UID_PATTERN = re.compile(r"(?i)(?<![A-Z])UID\s*[:：]?\s*([1-9]\d{0,19})(?!\d)")
+LABELED_UID_PATTERN = re.compile(
+    r"(?i)(?<![A-Z])(?:UID|BILI(?:BILI)?(?:\s*UID)?)\s*[:：]?\s*"
+    r"([1-9]\d{0,19})(?!\d)"
+)
 
 
 class BilibiliLookupError(RuntimeError):

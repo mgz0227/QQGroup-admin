@@ -7,6 +7,7 @@ from typing import Any
 from astrbot.api.star import Context
 from astrbot.api.web import error_response, json_response, request
 
+from .bilibili import parse_bilibili_uids
 from .qq_api import parse_qq_number_text
 from .review import parse_keywords
 
@@ -24,12 +25,30 @@ BATCH_FIELDS = {
     "fallback_action",
     "scan_pending",
     "button_reject_reason",
+    "fallback_human_verify_enabled",
+    "moderation_enabled",
+    "moderation_exempt_admins",
+    "message_reject_keywords",
+    "ai_review_enabled",
+    "image_spam_enabled",
+    "image_spam_count",
+    "image_spam_window_seconds",
+    "repeat_review_enabled",
+    "repeat_count",
+    "repeat_window_seconds",
+    "repeat_mute_min_seconds",
+    "repeat_mute_max_seconds",
+    "bilibili_uids",
+    "bilibili_dynamic_enabled",
+    "bilibili_live_enabled",
 }
 BATCH_TEXT_FIELDS = {
     "whitelist_qq_numbers",
     "approve_keywords",
     "reject_keywords",
     "button_reject_reason",
+    "message_reject_keywords",
+    "bilibili_uids",
 }
 
 
@@ -72,6 +91,33 @@ class GroupAdminWeb:
         allowed_controls = "\r\n\t" if multiline else ""
         if any(ord(char) < 32 and char not in allowed_controls for char in value):
             raise ValueError(f"{label}包含非法控制字符")
+        return value
+
+    @staticmethod
+    def _bool(payload: dict[str, Any], key: str, default: bool, label: str) -> bool:
+        value = payload.get(key, default)
+        if not isinstance(value, bool):
+            raise TypeError(f"{label}必须是布尔值")
+        return value
+
+    @staticmethod
+    def _int(
+        payload: dict[str, Any],
+        key: str,
+        default: int,
+        minimum: int,
+        maximum: int,
+        label: str,
+    ) -> int:
+        value = payload.get(key, default)
+        if isinstance(value, bool):
+            raise TypeError(f"{label}必须是整数")
+        try:
+            value = int(value)
+        except (TypeError, ValueError) as exc:
+            raise TypeError(f"{label}必须是整数") from exc
+        if not minimum <= value <= maximum:
+            raise ValueError(f"{label}必须在 {minimum}-{maximum} 之间")
         return value
 
     @classmethod
@@ -134,6 +180,45 @@ class GroupAdminWeb:
             raise TypeError("扫描待审申请必须是布尔值")
 
         reject_keywords = "\n".join(parse_keywords(reject_text))
+        message_keywords = "\n".join(
+            parse_keywords(
+                cls._text(
+                    payload.get("message_reject_keywords", ""),
+                    "消息撤回关键词",
+                    7_000,
+                    multiline=True,
+                )
+            )
+        )
+        bili_uids = "\n".join(
+            parse_bilibili_uids(
+                cls._text(
+                    payload.get("bilibili_uids", ""),
+                    "B站 UID",
+                    2_100,
+                    multiline=True,
+                )
+            )
+        )
+        bili_dynamic_enabled = cls._bool(
+            payload, "bilibili_dynamic_enabled", False, "动态推送开关"
+        )
+        bili_live_enabled = cls._bool(
+            payload, "bilibili_live_enabled", False, "直播推送开关"
+        )
+        if (bili_dynamic_enabled or bili_live_enabled) and not bili_uids:
+            raise ValueError("启用 B站推送时至少填写一个 UP 主 UID")
+        mute_min = cls._int(
+            payload, "repeat_mute_min_seconds", 60, 1, 2_592_000, "最短禁言秒数"
+        )
+        mute_max = cls._int(
+            payload,
+            "repeat_mute_max_seconds",
+            600,
+            mute_min,
+            2_592_000,
+            "最长禁言秒数",
+        )
 
         return {
             "group_openid": group_openid,
@@ -148,6 +233,40 @@ class GroupAdminWeb:
             "fallback_action": fallback_action,
             "scan_pending": scan_pending,
             "button_reject_reason": reject_reason or "管理员拒绝",
+            "fallback_human_verify_enabled": cls._bool(
+                payload, "fallback_human_verify_enabled", False, "兜底真人验证开关"
+            ),
+            "moderation_enabled": cls._bool(
+                payload, "moderation_enabled", False, "消息审查开关"
+            ),
+            "moderation_exempt_admins": cls._bool(
+                payload, "moderation_exempt_admins", True, "管理员免审开关"
+            ),
+            "message_reject_keywords": message_keywords,
+            "ai_review_enabled": cls._bool(
+                payload, "ai_review_enabled", False, "AI 审核开关"
+            ),
+            "image_spam_enabled": cls._bool(
+                payload, "image_spam_enabled", False, "连续发图检测开关"
+            ),
+            "image_spam_count": cls._int(
+                payload, "image_spam_count", 5, 2, 20, "连续图片数量"
+            ),
+            "image_spam_window_seconds": cls._int(
+                payload, "image_spam_window_seconds", 15, 3, 120, "连续发图时间窗"
+            ),
+            "repeat_review_enabled": cls._bool(
+                payload, "repeat_review_enabled", False, "复读检测开关"
+            ),
+            "repeat_count": cls._int(payload, "repeat_count", 4, 3, 20, "复读触发次数"),
+            "repeat_window_seconds": cls._int(
+                payload, "repeat_window_seconds", 30, 5, 120, "复读时间窗"
+            ),
+            "repeat_mute_min_seconds": mute_min,
+            "repeat_mute_max_seconds": mute_max,
+            "bilibili_uids": bili_uids,
+            "bilibili_dynamic_enabled": bili_dynamic_enabled,
+            "bilibili_live_enabled": bili_live_enabled,
         }
 
     @classmethod
@@ -276,6 +395,34 @@ class GroupAdminWeb:
             message=f"应用完成：成功 {succeeded} 个，失败 {len(result) - succeeded} 个",
         )
 
+    async def page_identities(self) -> Any:
+        return self._response(await self.plugin.web_identities())
+
+    async def page_binding_delete(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        uid = self._text(payload.get("uid"), "B站 UID", 20, required=True)
+        if not uid.isdigit() or uid == "0":
+            raise ValueError("B站 UID 必须是正整数")
+        return self._response(
+            await self.plugin.web_delete_binding(uid),
+            message="UID 绑定已解除",
+        )
+
+    async def page_suspicious_clear(self) -> Any:
+        payload = await self._payload()
+        group_openid = self._validated_group(payload)
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        member_openid = self._text(
+            payload.get("member_openid"), "成员 OpenID", 128, required=True
+        )
+        return self._response(
+            await self.plugin.web_clear_suspicious(group_openid, member_openid),
+            message="可疑标记已解除",
+        )
+
     def _wrap(
         self, handler: Callable[[], Awaitable[Any]]
     ) -> Callable[[], Awaitable[Any]]:
@@ -304,6 +451,14 @@ class GroupAdminWeb:
             ("/sync", self.page_sync, ["POST"], "应用QQ群审核配置"),
             ("/batch-save", self.page_batch_save, ["POST"], "批量保存QQ群审核配置"),
             ("/batch-sync", self.page_batch_sync, ["POST"], "批量应用QQ群审核配置"),
+            ("/identities", self.page_identities, ["GET"], "查询 UID 绑定和待验证成员"),
+            ("/binding-delete", self.page_binding_delete, ["POST"], "解除 UID 绑定"),
+            (
+                "/suspicious-clear",
+                self.page_suspicious_clear,
+                ["POST"],
+                "解除待验证标记",
+            ),
         )
         for path, handler, methods, description in routes:
             self.context.register_web_api(

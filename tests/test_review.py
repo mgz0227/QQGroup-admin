@@ -38,6 +38,7 @@ class ReviewRulesTest(unittest.TestCase):
             "188144093",
         )
         self.assertEqual(parse_bilibili_uid("188144093"), "188144093")
+        self.assertEqual(parse_bilibili_uid("bili 188144093"), "188144093")
         self.assertIsNone(parse_bilibili_uid("主页有 188144093 个赞"))
         self.assertIsNone(parse_bilibili_uid("UID: 0"))
         self.assertEqual(
