@@ -1,11 +1,16 @@
 import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
 
+import bilibili
 from bilibili import (
     BilibiliConfigError,
     fetch_space_dynamics,
     live_transition,
     parse_dynamic_items,
+    poll_qr_login,
     sign_wbi,
+    start_qr_login,
 )
 
 
@@ -78,6 +83,36 @@ class BilibiliTest(unittest.TestCase):
         self.assertEqual(live_transition(live, offline), "stop")
         self.assertEqual(live_transition(live, restarted), "start")
         self.assertIsNone(live_transition(live, dict(live)))
+
+    def test_qr_login_tracks_status_and_collects_cookie(self):
+        key = "a" * 32
+        with patch.object(
+            bilibili,
+            "_qr_json",
+            side_effect=[
+                {
+                    "url": f"https://passport.bilibili.com/scan?key={key}",
+                    "qrcode_key": key,
+                },
+                {"code": 86101},
+                {"code": 86090},
+                {"code": 0},
+            ],
+        ):
+            login = start_qr_login()
+            self.assertEqual(poll_qr_login(login), ("waiting", ""))
+            self.assertEqual(poll_qr_login(login), ("scanned", ""))
+            login.cookies = [
+                SimpleNamespace(name="SESSDATA", value="session"),
+                SimpleNamespace(name="bili_jct", value="csrf"),
+                SimpleNamespace(name="ignored", value="secret"),
+            ]
+            status, cookie = poll_qr_login(login)
+        self.assertEqual(status, "confirmed")
+        self.assertEqual(cookie, "SESSDATA=session; bili_jct=csrf")
+
+        login.expires_at = 0
+        self.assertEqual(poll_qr_login(login), ("expired", ""))
 
 
 if __name__ == "__main__":

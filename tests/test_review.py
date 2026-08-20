@@ -103,6 +103,27 @@ class ReviewRulesTest(unittest.TestCase):
             keyword_reply_for_message("hello there", "group-2", [], global_rules),
             "全局回复",
         )
+        combined_rule = {
+            "keywords": "hello\nworld",
+            "reply": "组合回复",
+            "enabled": True,
+            "match_type": "contains",
+            "condition_logic": "all",
+        }
+        self.assertEqual(
+            keyword_reply_for_message(
+                "WORLD says hello", "group-1", [combined_rule], []
+            ),
+            "组合回复",
+        )
+        self.assertIsNone(
+            keyword_reply_for_message("hello only", "group-1", [combined_rule], [])
+        )
+        combined_rule["condition_logic"] = "any"
+        self.assertEqual(
+            keyword_reply_for_message("hello only", "group-1", [combined_rule], []),
+            "组合回复",
+        )
 
     def test_bilibili_response_distinguishes_invalid_and_transient(self):
         self.assertTrue(

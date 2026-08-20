@@ -157,6 +157,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             auto_review_groups=[
                 {
                     "group_openid": "group-1",
+                    "platform_id": "platform-1",
                     "button_reject_reason": "管理员拒绝",
                 }
             ]
@@ -298,25 +299,25 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             [button["action"]["data"].rsplit(":", 1)[1] for button in buttons],
             [
                 "bind",
-                "native",
-                "conditional",
-                "off",
-                "uid_on",
-                "uid_off",
-                "direct_on",
-                "direct_off",
-                "all",
-                "any",
-                "pending",
-                "decline",
-                "approve",
-                "moderation",
                 "sync",
+                "conditions",
+                "moderation",
+                "keywords",
+                "bilibili",
+                "off",
             ],
         )
         self.assertEqual(
-            [button["render_data"]["label"] for button in buttons[:8]],
-            ["绑定", "白名单", "条件", "关闭", "UID开", "UID关", "直通开", "直通关"],
+            [button["render_data"]["label"] for button in buttons],
+            [
+                "绑定此群",
+                "应用配置",
+                "审核条件",
+                "消息审查",
+                "关键词回复",
+                "B站推送",
+                "关闭自动审核",
+            ],
         )
         self.assertTrue(
             all(
@@ -329,21 +330,36 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         schedule_recall.assert_called_once_with(client, "group-1", "sent-1")
-        uid_data = buttons[2]["action"]["data"]
+        conditions_data = buttons[2]["action"]["data"]
         interaction = SimpleNamespace(
             id="settings-wrong-group",
             type=11,
             chat_type=1,
             group_openid="other-group",
-            data=SimpleNamespace(resolved=SimpleNamespace(button_data=uid_data)),
+            data=SimpleNamespace(resolved=SimpleNamespace(button_data=conditions_data)),
         )
         with patch.object(module, "QQGroupAPI", return_value=api):
             self.assertTrue(await plugin._handle_interaction(client, interaction))
         self.assertEqual(plugin.config["auto_review_groups"], [])
         self.assertEqual(client.api.acks[-1], ("settings-wrong-group", 4))
 
-        interaction.id = "settings-uid"
+        plugin.config["settings_panel_auto_recall"] = False
+        interaction.id = "settings-conditions"
         interaction.group_openid = "group-1"
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            self.assertTrue(await plugin._handle_interaction(client, interaction))
+        condition_buttons = [
+            button
+            for row in client.api.messages[-1]["keyboard"]["content"]["rows"]
+            for button in row["buttons"]
+        ]
+        uid_data = next(
+            button["action"]["data"]
+            for button in condition_buttons
+            if button["action"]["data"].endswith(":conditional")
+        )
+        interaction.id = "settings-uid"
+        interaction.data.resolved.button_data = uid_data
         with patch.object(module, "QQGroupAPI", return_value=api):
             self.assertTrue(await plugin._handle_interaction(client, interaction))
         entry = plugin.config["auto_review_groups"][0]
@@ -362,6 +378,67 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(entry["enabled"])
         self.assertEqual(client.api.acks[-1], ("settings-off", 0))
         self.assertGreater(plugin.config.save_count, 0)
+
+    async def test_settings_submenus_are_compact_and_cover_keyword_and_bilibili(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            settings_panel_auto_recall=False,
+            keyword_reply_cooldown_seconds=30,
+            keyword_reply_recall_seconds=20,
+            global_keyword_replies=[
+                {"name": "全局帮助", "keywords": ["帮助"], "enabled": True}
+            ],
+        )
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            keyword_replies=[
+                {
+                    "name": "群公告",
+                    "keywords": ["公告", "规则"],
+                    "logic": "all",
+                    "enabled": True,
+                }
+            ],
+            bilibili_uids="188144093",
+        )
+        token = plugin._settings_token("group-1", "platform-1", "测试群")
+
+        await plugin._send_condition_settings(client, "group-1", token, "测试群")
+        await plugin._send_moderation_settings(client, "group-1", token, "测试群")
+        await plugin._send_keyword_settings(client, "group-1", token, "测试群")
+        await plugin._send_bilibili_settings(client, "group-1", token, "测试群")
+
+        for message in client.api.messages:
+            rows = message["keyboard"]["content"]["rows"]
+            self.assertLessEqual(len(rows), 5)
+            self.assertTrue(all(len(row["buttons"]) <= 3 for row in rows))
+        keyword_text = client.api.messages[2]["markdown"]["content"]
+        self.assertIn("群公告", keyword_text)
+        self.assertIn("每群冷却：30 秒", keyword_text)
+        self.assertIn("回复撤回：20 秒", keyword_text)
+        bili_actions = {
+            button["action"]["data"].rsplit(":", 1)[1]
+            for row in client.api.messages[3]["keyboard"]["content"]["rows"]
+            for button in row["buttons"]
+        }
+        self.assertEqual(
+            bili_actions,
+            {
+                "bili_dynamic_on",
+                "bili_dynamic_off",
+                "bili_live_on",
+                "bili_live_off",
+                "home",
+            },
+        )
+        await plugin._apply_settings_button(
+            client,
+            "group-1",
+            "platform-1",
+            "bili_dynamic_on",
+            "测试群",
+        )
+        self.assertTrue(entry["bilibili_dynamic_enabled"])
 
     async def test_settings_buttons_update_conditions_and_recall(self):
         plugin, client = self.plugin()
@@ -422,6 +499,133 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         self.assertEqual(client.api.messages, [])
+
+    async def test_keyword_reply_cooldown_and_recall(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            keyword_reply_cooldown_seconds=60,
+            keyword_reply_recall_seconds=20,
+        )
+        entry = plugin.config["auto_review_groups"][0]
+        entry["keyword_replies"] = [
+            {
+                "name": "群帮助",
+                "keywords": "帮助\n指南",
+                "condition_logic": "any",
+                "match_type": "contains",
+                "reply": "请查看群公告",
+                "enabled": True,
+            }
+        ]
+        event = FakeEvent(client, "需要帮助")
+
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            self.assertTrue(
+                await plugin._reply_to_keyword(
+                    event, "group-1", "message-1", "需要帮助", entry
+                )
+            )
+            self.assertFalse(
+                await plugin._reply_to_keyword(
+                    event, "group-1", "message-2", "需要帮助", entry
+                )
+            )
+
+        self.assertEqual(len(client.api.messages), 1)
+        schedule_recall.assert_called_once_with(
+            client, "group-1", "sent-1", 20, "keyword-reply"
+        )
+        self.assertTrue(event.stopped)
+
+    async def test_keyword_reply_cooldown_is_reserved_before_send(self):
+        plugin, client = self.plugin()
+        plugin.config["keyword_reply_cooldown_seconds"] = 60
+        entry = plugin.config["auto_review_groups"][0]
+        entry["keyword_replies"] = [{"keyword": "帮助", "reply": "群帮助"}]
+        event = FakeEvent(client, "帮助")
+        started = module.asyncio.Event()
+        release = module.asyncio.Event()
+        calls = 0
+
+        async def delayed_send(*_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                started.set()
+                await release.wait()
+            return SimpleNamespace(id=f"sent-{calls}")
+
+        with patch.object(plugin, "_send_group_text", side_effect=delayed_send):
+            first = module.asyncio.create_task(
+                plugin._reply_to_keyword(event, "group-1", "message-1", "帮助", entry)
+            )
+            await started.wait()
+            second = await plugin._reply_to_keyword(
+                event, "group-1", "message-2", "帮助", entry
+            )
+            release.set()
+            self.assertTrue(await first)
+
+        self.assertFalse(second)
+        self.assertEqual(calls, 1)
+
+    async def test_unbound_group_does_not_use_global_keyword_reply(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.pop("platform_id")
+        plugin.config["global_keyword_replies"] = [
+            {"keyword": "帮助", "reply": "全局帮助"}
+        ]
+
+        self.assertFalse(
+            await plugin._reply_to_keyword(
+                FakeEvent(client, "帮助"), "group-1", "message-1", "帮助", entry
+            )
+        )
+        self.assertEqual(client.api.messages, [])
+
+    async def test_runtime_and_bilibili_qr_login_never_echo_cookie(self):
+        plugin, _ = self.plugin()
+        runtime = {
+            "uid_review_interval_seconds": 45,
+            "mute_success_message": "已禁言 {at_user}",
+            "settings_panel_auto_recall": True,
+            "settings_command_enabled": True,
+            "global_reject_keywords": "广告",
+            "global_message_reject_keywords": "刷屏",
+            "bilibili_live_interval_seconds": 60,
+            "bilibili_dynamic_interval_seconds": 180,
+        }
+        saved = await plugin.web_save_runtime_settings(runtime)
+        self.assertEqual(saved["uid_review_interval_seconds"], 45)
+        self.assertFalse(saved["bilibili_logged_in"])
+
+        login = SimpleNamespace(
+            qrcode_key="qrcode-key",
+            url="https://passport.bilibili.com/qr",
+            expires_at=module.time.monotonic() + 180,
+        )
+        with (
+            patch.object(module, "start_qr_login", return_value=login),
+            patch.object(
+                plugin, "_qr_data_url", return_value="data:image/svg+xml;base64,AA=="
+            ),
+        ):
+            started = await plugin.web_bilibili_login_start()
+        self.assertEqual(started["qrcode_key"], "qrcode-key")
+        self.assertNotIn("cookie", repr(started).lower())
+
+        with patch.object(
+            module,
+            "poll_qr_login",
+            return_value=("confirmed", "SESSDATA=secret; bili_jct=csrf"),
+        ):
+            confirmed = await plugin.web_bilibili_login_poll("qrcode-key")
+        self.assertTrue(confirmed["bilibili_logged_in"])
+        self.assertEqual(
+            plugin.config["bilibili_cookie"], "SESSDATA=secret; bili_jct=csrf"
+        )
+        self.assertNotIn("secret", repr(confirmed))
 
     async def test_uid_button_does_not_take_over_unmanaged_strategy(self):
         plugin, client = self.plugin()
@@ -544,7 +748,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "button_reject_reason": "资料不完整",
                 "keyword_replies": [
                     {
-                        "keyword": "帮助",
+                        "name": "群帮助",
+                        "keywords": "帮助, 指南",
+                        "condition_logic": "any",
                         "reply": "请查看群公告",
                         "match_type": "exact",
                         "enabled": True,
@@ -561,7 +767,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             [
                 {
                     "__template_key": "keyword_reply",
-                    "keyword": "帮助",
+                    "name": "群帮助",
+                    "keywords": "帮助\n指南",
+                    "condition_logic": "any",
                     "reply": "请查看群公告",
                     "match_type": "exact",
                     "enabled": True,
@@ -591,7 +799,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             module.GroupAdminWeb._validated_save(
                 {
                     **payload,
-                    "keyword_replies": [{"keyword": "", "reply": "回复"}],
+                    "keyword_replies": [
+                        {"name": "空规则", "keywords": "", "reply": "回复"}
+                    ],
                 }
             )
         with self.assertRaisesRegex(ValueError, "匹配方式只能是"):
@@ -600,13 +810,75 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                     **payload,
                     "keyword_replies": [
                         {
-                            "keyword": "帮助",
+                            "name": "错误规则",
+                            "keywords": "帮助",
                             "reply": "回复",
                             "match_type": "regex",
                         }
                     ],
                 }
             )
+        with self.assertRaisesRegex(ValueError, "完全匹配不能"):
+            module.GroupAdminWeb._validated_save(
+                {
+                    **payload,
+                    "keyword_replies": [
+                        {
+                            "name": "无效组合",
+                            "keywords": "帮助\n指南",
+                            "condition_logic": "all",
+                            "reply": "回复",
+                            "match_type": "exact",
+                        }
+                    ],
+                }
+            )
+
+    def test_web_global_keyword_replies_use_bound_group_scope(self):
+        rules = module.GroupAdminWeb._global_keyword_replies(
+            [
+                {
+                    "name": "公告与帮助",
+                    "keywords": "公告, 帮助",
+                    "condition_logic": "all",
+                    "reply": "请查看群公告",
+                    "match_type": "contains",
+                    "enabled": True,
+                    "group_openids": ["group-1"],
+                }
+            ],
+            {"group-1"},
+        )
+        self.assertEqual(rules[0]["group_openids"], "group-1")
+        self.assertEqual(rules[0]["keywords"], "公告\n帮助")
+        self.assertEqual(rules[0]["condition_logic"], "all")
+        with self.assertRaisesRegex(ValueError, "包含未绑定群"):
+            module.GroupAdminWeb._global_keyword_replies(
+                [
+                    {
+                        "name": "公告",
+                        "keywords": "公告",
+                        "reply": "回复",
+                        "group_openids": ["unknown-group"],
+                    }
+                ],
+                {"group-1"},
+            )
+
+        runtime = module.GroupAdminWeb._runtime_settings(
+            {
+                "uid_review_interval_seconds": 45,
+                "mute_success_message": "已禁言 {at_user}",
+                "settings_panel_auto_recall": True,
+                "settings_command_enabled": False,
+                "global_reject_keywords": "广告, 引流",
+                "global_message_reject_keywords": "刷屏",
+                "bilibili_live_interval_seconds": 60,
+                "bilibili_dynamic_interval_seconds": 180,
+            }
+        )
+        self.assertEqual(runtime["global_reject_keywords"], "广告\n引流")
+        self.assertFalse(runtime["settings_command_enabled"])
 
     def test_uid_review_waits_for_native_strategy_sync(self):
         plugin, _ = self.plugin()

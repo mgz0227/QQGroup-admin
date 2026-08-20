@@ -6,6 +6,10 @@
   var groups = [];
   var selected = new Set();
   var identities = { bindings: [], suspicious: [] };
+  var globalKeywordConfig = { groups: [], rules: [] };
+  var runtimeSettings = {};
+  var bilibiliLoginKey = "";
+  var bilibiliLoginTimer;
   var editingGroup;
   var toastTimer;
 
@@ -235,15 +239,284 @@
     });
   }
 
+  function setView(name) {
+    ["groups", "global-keywords", "runtime", "identities"].forEach(function (view) {
+      var active = view === name;
+      element(view + "-view").hidden = !active;
+      element(view + "-tab").classList.toggle("active", active);
+      element(view + "-tab").setAttribute("aria-selected", String(active));
+      element(view + "-tab").tabIndex = active ? 0 : -1;
+    });
+  }
+
+  function constrainKeywordLogic(mode, logic) {
+    var all = logic.querySelector('option[value="all"]');
+    var exact = mode.value === "exact";
+    all.disabled = exact;
+    if (exact && logic.value === "all") logic.value = "any";
+  }
+
+  function addGlobalKeywordReply(rule) {
+    var list = element("global-keyword-replies");
+    if (list.querySelectorAll(".global-keyword-row").length >= 100) {
+      toast("最多配置 100 条全局关键词回复", true);
+      return;
+    }
+    var empty = list.querySelector(".empty-rules");
+    if (empty) empty.remove();
+    var row = document.createElement("div");
+    row.className = "global-keyword-row";
+    row.innerHTML =
+      '<label><span>规则名称</span><input class="global-rule-name" maxlength="80" required></label>' +
+      '<label><span>匹配方式</span><select class="global-rule-mode"><option value="contains">包含关键词</option><option value="exact">完全匹配</option></select></label>' +
+      '<label class="checkbox global-rule-enabled"><input type="checkbox"><span>启用</span></label>' +
+      '<button class="text-button danger global-rule-remove" type="button">删除</button>' +
+      '<label class="wide"><span>关键词</span><textarea class="global-rule-keywords" maxlength="2100" rows="3" placeholder="每行一个关键词，最多 20 个" required></textarea></label>' +
+      '<label><span>关键词组合</span><select class="global-rule-logic"><option value="any">任一满足（OR）</option><option value="all">全部满足（AND）</option></select></label>' +
+      '<label class="wide"><span>回复内容</span><textarea class="global-rule-content" maxlength="1000" rows="3" required></textarea></label>';
+    rule = rule || {};
+    var legacyKeyword = rule.keyword || "";
+    row.querySelector(".global-rule-name").value = rule.name || rule.rule_name || legacyKeyword;
+    row.querySelector(".global-rule-keywords").value = Array.isArray(rule.keywords)
+      ? rule.keywords.join("\n")
+      : (rule.keywords || legacyKeyword);
+    row.querySelector(".global-rule-content").value = rule.reply || "";
+    row.querySelector(".global-rule-mode").value = rule.match_type === "exact" ? "exact" : "contains";
+    row.querySelector(".global-rule-logic").value =
+      rule.condition_logic === "all" || rule.keyword_logic === "all" || rule.logic === "all"
+        ? "all"
+        : "any";
+    row.querySelector(".global-rule-enabled input").checked = rule.enabled !== false;
+    var globalMode = row.querySelector(".global-rule-mode");
+    var globalLogic = row.querySelector(".global-rule-logic");
+    constrainKeywordLogic(globalMode, globalLogic);
+    globalMode.addEventListener("change", function () {
+      constrainKeywordLogic(globalMode, globalLogic);
+    });
+
+    var targetValues = Array.isArray(rule.group_openids)
+      ? rule.group_openids
+      : String(rule.group_openids || "").split(/[\s,，;；]+/).filter(Boolean);
+    var targets = new Set(targetValues.includes("*") ? [] : targetValues);
+    var scope = document.createElement("fieldset");
+    scope.className = "global-group-scope";
+    var legend = document.createElement("legend");
+    legend.textContent = "覆盖群";
+    var allLabel = document.createElement("label");
+    allLabel.className = "checkbox";
+    var allGroups = document.createElement("input");
+    allGroups.type = "checkbox";
+    allGroups.className = "global-rule-all-groups";
+    allGroups.checked = targets.size === 0;
+    var allText = document.createElement("span");
+    allText.textContent = "全部已绑定群（包含以后新增的群）";
+    allLabel.append(allGroups, allText);
+    scope.append(legend, allLabel);
+
+    var choices = document.createElement("div");
+    choices.className = "group-choice-grid";
+    var boundGroups = Array.isArray(globalKeywordConfig.groups) ? globalKeywordConfig.groups : [];
+    boundGroups.forEach(function (group) {
+      var label = document.createElement("label");
+      label.className = "checkbox group-choice";
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "global-rule-group";
+      checkbox.value = group.group_openid;
+      checkbox.checked = targets.has(group.group_openid);
+      checkbox.disabled = allGroups.checked;
+      var text = document.createElement("span");
+      text.textContent = group.group_name || "待获取群名称";
+      text.title = group.group_openid;
+      label.append(checkbox, text);
+      choices.appendChild(label);
+    });
+    if (boundGroups.length) scope.appendChild(choices);
+    else {
+      var noGroups = document.createElement("p");
+      noGroups.className = "scope-empty";
+      noGroups.textContent = "暂无已绑定群";
+      scope.appendChild(noGroups);
+    }
+    allGroups.addEventListener("change", function () {
+      choices.querySelectorAll("input").forEach(function (checkbox) {
+        checkbox.disabled = allGroups.checked;
+      });
+    });
+    row.querySelector(".global-rule-remove").addEventListener("click", function () {
+      row.remove();
+      if (!list.querySelector(".global-keyword-row")) renderGlobalKeywordReplies([]);
+    });
+    row.appendChild(scope);
+    list.appendChild(row);
+  }
+
+  function renderGlobalKeywordReplies(rules) {
+    var list = element("global-keyword-replies");
+    list.replaceChildren();
+    if (!Array.isArray(rules) || !rules.length) {
+      var empty = document.createElement("p");
+      empty.className = "empty-rules";
+      empty.textContent = "尚未配置全局关键词回复";
+      list.appendChild(empty);
+      return;
+    }
+    rules.forEach(addGlobalKeywordReply);
+  }
+
+  function readGlobalKeywordReplies() {
+    return Array.from(element("global-keyword-replies").querySelectorAll(".global-keyword-row")).map(function (row) {
+      var allGroups = row.querySelector(".global-rule-all-groups").checked;
+      var groupOpenids = Array.from(row.querySelectorAll(".global-rule-group:checked")).map(function (checkbox) {
+        return checkbox.value;
+      });
+      if (!allGroups && !groupOpenids.length) throw new Error("请选择至少一个覆盖群，或选择全部已绑定群");
+      return {
+        name: row.querySelector(".global-rule-name").value,
+        keywords: row.querySelector(".global-rule-keywords").value,
+        condition_logic: row.querySelector(".global-rule-logic").value,
+        reply: row.querySelector(".global-rule-content").value,
+        match_type: row.querySelector(".global-rule-mode").value,
+        enabled: row.querySelector(".global-rule-enabled input").checked,
+        group_openids: allGroups ? [] : groupOpenids
+      };
+    });
+  }
+
+  function saveGlobalKeywordReplies(event) {
+    event.preventDefault();
+    var rules;
+    try {
+      rules = readGlobalKeywordReplies();
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
+    var button = element("save-global-keyword-replies");
+    button.disabled = true;
+    apiPost("global-keyword-replies/save", {
+      rules: rules,
+      keyword_reply_cooldown_seconds: Number(element("global-keyword-cooldown").value),
+      keyword_reply_recall_seconds: Number(element("global-keyword-recall").value)
+    })
+      .then(function (saved) {
+        saved = Array.isArray(saved) ? { rules: saved } : (saved || {});
+        globalKeywordConfig = Object.assign({}, globalKeywordConfig, saved);
+        element("global-keyword-cooldown").value =
+          Number(globalKeywordConfig.keyword_reply_cooldown_seconds || 0);
+        element("global-keyword-recall").value =
+          Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
+        renderGlobalKeywordReplies(globalKeywordConfig.rules);
+        toast("全局关键词回复已保存");
+      })
+      .catch(function (error) { toast("保存失败：" + error.message, true); })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function fillRuntime(settings) {
+    runtimeSettings = settings || {};
+    element("runtime-review-interval").value = runtimeSettings.uid_review_interval_seconds || 60;
+    element("runtime-settings-command").checked = runtimeSettings.settings_command_enabled !== false;
+    element("runtime-panel-recall").checked = runtimeSettings.settings_panel_auto_recall !== false;
+    element("runtime-global-reject-keywords").value = runtimeSettings.global_reject_keywords || "";
+    element("runtime-message-reject-keywords").value = runtimeSettings.global_message_reject_keywords || "";
+    element("runtime-mute-message").value = runtimeSettings.mute_success_message || "";
+    element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
+    element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
+    element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
+  }
+
+  function saveRuntime(event) {
+    event.preventDefault();
+    var button = element("save-runtime");
+    var settings = {
+      uid_review_interval_seconds: Number(element("runtime-review-interval").value),
+      settings_command_enabled: element("runtime-settings-command").checked,
+      settings_panel_auto_recall: element("runtime-panel-recall").checked,
+      global_reject_keywords: element("runtime-global-reject-keywords").value,
+      global_message_reject_keywords: element("runtime-message-reject-keywords").value,
+      mute_success_message: element("runtime-mute-message").value,
+      bilibili_live_interval_seconds: Number(element("runtime-live-interval").value),
+      bilibili_dynamic_interval_seconds: Number(element("runtime-dynamic-interval").value)
+    };
+    button.disabled = true;
+    apiPost("runtime/save", settings)
+      .then(function (saved) {
+        fillRuntime(saved);
+        toast("全局运行配置已保存");
+      })
+      .catch(function (error) { toast("保存失败：" + error.message, true); })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function stopBilibiliLoginPolling() {
+    clearTimeout(bilibiliLoginTimer);
+    bilibiliLoginTimer = undefined;
+  }
+
+  function pollBilibiliLogin() {
+    if (!bilibiliLoginKey) return;
+    apiPost("bilibili-login/poll", { qrcode_key: bilibiliLoginKey })
+      .then(function (result) {
+        var status = result && result.status ? result.status : "pending";
+        if (status === "success" || status === "confirmed" || (result && result.logged_in === true)) {
+          stopBilibiliLoginPolling();
+          bilibiliLoginKey = "";
+          element("bilibili-login-status").textContent = "已登录";
+          element("bilibili-qr-status").textContent = "登录成功";
+          toast("B站账号登录成功");
+          return;
+        }
+        if (status === "expired" || status === "cancelled") {
+          stopBilibiliLoginPolling();
+          bilibiliLoginKey = "";
+          element("bilibili-qr-status").textContent = "二维码已失效";
+          return;
+        }
+        element("bilibili-qr-status").textContent = status === "scanned" ? "已扫码，请确认" : "等待扫码";
+        bilibiliLoginTimer = setTimeout(pollBilibiliLogin, 2000);
+      })
+      .catch(function (error) {
+        stopBilibiliLoginPolling();
+        toast("查询登录状态失败：" + error.message, true);
+      });
+  }
+
+  function startBilibiliLogin() {
+    var button = element("start-bilibili-login");
+    button.disabled = true;
+    stopBilibiliLoginPolling();
+    bilibiliLoginKey = "";
+    element("bilibili-qr").hidden = true;
+    apiPost("bilibili-login/start", {})
+      .then(function (result) {
+        bilibiliLoginKey = result && result.qrcode_key ? result.qrcode_key : "";
+        var image = result && (result.qr_image || result.qrcode_data_url);
+        if (!bilibiliLoginKey || !image) throw new Error("登录服务未返回二维码");
+        element("bilibili-qr-image").src = image;
+        element("bilibili-qr-status").textContent = "等待扫码";
+        element("bilibili-qr").hidden = false;
+        pollBilibiliLogin();
+      })
+      .catch(function (error) { toast("获取二维码失败：" + error.message, true); })
+      .finally(function () { button.disabled = false; });
+  }
+
   function load() {
     element("group-rows").innerHTML = '<tr><td class="empty" colspan="6">正在加载...</td></tr>';
     element("batch-toolbar").hidden = true;
     element("select-visible").disabled = true;
-    Promise.all([apiGet("overview"), apiGet("list"), apiGet("identities")])
+    Promise.all([apiGet("overview"), apiGet("list"), apiGet("identities"), apiGet("global-keyword-replies"), apiGet("runtime")])
       .then(function (result) {
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
         identities = result[2] || { bindings: [], suspicious: [] };
+        globalKeywordConfig = result[3] || { groups: [], rules: [] };
+        element("global-keyword-cooldown").value =
+          Number(globalKeywordConfig.keyword_reply_cooldown_seconds || 0);
+        element("global-keyword-recall").value =
+          Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
+        fillRuntime(result[4]);
         groups.forEach(function (group) {
           if (group.mode === "uid") {
             group.mode = "conditional";
@@ -259,6 +532,7 @@
         });
         render();
         renderIdentities();
+        renderGlobalKeywordReplies(globalKeywordConfig.rules);
       })
       .catch(function (error) {
         element("group-rows").innerHTML = '<tr><td class="empty error" colspan="6"></td></tr>';
@@ -294,16 +568,32 @@
     var row = document.createElement("div");
     row.className = "keyword-reply-row";
     row.innerHTML =
-      '<label><span>关键词</span><input class="keyword-reply-keyword" maxlength="100" required></label>' +
+      '<label><span>规则名称</span><input class="keyword-reply-name" maxlength="80" required></label>' +
       '<label><span>匹配方式</span><select class="keyword-reply-mode"><option value="contains">包含关键词</option><option value="exact">完全匹配</option></select></label>' +
       '<label class="checkbox keyword-reply-enabled"><input type="checkbox"><span>启用</span></label>' +
       '<button class="text-button danger keyword-reply-remove" type="button">删除</button>' +
+      '<label class="wide"><span>关键词</span><textarea class="keyword-reply-keywords" maxlength="2100" rows="3" placeholder="每行一个关键词，最多 20 个" required></textarea></label>' +
+      '<label><span>关键词组合</span><select class="keyword-reply-logic"><option value="any">任一满足（OR）</option><option value="all">全部满足（AND）</option></select></label>' +
       '<label class="wide"><span>回复内容</span><textarea class="keyword-reply-content" maxlength="1000" rows="2" required></textarea></label>';
     rule = rule || {};
-    row.querySelector(".keyword-reply-keyword").value = rule.keyword || "";
+    var legacyKeyword = rule.keyword || "";
+    row.querySelector(".keyword-reply-name").value = rule.name || rule.rule_name || legacyKeyword;
+    row.querySelector(".keyword-reply-keywords").value = Array.isArray(rule.keywords)
+      ? rule.keywords.join("\n")
+      : (rule.keywords || legacyKeyword);
     row.querySelector(".keyword-reply-content").value = rule.reply || "";
     row.querySelector(".keyword-reply-mode").value = rule.match_type === "exact" ? "exact" : "contains";
+    row.querySelector(".keyword-reply-logic").value =
+      rule.condition_logic === "all" || rule.keyword_logic === "all" || rule.logic === "all"
+        ? "all"
+        : "any";
     row.querySelector(".keyword-reply-enabled input").checked = rule.enabled !== false;
+    var groupMode = row.querySelector(".keyword-reply-mode");
+    var groupLogic = row.querySelector(".keyword-reply-logic");
+    constrainKeywordLogic(groupMode, groupLogic);
+    groupMode.addEventListener("change", function () {
+      constrainKeywordLogic(groupMode, groupLogic);
+    });
     row.querySelector(".keyword-reply-remove").addEventListener("click", function () {
       row.remove();
       if (!list.querySelector(".keyword-reply-row")) renderKeywordReplies([]);
@@ -327,7 +617,9 @@
   function readKeywordReplies() {
     return Array.from(element("keyword-replies").querySelectorAll(".keyword-reply-row")).map(function (row) {
       return {
-        keyword: row.querySelector(".keyword-reply-keyword").value,
+        name: row.querySelector(".keyword-reply-name").value,
+        keywords: row.querySelector(".keyword-reply-keywords").value,
+        condition_logic: row.querySelector(".keyword-reply-logic").value,
         reply: row.querySelector(".keyword-reply-content").value,
         match_type: row.querySelector(".keyword-reply-mode").value,
         enabled: row.querySelector(".keyword-reply-enabled input").checked
@@ -542,6 +834,21 @@
   }
 
   element("refresh-button").addEventListener("click", load);
+  var viewNames = ["groups", "global-keywords", "runtime", "identities"];
+  viewNames.forEach(function (name) {
+    element(name + "-tab").addEventListener("click", function () { setView(name); });
+  });
+  document.querySelector(".view-tabs").addEventListener("keydown", function (event) {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    event.preventDefault();
+    var current = viewNames.findIndex(function (name) {
+      return element(name + "-tab").getAttribute("aria-selected") === "true";
+    });
+    var offset = event.key === "ArrowRight" ? 1 : -1;
+    var next = (current + offset + viewNames.length) % viewNames.length;
+    setView(viewNames[next]);
+    element(viewNames[next] + "-tab").focus();
+  });
   element("search-input").addEventListener("input", render);
   element("select-visible").addEventListener("change", function (event) {
     var limitReached = false;
@@ -563,6 +870,10 @@
   element("mode").addEventListener("change", updateConditionalFields);
   element("uid-check-enabled").addEventListener("change", updateUidDirectField);
   element("add-keyword-reply").addEventListener("click", function () { addKeywordReply(); });
+  element("add-global-keyword-reply").addEventListener("click", function () { addGlobalKeywordReply(); });
+  element("global-keyword-form").addEventListener("submit", saveGlobalKeywordReplies);
+  element("runtime-form").addEventListener("submit", saveRuntime);
+  element("start-bilibili-login").addEventListener("click", startBilibiliLogin);
   element("edit-form").addEventListener("submit", save);
   element("batch-edit-form").addEventListener("submit", saveBatch);
   document.querySelectorAll("[data-controls]").forEach(function (toggle) {

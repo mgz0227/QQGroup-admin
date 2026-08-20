@@ -134,9 +134,22 @@ class GroupAdminWeb:
         for index, item in enumerate(value, 1):
             if not isinstance(item, dict):
                 raise TypeError(f"第 {index} 条关键词回复格式错误")
-            keyword = cls._text(
-                item.get("keyword"), f"第 {index} 条关键词", 100, required=True
+            name = cls._text(
+                item.get("name"), f"第 {index} 条规则名称", 80, required=True
             )
+            keywords = parse_keywords(
+                cls._text(
+                    item.get("keywords", item.get("keyword", "")),
+                    f"第 {index} 条关键词",
+                    2_100,
+                    required=True,
+                    multiline=True,
+                )
+            )
+            if not keywords:
+                raise ValueError(f"第 {index} 条关键词不能为空")
+            if len(keywords) > 20:
+                raise ValueError(f"第 {index} 条关键词最多 20 个")
             reply = cls._text(
                 item.get("reply"),
                 f"第 {index} 条回复内容",
@@ -149,19 +162,175 @@ class GroupAdminWeb:
             )
             if match_type not in {"contains", "exact"}:
                 raise ValueError(f"第 {index} 条匹配方式只能是 contains 或 exact")
+            condition_logic = cls._text(
+                item.get(
+                    "condition_logic",
+                    item.get("keyword_logic", item.get("logic", "any")),
+                ),
+                f"第 {index} 条关键词组合",
+                8,
+            )
+            if condition_logic not in {"all", "any"}:
+                raise ValueError(f"第 {index} 条关键词组合只能是 all 或 any")
+            if match_type == "exact" and condition_logic == "all" and len(keywords) > 1:
+                raise ValueError(
+                    f"第 {index} 条完全匹配不能与多个关键词的全部满足组合使用"
+                )
             enabled = item.get("enabled", True)
             if not isinstance(enabled, bool):
                 raise TypeError(f"第 {index} 条启用状态必须是布尔值")
             replies.append(
                 {
                     "__template_key": "keyword_reply",
-                    "keyword": keyword,
+                    "name": name,
+                    "keywords": "\n".join(keywords),
+                    "condition_logic": condition_logic,
                     "reply": reply,
                     "match_type": match_type,
                     "enabled": enabled,
                 }
             )
         return replies
+
+    @classmethod
+    def _global_keyword_replies(
+        cls,
+        value: Any,
+        allowed_group_openids: set[str],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            raise TypeError("全局关键词回复必须是列表")
+        if len(value) > KEYWORD_REPLY_LIMIT:
+            raise ValueError(f"最多配置 {KEYWORD_REPLY_LIMIT} 条全局关键词回复")
+        replies = []
+        for index, item in enumerate(value, 1):
+            if not isinstance(item, dict):
+                raise TypeError(f"第 {index} 条全局关键词回复格式错误")
+            name = cls._text(
+                item.get("name"), f"第 {index} 条规则名称", 80, required=True
+            )
+            keywords = parse_keywords(
+                cls._text(
+                    item.get("keywords", ""),
+                    f"第 {index} 条关键词",
+                    2_100,
+                    required=True,
+                    multiline=True,
+                )
+            )
+            if not keywords:
+                raise ValueError(f"第 {index} 条关键词不能为空")
+            if len(keywords) > 20:
+                raise ValueError(f"第 {index} 条关键词最多 20 个")
+            reply = cls._text(
+                item.get("reply"),
+                f"第 {index} 条回复内容",
+                1_000,
+                required=True,
+                multiline=True,
+            )
+            condition_logic = cls._text(
+                item.get(
+                    "condition_logic",
+                    item.get("keyword_logic", item.get("logic", "any")),
+                ),
+                f"第 {index} 条关键词组合",
+                8,
+            )
+            if condition_logic not in {"all", "any"}:
+                raise ValueError(f"第 {index} 条关键词组合只能是 all 或 any")
+            match_type = cls._text(
+                item.get("match_type", "contains"), f"第 {index} 条匹配方式", 16
+            )
+            if match_type not in {"contains", "exact"}:
+                raise ValueError(f"第 {index} 条匹配方式只能是 contains 或 exact")
+            if match_type == "exact" and condition_logic == "all" and len(keywords) > 1:
+                raise ValueError(
+                    f"第 {index} 条完全匹配不能与多个关键词的全部满足组合使用"
+                )
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise TypeError(f"第 {index} 条启用状态必须是布尔值")
+            raw_groups = item.get("group_openids", [])
+            if not isinstance(raw_groups, list):
+                raise TypeError(f"第 {index} 条覆盖群必须是列表")
+            group_openids = [
+                cls._validated_group({"group_openid": group_openid})
+                for group_openid in raw_groups
+            ]
+            if len(group_openids) > BATCH_GROUP_LIMIT:
+                raise ValueError(f"第 {index} 条最多覆盖 {BATCH_GROUP_LIMIT} 个群")
+            if len(set(group_openids)) != len(group_openids):
+                raise ValueError(f"第 {index} 条覆盖群不能重复")
+            unknown = set(group_openids) - allowed_group_openids
+            if unknown:
+                raise ValueError(f"第 {index} 条包含未绑定群：{min(unknown)}")
+            replies.append(
+                {
+                    "__template_key": "keyword_reply",
+                    "name": name,
+                    "keywords": "\n".join(keywords),
+                    "condition_logic": condition_logic,
+                    "match_type": match_type,
+                    "reply": reply,
+                    "group_openids": "\n".join(group_openids),
+                    "enabled": enabled,
+                }
+            )
+        return replies
+
+    @classmethod
+    def _runtime_settings(cls, payload: Any) -> dict[str, Any]:
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        return {
+            "uid_review_interval_seconds": cls._int(
+                payload, "uid_review_interval_seconds", 60, 15, 600, "审核轮询间隔"
+            ),
+            "mute_success_message": cls._text(
+                payload.get("mute_success_message", ""),
+                "禁言成功回复",
+                1_000,
+                multiline=True,
+            ),
+            "settings_panel_auto_recall": cls._bool(
+                payload, "settings_panel_auto_recall", True, "设置面板自动撤回"
+            ),
+            "settings_command_enabled": cls._bool(
+                payload, "settings_command_enabled", True, "审核设置命令"
+            ),
+            "global_reject_keywords": "\n".join(
+                parse_keywords(
+                    cls._text(
+                        payload.get("global_reject_keywords", ""),
+                        "全局入群拒绝关键词",
+                        7_000,
+                        multiline=True,
+                    )
+                )
+            ),
+            "global_message_reject_keywords": "\n".join(
+                parse_keywords(
+                    cls._text(
+                        payload.get("global_message_reject_keywords", ""),
+                        "全局消息撤回关键词",
+                        7_000,
+                        multiline=True,
+                    )
+                )
+            ),
+            "bilibili_live_interval_seconds": cls._int(
+                payload, "bilibili_live_interval_seconds", 60, 30, 600, "直播轮询间隔"
+            ),
+            "bilibili_dynamic_interval_seconds": cls._int(
+                payload,
+                "bilibili_dynamic_interval_seconds",
+                180,
+                60,
+                3_600,
+                "动态轮询间隔",
+            ),
+        }
 
     @classmethod
     def _validated_save(cls, payload: Any) -> dict[str, Any]:
@@ -402,6 +571,91 @@ class GroupAdminWeb:
     async def page_list(self) -> Any:
         return self._response(await self._groups())
 
+    async def page_global_keyword_replies(self) -> Any:
+        groups = await self._groups()
+        settings = await self.plugin.web_global_keyword_replies()
+        if isinstance(settings, list):
+            settings = {"rules": settings}
+        if not isinstance(settings, dict):
+            raise TypeError("全局关键词回复配置格式错误")
+        return self._response(
+            {
+                "groups": [
+                    {
+                        "group_name": group["group_name"],
+                        "group_openid": group["group_openid"],
+                    }
+                    for group in groups
+                    if group.get("bound")
+                ],
+                "rules": settings.get("rules", []),
+                "keyword_reply_cooldown_seconds": settings.get(
+                    "keyword_reply_cooldown_seconds", 0
+                ),
+                "keyword_reply_recall_seconds": settings.get(
+                    "keyword_reply_recall_seconds", 0
+                ),
+            }
+        )
+
+    async def page_global_keyword_replies_save(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        bound_group_openids = {
+            str(group["group_openid"])
+            for group in await self._groups()
+            if group.get("bound")
+        }
+        settings = {
+            "rules": self._global_keyword_replies(
+                payload.get("rules"), bound_group_openids
+            ),
+            "keyword_reply_cooldown_seconds": self._int(
+                payload,
+                "keyword_reply_cooldown_seconds",
+                0,
+                0,
+                3_600,
+                "关键词回复单群冷却",
+            ),
+            "keyword_reply_recall_seconds": self._int(
+                payload,
+                "keyword_reply_recall_seconds",
+                0,
+                0,
+                120,
+                "关键词回复自动撤回",
+            ),
+        }
+        return self._response(
+            await self.plugin.web_save_global_keyword_replies(settings),
+            message="全局关键词回复已保存",
+        )
+
+    async def page_runtime(self) -> Any:
+        return self._response(await self.plugin.web_runtime_settings())
+
+    async def page_runtime_save(self) -> Any:
+        return self._response(
+            await self.plugin.web_save_runtime_settings(
+                self._runtime_settings(await self._payload())
+            ),
+            message="全局运行配置已保存",
+        )
+
+    async def page_bilibili_login_start(self) -> Any:
+        return self._response(await self.plugin.web_bilibili_login_start())
+
+    async def page_bilibili_login_poll(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        qrcode_key = self._text(
+            payload.get("qrcode_key"), "二维码登录标识", 256, required=True
+        )
+        return self._response(await self.plugin.web_bilibili_login_poll(qrcode_key))
+
     async def page_save(self) -> Any:
         result = await self.plugin.web_save_group(
             self._validated_save(await self._payload())
@@ -490,6 +744,32 @@ class GroupAdminWeb:
         routes = (
             ("/overview", self.page_overview, ["GET"], "QQ群审核概览"),
             ("/list", self.page_list, ["GET"], "QQ群审核配置列表"),
+            (
+                "/global-keyword-replies",
+                self.page_global_keyword_replies,
+                ["GET"],
+                "查询全局关键词回复",
+            ),
+            (
+                "/global-keyword-replies/save",
+                self.page_global_keyword_replies_save,
+                ["POST"],
+                "保存全局关键词回复",
+            ),
+            ("/runtime", self.page_runtime, ["GET"], "查询全局运行配置"),
+            ("/runtime/save", self.page_runtime_save, ["POST"], "保存全局运行配置"),
+            (
+                "/bilibili-login/start",
+                self.page_bilibili_login_start,
+                ["POST"],
+                "开始 B站二维码登录",
+            ),
+            (
+                "/bilibili-login/poll",
+                self.page_bilibili_login_poll,
+                ["POST"],
+                "查询 B站二维码登录状态",
+            ),
             ("/save", self.page_save, ["POST"], "保存QQ群审核配置"),
             ("/delete", self.page_delete, ["POST"], "移除QQ群审核配置"),
             ("/sync", self.page_sync, ["POST"], "应用QQ群审核配置"),

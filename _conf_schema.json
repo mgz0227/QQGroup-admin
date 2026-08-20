@@ -50,17 +50,29 @@
   "global_keyword_replies": {
     "type": "template_list",
     "description": "全局关键词回复",
-    "hint": "按列表顺序匹配。目标群 OpenID 留空时覆盖全部 QQ 群；填写后仅覆盖指定群。",
+    "hint": "按列表顺序匹配。覆盖范围由独立 WebUI 按已绑定群选择。",
     "default": [],
+    "invisible": true,
     "templates": {
       "keyword_reply": {
-        "name": "关键词回复",
-        "display_item": "keyword",
+        "name": "回复规则",
+        "display_item": "name",
         "hide_hint_in_list": true,
         "items": {
+          "name": {
+            "type": "string",
+            "description": "规则名称",
+            "default": ""
+          },
           "keyword": {
             "type": "string",
+            "default": "",
+            "invisible": true
+          },
+          "keywords": {
+            "type": "text",
             "description": "关键词",
+            "hint": "逗号、分号或换行分隔，最多 20 个。",
             "default": ""
           },
           "reply": {
@@ -75,10 +87,17 @@
             "options": ["contains", "exact"],
             "labels": ["包含关键词", "完全匹配"]
           },
+          "condition_logic": {
+            "type": "string",
+            "description": "关键词组合",
+            "default": "any",
+            "options": ["any", "all"],
+            "labels": ["任一满足（OR）", "全部满足（AND）"]
+          },
           "group_openids": {
             "type": "text",
             "description": "覆盖的群 OpenID",
-            "hint": "逗号、空格或换行分隔；留空表示全部 QQ 群。",
+            "hint": "由独立 WebUI 按已绑定群名称选择。",
             "default": ""
           },
           "enabled": {
@@ -90,11 +109,26 @@
       }
     }
   },
+  "keyword_reply_cooldown_seconds": {
+    "type": "int",
+    "description": "关键词回复单群冷却（秒）",
+    "hint": "同一群触发回复后，在冷却期内不再触发其他关键词回复；0 表示不冷却。",
+    "default": 0,
+    "slider": {"min": 0, "max": 3600, "step": 5}
+  },
+  "keyword_reply_recall_seconds": {
+    "type": "int",
+    "description": "关键词回复自动撤回（秒）",
+    "hint": "0 表示不撤回；QQ 群消息只支持在发送后 120 秒内撤回。",
+    "default": 0,
+    "slider": {"min": 0, "max": 120, "step": 5}
+  },
   "bilibili_cookie": {
     "type": "string",
     "description": "B站 Cookie（动态推送）",
     "hint": "仅动态推送需要完整 Cookie；直播推送不需要。Cookie 会保存在 AstrBot 插件配置中，但不会写入日志。",
     "obvious_hint": true,
+    "invisible": true,
     "default": ""
   },
   "bilibili_live_interval_seconds": {
@@ -114,6 +148,7 @@
     "description": "QQ群自动审核配置",
     "hint": "优先在目标群发送 /审核设置 并点击绑定，群名称和 OpenID 会自动写入。",
     "default": [],
+    "invisible": true,
     "templates": {
       "qq_group": {
         "name": "群",

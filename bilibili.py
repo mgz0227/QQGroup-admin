@@ -5,14 +5,18 @@ import json
 import re
 import time
 from collections.abc import Mapping, Sequence
+from dataclasses import dataclass
+from http.cookiejar import CookieJar
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode, urlsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
 DYNAMIC_URL = "https://api.bilibili.com/x/polymer/web-dynamic/v1/feed/space"
 LIVE_STATUS_URL = "https://api.live.bilibili.com/room/v1/Room/get_status_info_by_uids"
+QR_GENERATE_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/generate"
+QR_POLL_URL = "https://passport.bilibili.com/x/passport-login/web/qrcode/poll"
 USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 Chrome/126.0.0.0 Safari/537.36"
@@ -93,6 +97,14 @@ class BilibiliAPIError(RuntimeError):
     pass
 
 
+@dataclass(slots=True)
+class BilibiliQRLogin:
+    qrcode_key: str
+    url: str
+    cookies: CookieJar
+    expires_at: float
+
+
 def _uid(value: str | int) -> str:
     value = str(value).strip()
     if not value.isdigit() or not 1 <= len(value) <= 20 or int(value) == 0:
@@ -135,6 +147,65 @@ def _get_json(url: str, *, cookie: str = "", timeout: float = 10) -> dict[str, A
         raise BilibiliAPIError(f"B 站 API 请求失败：{type(exc).__name__}") from exc
     _data(payload)
     return payload
+
+
+def _qr_json(url: str, cookies: CookieJar, timeout: float) -> dict[str, Any]:
+    opener = build_opener(HTTPCookieProcessor(cookies))
+    try:
+        with opener.open(
+            Request(url, headers={"User-Agent": USER_AGENT}), timeout=timeout
+        ) as response:
+            payload = json.load(response)
+    except HTTPError as exc:
+        raise BilibiliAPIError(f"B 站登录 API HTTP {exc.code}") from exc
+    except (URLError, TimeoutError, OSError, json.JSONDecodeError) as exc:
+        raise BilibiliAPIError(f"B 站登录 API 请求失败：{type(exc).__name__}") from exc
+    return _data(payload)
+
+
+def start_qr_login(*, timeout: float = 10) -> BilibiliQRLogin:
+    cookies = CookieJar()
+    data = _qr_json(QR_GENERATE_URL, cookies, timeout)
+    url = str(data.get("url") or "").strip()
+    qrcode_key = str(data.get("qrcode_key") or "").strip()
+    if not url.startswith("https://") or not re.fullmatch(r"[0-9a-f]{32}", qrcode_key):
+        raise BilibiliAPIError("B 站登录二维码格式异常")
+    return BilibiliQRLogin(qrcode_key, url, cookies, time.monotonic() + 180)
+
+
+def poll_qr_login(
+    login: BilibiliQRLogin,
+    *,
+    timeout: float = 10,
+) -> tuple[Literal["waiting", "scanned", "expired", "confirmed"], str]:
+    if time.monotonic() >= login.expires_at:
+        return "expired", ""
+    data = _qr_json(
+        f"{QR_POLL_URL}?{urlencode({'qrcode_key': login.qrcode_key})}",
+        login.cookies,
+        timeout,
+    )
+    try:
+        code = int(data.get("code"))
+    except (TypeError, ValueError) as exc:
+        raise BilibiliAPIError("B 站扫码状态格式异常") from exc
+    if code == 86101:
+        return "waiting", ""
+    if code == 86090:
+        return "scanned", ""
+    if code == 86038:
+        return "expired", ""
+    if code != 0:
+        raise BilibiliAPIError(f"B 站扫码登录失败（{code}）")
+    cookie = "; ".join(
+        f"{item.name}={item.value}"
+        for item in login.cookies
+        if item.name
+        in {"SESSDATA", "bili_jct", "DedeUserID", "DedeUserID__ckMd5", "sid"}
+    )
+    if "SESSDATA=" not in cookie or "bili_jct=" not in cookie:
+        raise BilibiliAPIError("B 站登录成功但未返回完整 Cookie")
+    return "confirmed", cookie
 
 
 def _mixin_key(img_key: str, sub_key: str) -> str:

@@ -97,9 +97,27 @@ def keyword_reply_for_message(
         for rule in rules[:100]:
             if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
                 continue
-            keyword = str(rule.get("keyword") or "").strip()
+            raw_keywords = rule.get("keywords", rule.get("keyword", ""))
+            if isinstance(raw_keywords, str):
+                keywords = [
+                    item.strip()
+                    for item in re.split(r"[,，;；\r\n]+", raw_keywords)
+                    if item.strip()
+                ]
+            elif isinstance(raw_keywords, list):
+                keywords = [
+                    str(item).strip() for item in raw_keywords if str(item).strip()
+                ]
+            else:
+                keywords = []
             reply = str(rule.get("reply") or "").strip()
-            if not keyword or not reply or len(keyword) > 100 or len(reply) > 1000:
+            if (
+                not keywords
+                or len(keywords) > 20
+                or any(len(keyword) > 100 for keyword in keywords)
+                or not reply
+                or len(reply) > 1000
+            ):
                 continue
             if global_scope:
                 targets = rule.get("group_openids")
@@ -112,10 +130,18 @@ def keyword_reply_for_message(
                     if targets and "*" not in targets and group_openid not in targets:
                         continue
             match_type = str(rule.get("match_type") or "contains")
-            keyword_folded = keyword.casefold()
-            if (match_type == "exact" and folded == keyword_folded) or (
-                match_type == "contains" and keyword_folded in folded
-            ):
+            checks = [
+                folded == keyword.casefold()
+                if match_type == "exact"
+                else keyword.casefold() in folded
+                for keyword in keywords
+            ]
+            matched = (
+                all(checks)
+                if str(rule.get("condition_logic") or "any") == "all"
+                else any(checks)
+            )
+            if matched:
                 return reply
         return None
 
