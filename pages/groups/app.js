@@ -283,6 +283,58 @@
     if (direct.disabled) direct.checked = false;
   }
 
+  function addKeywordReply(rule) {
+    var list = element("keyword-replies");
+    if (list.querySelectorAll(".keyword-reply-row").length >= 100) {
+      toast("每群最多配置 100 条关键词回复", true);
+      return;
+    }
+    var empty = list.querySelector(".empty-rules");
+    if (empty) empty.remove();
+    var row = document.createElement("div");
+    row.className = "keyword-reply-row";
+    row.innerHTML =
+      '<label><span>关键词</span><input class="keyword-reply-keyword" maxlength="100" required></label>' +
+      '<label><span>匹配方式</span><select class="keyword-reply-mode"><option value="contains">包含关键词</option><option value="exact">完全匹配</option></select></label>' +
+      '<label class="checkbox keyword-reply-enabled"><input type="checkbox"><span>启用</span></label>' +
+      '<button class="text-button danger keyword-reply-remove" type="button">删除</button>' +
+      '<label class="wide"><span>回复内容</span><textarea class="keyword-reply-content" maxlength="1000" rows="2" required></textarea></label>';
+    rule = rule || {};
+    row.querySelector(".keyword-reply-keyword").value = rule.keyword || "";
+    row.querySelector(".keyword-reply-content").value = rule.reply || "";
+    row.querySelector(".keyword-reply-mode").value = rule.match_type === "exact" ? "exact" : "contains";
+    row.querySelector(".keyword-reply-enabled input").checked = rule.enabled !== false;
+    row.querySelector(".keyword-reply-remove").addEventListener("click", function () {
+      row.remove();
+      if (!list.querySelector(".keyword-reply-row")) renderKeywordReplies([]);
+    });
+    list.appendChild(row);
+  }
+
+  function renderKeywordReplies(rules) {
+    var list = element("keyword-replies");
+    list.replaceChildren();
+    if (!Array.isArray(rules) || !rules.length) {
+      var empty = document.createElement("p");
+      empty.className = "empty-rules";
+      empty.textContent = "尚未配置单群关键词回复";
+      list.appendChild(empty);
+      return;
+    }
+    rules.forEach(addKeywordReply);
+  }
+
+  function readKeywordReplies() {
+    return Array.from(element("keyword-replies").querySelectorAll(".keyword-reply-row")).map(function (row) {
+      return {
+        keyword: row.querySelector(".keyword-reply-keyword").value,
+        reply: row.querySelector(".keyword-reply-content").value,
+        match_type: row.querySelector(".keyword-reply-mode").value,
+        enabled: row.querySelector(".keyword-reply-enabled input").checked
+      };
+    });
+  }
+
   function openEditor(group) {
     editingGroup = group;
     element("dialog-title").textContent = group.group_name || "编辑群审核";
@@ -305,6 +357,7 @@
     element("moderation-enabled").checked = group.moderation_enabled === true;
     element("moderation-exempt-admins").checked = group.moderation_exempt_admins !== false;
     element("message-reject-keywords").value = group.message_reject_keywords || "";
+    renderKeywordReplies(group.keyword_replies);
     element("ai-review-enabled").checked = group.ai_review_enabled === true;
     element("image-spam-enabled").checked = group.image_spam_enabled === true;
     element("image-spam-count").value = group.image_spam_count || 5;
@@ -340,6 +393,7 @@
       moderation_enabled: element("moderation-enabled").checked,
       moderation_exempt_admins: element("moderation-exempt-admins").checked,
       message_reject_keywords: element("message-reject-keywords").value,
+      keyword_replies: readKeywordReplies(),
       ai_review_enabled: element("ai-review-enabled").checked,
       image_spam_enabled: element("image-spam-enabled").checked,
       image_spam_count: Number(element("image-spam-count").value),
@@ -508,6 +562,7 @@
   element("batch-sync-button").addEventListener("click", syncSelectedGroups);
   element("mode").addEventListener("change", updateConditionalFields);
   element("uid-check-enabled").addEventListener("change", updateUidDirectField);
+  element("add-keyword-reply").addEventListener("click", function () { addKeywordReply(); });
   element("edit-form").addEventListener("submit", save);
   element("batch-edit-form").addEventListener("submit", saveBatch);
   document.querySelectorAll("[data-controls]").forEach(function (toggle) {

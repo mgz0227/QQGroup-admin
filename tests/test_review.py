@@ -2,6 +2,7 @@ import unittest
 
 from review import (
     BilibiliLookupError,
+    keyword_reply_for_message,
     matched_keyword,
     parse_bilibili_response,
     parse_bilibili_uid,
@@ -61,6 +62,47 @@ class ReviewRulesTest(unittest.TestCase):
         self.assertEqual(matched_keyword("This is SPAM", keywords), "spam")
         with self.assertRaises(ValueError):
             parse_keywords("x" * 65)
+
+    def test_keyword_reply_prefers_group_and_filters_global_scope(self):
+        global_rules = [
+            {
+                "keyword": "hello",
+                "reply": "全局回复",
+                "group_openids": "group-2",
+                "enabled": True,
+                "match_type": "contains",
+            },
+            {
+                "keyword": "HELLO",
+                "reply": "所有群回复",
+                "group_openids": "",
+                "enabled": True,
+                "match_type": "contains",
+            },
+        ]
+        group_rules = [
+            {
+                "keyword": "hello world",
+                "reply": "本群回复",
+                "enabled": True,
+                "match_type": "exact",
+            }
+        ]
+
+        self.assertEqual(
+            keyword_reply_for_message(
+                "Hello World", "group-1", group_rules, global_rules
+            ),
+            "本群回复",
+        )
+        self.assertEqual(
+            keyword_reply_for_message("hello there", "group-1", [], global_rules),
+            "所有群回复",
+        )
+        self.assertEqual(
+            keyword_reply_for_message("hello there", "group-2", [], global_rules),
+            "全局回复",
+        )
 
     def test_bilibili_response_distinguishes_invalid_and_transient(self):
         self.assertTrue(

@@ -82,6 +82,15 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .form-grid label > span { display: block; margin-bottom: 7px; }
 .form-grid .wide { grid-column: 1 / -1; }
 .section-title { padding-top: 8px; border-top: 1px solid #e5e9ee; color: #18212f; font-size: 15px; font-weight: 700; }
+.rule-list-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; color: #18212f; font-size: 15px; font-weight: 700; }
+.keyword-reply-editor > p { margin: 6px 0 12px; color: #697386; font-size: 12px; font-weight: 400; }
+.small-button { min-height: 34px; padding: 5px 11px; font-size: 13px; }
+.keyword-reply-list { display: grid; gap: 10px; }
+.keyword-reply-row { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto auto; gap: 10px; padding: 14px; border: 1px solid #dce2e8; border-radius: 6px; background: #fafbfc; }
+.keyword-reply-row .wide { grid-column: 1 / -1; }
+.keyword-reply-enabled { align-self: end; min-height: 40px; }
+.keyword-reply-remove { align-self: end; min-height: 40px; }
+.empty-rules { padding: 16px; border: 1px dashed #c7d0da; border-radius: 6px; color: #87909d; text-align: center; }
 .batch-overwrite { min-width: 0; margin: 0; padding: 0; border: 0; }
 .batch-overwrite .checkbox { margin-bottom: 8px; color: #344054; font-size: 13px; font-weight: 600; }
 .checkbox { display: flex !important; align-items: center; gap: 9px; }
@@ -122,6 +131,8 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .empty { display: grid; min-height: 120px; place-items: center; }
   .form-grid { grid-template-columns: 1fr; padding: 18px; }
   .form-grid .wide { grid-column: auto; }
+  .keyword-reply-row { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .keyword-reply-row .wide { grid-column: 1 / -1; }
   .dialog-header { padding: 18px; }
   .dialog-actions { padding: 14px 18px 18px; }
   .toast { right: 16px; bottom: 16px; }
@@ -139,7 +150,9 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .stat strong, .group-identity strong { color: #f4f6f8; }
   .group-list, .list-header, .batch-toolbar, th, td, .dialog-header, .sub-list-header, .section-title { border-color: #343c46; }
   .identity-list .list-header p { color: #9ca7b5; }
-  .section-title { color: #e8edf3; }
+  .section-title, .rule-list-header { color: #e8edf3; }
+  .keyword-reply-row { border-color: #39424d; background: #1b2128; }
+  .empty-rules { border-color: #46515e; }
   .batch-toolbar { background: #1b2128; color: #aeb8c4; }
   .batch-toolbar strong { color: #f4f6f8; }
   .form-grid label, .batch-overwrite .checkbox { color: #c3ccd7; }

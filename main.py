@@ -38,6 +38,7 @@ from .qq_api import (
 from .review import (
     BilibiliLookupError,
     bilibili_uid_exists,
+    keyword_reply_for_message,
     matched_keyword,
     parse_keywords,
     parse_request_bilibili_uid,
@@ -270,6 +271,7 @@ class QQGroupAdmin(Star):
                 ("bilibili_uids", ""),
                 ("bilibili_dynamic_enabled", False),
                 ("bilibili_live_enabled", False),
+                ("keyword_replies", []),
             ):
                 if key not in entry:
                     entry[key] = default
@@ -954,6 +956,7 @@ class QQGroupAdmin(Star):
                 "bilibili_uids": "",
                 "bilibili_dynamic_enabled": False,
                 "bilibili_live_enabled": False,
+                "keyword_replies": [],
                 "platform_id": platform_id,
                 "managed_strategy_id": "",
                 "applied_whitelist": "",
@@ -1728,6 +1731,38 @@ class QQGroupAdmin(Star):
             message_id=message_id,
         )
 
+    async def _reply_to_keyword(
+        self,
+        event: AstrMessageEvent,
+        group_openid: str,
+        message_id: str,
+        text: str,
+        entry: dict[str, Any] | None,
+    ) -> bool:
+        reply = keyword_reply_for_message(
+            text,
+            group_openid,
+            (entry or {}).get("keyword_replies"),
+            self.config.get("global_keyword_replies"),
+        )
+        if reply is None:
+            return False
+        try:
+            await self._send_group_text(
+                self._client(event),
+                group_openid,
+                reply,
+                message_id=message_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - reply failures must not block chat
+            self.logger.warning(
+                "发送关键词回复失败：group=%s error=%s", group_openid, exc
+            )
+            return False
+        if hasattr(event, "stop_event"):
+            event.stop_event()
+        return True
+
     @filter.platform_adapter_type(QQ_PLATFORM_TYPES)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)
     async def audit_group_message(self, event: AstrMessageEvent) -> None:
@@ -1790,15 +1825,17 @@ class QQGroupAdmin(Star):
 
         entry = self._group_config(group_openid)
         settings = self._moderation_settings(entry)
+        text = str(event.get_message_str() or "").strip()
         if not settings["enabled"]:
+            await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
         role = self._message_role(event)
         if settings["exempt_admins"] and role in GROUP_ADMIN_ROLES:
+            await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
 
-        text = str(event.get_message_str() or "").strip()
         images = self._image_urls(event)
         reason = ""
         recall_ids: list[str] = []
@@ -1841,6 +1878,7 @@ class QQGroupAdmin(Star):
             reason = "消息未通过 AI 内容审核，已撤回。"
 
         if not reason:
+            await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
         if hasattr(event, "stop_event"):
@@ -2785,6 +2823,9 @@ class QQGroupAdmin(Star):
             if mode == "conditional"
             else not managed
         )
+        keyword_replies = entry.get("keyword_replies")
+        if not isinstance(keyword_replies, list):
+            keyword_replies = []
         return {
             "group_name": group_name or f"未绑定群 {group_openid[:8]}",
             "group_openid": group_openid,
@@ -2816,6 +2857,7 @@ class QQGroupAdmin(Star):
                 entry.get("bilibili_dynamic_enabled", False)
             ),
             "bilibili_live_enabled": bool(entry.get("bilibili_live_enabled", False)),
+            "keyword_replies": keyword_replies,
             "scan_pending": bool(entry.get("scan_pending", True)),
             "button_reject_reason": str(
                 entry.get("button_reject_reason") or "管理员拒绝"
@@ -2876,6 +2918,7 @@ class QQGroupAdmin(Star):
                 "bilibili_uids": str(payload["bilibili_uids"]),
                 "bilibili_dynamic_enabled": bool(payload["bilibili_dynamic_enabled"]),
                 "bilibili_live_enabled": bool(payload["bilibili_live_enabled"]),
+                "keyword_replies": list(payload["keyword_replies"]),
             }
         )
 

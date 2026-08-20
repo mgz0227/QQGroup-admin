@@ -47,6 +47,49 @@
     "hint": "命中后撤回所有已开启消息审查群中的普通成员消息，优先于群级规则。",
     "default": ""
   },
+  "global_keyword_replies": {
+    "type": "template_list",
+    "description": "全局关键词回复",
+    "hint": "按列表顺序匹配。目标群 OpenID 留空时覆盖全部 QQ 群；填写后仅覆盖指定群。",
+    "default": [],
+    "templates": {
+      "keyword_reply": {
+        "name": "关键词回复",
+        "display_item": "keyword",
+        "hide_hint_in_list": true,
+        "items": {
+          "keyword": {
+            "type": "string",
+            "description": "关键词",
+            "default": ""
+          },
+          "reply": {
+            "type": "text",
+            "description": "回复内容",
+            "default": ""
+          },
+          "match_type": {
+            "type": "string",
+            "description": "匹配方式",
+            "default": "contains",
+            "options": ["contains", "exact"],
+            "labels": ["包含关键词", "完全匹配"]
+          },
+          "group_openids": {
+            "type": "text",
+            "description": "覆盖的群 OpenID",
+            "hint": "逗号、空格或换行分隔；留空表示全部 QQ 群。",
+            "default": ""
+          },
+          "enabled": {
+            "type": "bool",
+            "description": "启用",
+            "default": true
+          }
+        }
+      }
+    }
+  },
   "bilibili_cookie": {
     "type": "string",
     "description": "B站 Cookie（动态推送）",

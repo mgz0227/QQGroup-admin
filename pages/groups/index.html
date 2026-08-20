@@ -168,6 +168,14 @@
             <span>消息撤回关键词</span>
             <textarea id="message-reject-keywords" rows="3" placeholder="每行一个关键词"></textarea>
           </label>
+          <div class="wide keyword-reply-editor">
+            <div class="rule-list-header">
+              <span>单群关键词回复</span>
+              <button class="button secondary small-button" id="add-keyword-reply" type="button">添加回复</button>
+            </div>
+            <p>仅在当前群生效，按列表顺序匹配。</p>
+            <div class="keyword-reply-list" id="keyword-replies"></div>
+          </div>
           <label class="checkbox">
             <input id="ai-review-enabled" type="checkbox">
             <span>AI 内容审核</span>

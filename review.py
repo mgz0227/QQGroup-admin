@@ -78,6 +78,53 @@ def matched_keyword(text: str, keywords: list[str]) -> str | None:
     )
 
 
+def keyword_reply_for_message(
+    text: str,
+    group_openid: str,
+    group_rules: object,
+    global_rules: object,
+) -> str | None:
+    """Return the first matching group reply, then fall back to global rules."""
+
+    message = text.strip()
+    if not message:
+        return None
+
+    def matches(rules: object, *, global_scope: bool) -> str | None:
+        if not isinstance(rules, list):
+            return None
+        folded = message.casefold()
+        for rule in rules[:100]:
+            if not isinstance(rule, dict) or not bool(rule.get("enabled", True)):
+                continue
+            keyword = str(rule.get("keyword") or "").strip()
+            reply = str(rule.get("reply") or "").strip()
+            if not keyword or not reply or len(keyword) > 100 or len(reply) > 1000:
+                continue
+            if global_scope:
+                targets = rule.get("group_openids")
+                if isinstance(targets, str):
+                    targets = re.split(r"[\s,，;；]+", targets.strip())
+                if isinstance(targets, list):
+                    targets = {
+                        str(item).strip() for item in targets if str(item).strip()
+                    }
+                    if targets and "*" not in targets and group_openid not in targets:
+                        continue
+            match_type = str(rule.get("match_type") or "contains")
+            keyword_folded = keyword.casefold()
+            if (match_type == "exact" and folded == keyword_folded) or (
+                match_type == "contains" and keyword_folded in folded
+            ):
+                return reply
+        return None
+
+    return matches(group_rules, global_scope=False) or matches(
+        global_rules,
+        global_scope=True,
+    )
+
+
 def parse_bilibili_response(uid: str, payload: Any) -> bool:
     if not isinstance(payload, dict):
         raise BilibiliLookupError("B 站返回格式异常")

@@ -14,6 +14,7 @@ from .review import parse_keywords
 PLUGIN_NAME = "astrbot_plugin_qqgroup_admin"
 BATCH_GROUP_LIMIT = 100
 BATCH_TEXT_BUDGET = 4_000_000
+KEYWORD_REPLY_LIMIT = 100
 BATCH_FIELDS = {
     "mode",
     "whitelist_qq_numbers",
@@ -119,6 +120,48 @@ class GroupAdminWeb:
         if not minimum <= value <= maximum:
             raise ValueError(f"{label}必须在 {minimum}-{maximum} 之间")
         return value
+
+    @classmethod
+    def _keyword_replies(cls, value: Any) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("关键词回复必须是列表")
+        if len(value) > KEYWORD_REPLY_LIMIT:
+            raise ValueError(f"每群最多配置 {KEYWORD_REPLY_LIMIT} 条关键词回复")
+
+        replies = []
+        for index, item in enumerate(value, 1):
+            if not isinstance(item, dict):
+                raise TypeError(f"第 {index} 条关键词回复格式错误")
+            keyword = cls._text(
+                item.get("keyword"), f"第 {index} 条关键词", 100, required=True
+            )
+            reply = cls._text(
+                item.get("reply"),
+                f"第 {index} 条回复内容",
+                1_000,
+                required=True,
+                multiline=True,
+            )
+            match_type = cls._text(
+                item.get("match_type", "contains"), f"第 {index} 条匹配方式", 16
+            )
+            if match_type not in {"contains", "exact"}:
+                raise ValueError(f"第 {index} 条匹配方式只能是 contains 或 exact")
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise TypeError(f"第 {index} 条启用状态必须是布尔值")
+            replies.append(
+                {
+                    "__template_key": "keyword_reply",
+                    "keyword": keyword,
+                    "reply": reply,
+                    "match_type": match_type,
+                    "enabled": enabled,
+                }
+            )
+        return replies
 
     @classmethod
     def _validated_save(cls, payload: Any) -> dict[str, Any]:
@@ -243,6 +286,7 @@ class GroupAdminWeb:
                 payload, "moderation_exempt_admins", True, "管理员免审开关"
             ),
             "message_reject_keywords": message_keywords,
+            "keyword_replies": cls._keyword_replies(payload.get("keyword_replies", [])),
             "ai_review_enabled": cls._bool(
                 payload, "ai_review_enabled", False, "AI 审核开关"
             ),

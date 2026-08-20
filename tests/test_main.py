@@ -542,12 +542,32 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "fallback_action": "pending",
                 "scan_pending": True,
                 "button_reject_reason": "资料不完整",
+                "keyword_replies": [
+                    {
+                        "keyword": "帮助",
+                        "reply": "请查看群公告",
+                        "match_type": "exact",
+                        "enabled": True,
+                    }
+                ],
             }
         )
         self.assertEqual(payload["whitelist_qq_numbers"], "123\n456")
         self.assertTrue(payload["uid_exists_auto_approve"])
         self.assertEqual(payload["approve_keywords"], "主页\n老用户")
         self.assertEqual(payload["reject_keywords"], "广告\n引流")
+        self.assertEqual(
+            payload["keyword_replies"],
+            [
+                {
+                    "__template_key": "keyword_reply",
+                    "keyword": "帮助",
+                    "reply": "请查看群公告",
+                    "match_type": "exact",
+                    "enabled": True,
+                }
+            ],
+        )
         payload["uid_check_enabled"] = False
         self.assertFalse(
             module.GroupAdminWeb._validated_save(payload)["uid_exists_auto_approve"]
@@ -565,6 +585,26 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                     **payload,
                     "bilibili_uids": "",
                     "bilibili_live_enabled": True,
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "关键词不能为空"):
+            module.GroupAdminWeb._validated_save(
+                {
+                    **payload,
+                    "keyword_replies": [{"keyword": "", "reply": "回复"}],
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "匹配方式只能是"):
+            module.GroupAdminWeb._validated_save(
+                {
+                    **payload,
+                    "keyword_replies": [
+                        {
+                            "keyword": "帮助",
+                            "reply": "回复",
+                            "match_type": "regex",
+                        }
+                    ],
                 }
             )
 
@@ -878,6 +918,26 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(event.stopped)
         api.recall_group_message.assert_not_awaited()
+
+    async def test_group_keyword_reply_precedes_global_and_stops_llm(self):
+        plugin, client = self.plugin()
+        plugin.config["global_keyword_replies"] = [
+            {
+                "keyword": "帮助",
+                "reply": "全局帮助",
+                "group_openids": "group-1",
+            }
+        ]
+        plugin.config["auto_review_groups"][0]["keyword_replies"] = [
+            {"keyword": "帮助", "reply": "本群帮助"}
+        ]
+        event = FakeEvent(client, "需要帮助")
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        self.assertEqual(client.api.messages[-1]["content"], "本群帮助")
+        self.assertEqual(client.api.messages[-1]["msg_id"], "message-1")
 
     async def test_duplicate_delivery_never_reaches_later_handlers(self):
         plugin, client = self.plugin()
