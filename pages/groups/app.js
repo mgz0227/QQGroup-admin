@@ -242,6 +242,7 @@
   function setView(name) {
     ["groups", "global-keywords", "runtime", "identities"].forEach(function (view) {
       var active = view === name;
+      if (!active && view === "global-keywords") closeKeywordRules(element(view + "-view"));
       element(view + "-view").hidden = !active;
       element(view + "-tab").classList.toggle("active", active);
       element(view + "-tab").setAttribute("aria-selected", String(active));
@@ -256,6 +257,38 @@
     if (exact && logic.value === "all") logic.value = "any";
   }
 
+  function closeKeywordRules(container, keep) {
+    if (!container) return;
+    container.querySelectorAll("details.keyword-rule-row[open]").forEach(function (rule) {
+      if (rule !== keep) rule.removeAttribute("open");
+    });
+  }
+
+  function bindKeywordRuleDisclosure(row, list, name, mode, enabled, isNew) {
+    var summaryName = row.querySelector(".keyword-rule-summary-name");
+    var summaryMatch = row.querySelector(".keyword-rule-summary-match");
+    var summaryState = row.querySelector(".keyword-rule-summary-state");
+
+    function updateSummary() {
+      summaryName.textContent = name.value.trim() || "未命名规则";
+      summaryMatch.textContent = mode.value === "exact" ? "完全匹配" : "包含关键词";
+      summaryState.textContent = enabled.checked ? "已启用" : "已停用";
+      summaryState.classList.toggle("disabled", !enabled.checked);
+    }
+
+    name.addEventListener("input", updateSummary);
+    mode.addEventListener("change", updateSummary);
+    enabled.addEventListener("change", updateSummary);
+    row.addEventListener("toggle", function () {
+      if (row.open) closeKeywordRules(list, row);
+    });
+    updateSummary();
+    if (isNew) {
+      closeKeywordRules(list, row);
+      row.open = true;
+    }
+  }
+
   function addGlobalKeywordReply(rule) {
     var list = element("global-keyword-replies");
     if (list.querySelectorAll(".global-keyword-row").length >= 100) {
@@ -264,16 +297,20 @@
     }
     var empty = list.querySelector(".empty-rules");
     if (empty) empty.remove();
-    var row = document.createElement("div");
-    row.className = "global-keyword-row";
+    var isNew = arguments.length === 0;
+    var row = document.createElement("details");
+    row.className = "global-keyword-row keyword-rule-row";
     row.innerHTML =
+      '<summary class="keyword-rule-summary"><strong class="keyword-rule-summary-name"></strong><span class="keyword-rule-summary-meta"><span class="keyword-rule-summary-match"></span><span class="keyword-rule-summary-state"></span></span></summary>' +
+      '<div class="keyword-rule-body global-keyword-body">' +
       '<label><span>规则名称</span><input class="global-rule-name" maxlength="80" required></label>' +
       '<label><span>匹配方式</span><select class="global-rule-mode"><option value="contains">包含关键词</option><option value="exact">完全匹配</option></select></label>' +
       '<label class="checkbox global-rule-enabled"><input type="checkbox"><span>启用</span></label>' +
       '<button class="text-button danger global-rule-remove" type="button">删除</button>' +
       '<label class="wide"><span>关键词</span><textarea class="global-rule-keywords" maxlength="2100" rows="3" placeholder="每行一个关键词，最多 20 个" required></textarea></label>' +
       '<label><span>关键词组合</span><select class="global-rule-logic"><option value="any">任一满足（OR）</option><option value="all">全部满足（AND）</option></select></label>' +
-      '<label class="wide"><span>回复内容</span><textarea class="global-rule-content" maxlength="1000" rows="3" required></textarea></label>';
+      '<label class="wide"><span>回复内容</span><textarea class="global-rule-content" maxlength="1000" rows="3" required></textarea></label>' +
+      '</div>';
     rule = rule || {};
     var legacyKeyword = rule.keyword || "";
     row.querySelector(".global-rule-name").value = rule.name || rule.rule_name || legacyKeyword;
@@ -347,8 +384,16 @@
       row.remove();
       if (!list.querySelector(".global-keyword-row")) renderGlobalKeywordReplies([]);
     });
-    row.appendChild(scope);
+    row.querySelector(".global-keyword-body").appendChild(scope);
     list.appendChild(row);
+    bindKeywordRuleDisclosure(
+      row,
+      list,
+      row.querySelector(".global-rule-name"),
+      globalMode,
+      row.querySelector(".global-rule-enabled input"),
+      isNew
+    );
   }
 
   function renderGlobalKeywordReplies(rules) {
@@ -565,16 +610,20 @@
     }
     var empty = list.querySelector(".empty-rules");
     if (empty) empty.remove();
-    var row = document.createElement("div");
-    row.className = "keyword-reply-row";
+    var isNew = arguments.length === 0;
+    var row = document.createElement("details");
+    row.className = "keyword-reply-row keyword-rule-row";
     row.innerHTML =
+      '<summary class="keyword-rule-summary"><strong class="keyword-rule-summary-name"></strong><span class="keyword-rule-summary-meta"><span class="keyword-rule-summary-match"></span><span class="keyword-rule-summary-state"></span></span></summary>' +
+      '<div class="keyword-rule-body keyword-reply-body">' +
       '<label><span>规则名称</span><input class="keyword-reply-name" maxlength="80" required></label>' +
       '<label><span>匹配方式</span><select class="keyword-reply-mode"><option value="contains">包含关键词</option><option value="exact">完全匹配</option></select></label>' +
       '<label class="checkbox keyword-reply-enabled"><input type="checkbox"><span>启用</span></label>' +
       '<button class="text-button danger keyword-reply-remove" type="button">删除</button>' +
       '<label class="wide"><span>关键词</span><textarea class="keyword-reply-keywords" maxlength="2100" rows="3" placeholder="每行一个关键词，最多 20 个" required></textarea></label>' +
       '<label><span>关键词组合</span><select class="keyword-reply-logic"><option value="any">任一满足（OR）</option><option value="all">全部满足（AND）</option></select></label>' +
-      '<label class="wide"><span>回复内容</span><textarea class="keyword-reply-content" maxlength="1000" rows="2" required></textarea></label>';
+      '<label class="wide"><span>回复内容</span><textarea class="keyword-reply-content" maxlength="1000" rows="2" required></textarea></label>' +
+      '</div>';
     rule = rule || {};
     var legacyKeyword = rule.keyword || "";
     row.querySelector(".keyword-reply-name").value = rule.name || rule.rule_name || legacyKeyword;
@@ -599,6 +648,14 @@
       if (!list.querySelector(".keyword-reply-row")) renderKeywordReplies([]);
     });
     list.appendChild(row);
+    bindKeywordRuleDisclosure(
+      row,
+      list,
+      row.querySelector(".keyword-reply-name"),
+      groupMode,
+      row.querySelector(".keyword-reply-enabled input"),
+      isNew
+    );
   }
 
   function renderKeywordReplies(rules) {
@@ -876,6 +933,12 @@
   element("start-bilibili-login").addEventListener("click", startBilibiliLogin);
   element("edit-form").addEventListener("submit", save);
   element("batch-edit-form").addEventListener("submit", saveBatch);
+  document.addEventListener("invalid", function (event) {
+    var rule = event.target.closest && event.target.closest("details.keyword-rule-row");
+    if (!rule) return;
+    closeKeywordRules(rule.parentElement, rule);
+    rule.open = true;
+  }, true);
   document.querySelectorAll("[data-controls]").forEach(function (toggle) {
     toggle.addEventListener("change", function () {
       element(toggle.dataset.controls).disabled = !toggle.checked;
