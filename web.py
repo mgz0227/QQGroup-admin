@@ -17,6 +17,7 @@ BATCH_GROUP_LIMIT = 100
 BATCH_TEXT_BUDGET = 4_000_000
 KEYWORD_REPLY_LIMIT = 100
 MAX_AI_FALLBACK_PROVIDERS = 3
+MAX_MEMBER_LIST_ITEMS = 10_000
 BATCH_FIELDS = {
     "mode",
     "whitelist_qq_numbers",
@@ -31,22 +32,34 @@ BATCH_FIELDS = {
     "fallback_human_verify_enabled",
     "moderation_enabled",
     "moderation_exempt_admins",
+    "member_blacklist",
+    "member_whitelist",
+    "blacklist_reply",
+    "blacklist_at_member",
     "message_reject_keywords",
+    "message_reject_reply",
+    "message_reject_at_member",
     "ai_review_enabled",
     "ai_review_provider_id",
     "ai_review_fallback_provider_id",
     "image_keyword_review_enabled",
     "image_reject_keywords",
+    "image_reject_reply",
+    "image_reject_at_member",
     "image_spam_enabled",
     "image_spam_count",
     "image_spam_window_seconds",
     "image_spam_group_min_members",
     "image_spam_recall_count",
+    "image_spam_reply",
+    "image_spam_at_member",
     "repeat_review_enabled",
     "repeat_count",
     "repeat_window_seconds",
     "repeat_mute_min_seconds",
     "repeat_mute_max_seconds",
+    "repeat_reply",
+    "repeat_at_member",
     "bilibili_uids",
     "bilibili_dynamic_enabled",
     "bilibili_live_enabled",
@@ -57,9 +70,16 @@ BATCH_TEXT_FIELDS = {
     "reject_keywords",
     "button_reject_reason",
     "message_reject_keywords",
+    "message_reject_reply",
+    "member_blacklist",
+    "member_whitelist",
+    "blacklist_reply",
     "ai_review_provider_id",
     "ai_review_fallback_provider_id",
     "image_reject_keywords",
+    "image_reject_reply",
+    "image_spam_reply",
+    "repeat_reply",
     "bilibili_uids",
 }
 
@@ -127,6 +147,21 @@ class GroupAdminWeb:
         if not isinstance(value, bool):
             raise TypeError(f"{label}必须是布尔值")
         return value
+
+    @classmethod
+    def _member_list(cls, value: Any, label: str) -> str:
+        text = cls._text(value, label, 1_400_000, multiline=True)
+        items = [
+            item.strip()
+            for item in re.split(r"[\s,，;；]+", text)
+            if item.strip()
+        ]
+        items = list(dict.fromkeys(items))
+        if len(items) > MAX_MEMBER_LIST_ITEMS:
+            raise ValueError(f"{label}最多 {MAX_MEMBER_LIST_ITEMS} 个")
+        if any(len(item) > 128 for item in items):
+            raise ValueError(f"{label}中的成员 OpenID 最多 128 个字符")
+        return "\n".join(items)
 
     @staticmethod
     def _int(
@@ -346,6 +381,36 @@ class GroupAdminWeb:
                     )
                 )
             ),
+            "global_message_reject_reply": cls._text(
+                payload.get("global_message_reject_reply", ""),
+                "全局文字关键词撤回回复",
+                1_000,
+                multiline=True,
+            ),
+            "global_message_reject_at_member": cls._bool(
+                payload,
+                "global_message_reject_at_member",
+                True,
+                "全局文字关键词撤回艾特",
+            ),
+            "global_member_blacklist": cls._member_list(
+                payload.get("global_member_blacklist", ""), "全局成员黑名单"
+            ),
+            "global_member_whitelist": cls._member_list(
+                payload.get("global_member_whitelist", ""), "全局成员白名单"
+            ),
+            "global_blacklist_reply": cls._text(
+                payload.get("global_blacklist_reply", ""),
+                "全局黑名单撤回回复",
+                1_000,
+                multiline=True,
+            ),
+            "global_blacklist_at_member": cls._bool(
+                payload,
+                "global_blacklist_at_member",
+                True,
+                "全局黑名单撤回艾特",
+            ),
             "global_image_reject_keywords": "\n".join(
                 parse_keywords(
                     cls._text(
@@ -355,6 +420,30 @@ class GroupAdminWeb:
                         multiline=True,
                     )
                 )
+            ),
+            "global_image_reject_reply": cls._text(
+                payload.get("global_image_reject_reply", ""),
+                "全局图片关键词撤回回复",
+                1_000,
+                multiline=True,
+            ),
+            "global_image_reject_at_member": cls._bool(
+                payload,
+                "global_image_reject_at_member",
+                True,
+                "全局图片关键词撤回艾特",
+            ),
+            "global_ai_reject_reply": cls._text(
+                payload.get("global_ai_reject_reply", ""),
+                "AI 撤回回复",
+                1_000,
+                multiline=True,
+            ),
+            "global_ai_reject_at_member": cls._bool(
+                payload,
+                "global_ai_reject_at_member",
+                True,
+                "AI 撤回艾特",
             ),
             "bilibili_live_interval_seconds": cls._int(
                 payload, "bilibili_live_interval_seconds", 60, 30, 600, "直播轮询间隔"
@@ -398,6 +487,13 @@ class GroupAdminWeb:
             settings["global_ai_review_enabled"] = cls._bool(
                 payload, ai_enabled_key, False, "全局 AI 审核开关"
             )
+        if "global_ai_review_action" in payload:
+            action = cls._text(
+                payload["global_ai_review_action"], "AI 命中动作", 16
+            )
+            if action not in {"record_only", "recall"}:
+                raise ValueError("AI 命中动作只能是 record_only 或 recall")
+            settings["global_ai_review_action"] = action
         if primary_key is not None:
             settings["global_ai_review_provider_id"] = cls._text(
                 payload[primary_key], "全局 AI 审核主模型", 256
@@ -455,6 +551,23 @@ class GroupAdminWeb:
             in settings["global_ai_review_fallback_provider_ids"]
         ):
             raise ValueError("AI 审核主模型不能出现在回退模型列表")
+        # Older cached WebUI bundles do not send the newer per-reason reply
+        # fields.  Treat those keys as a partial update so a stale page cannot
+        # erase values already configured in the current runtime settings.
+        for key in (
+            "global_message_reject_reply",
+            "global_message_reject_at_member",
+            "global_member_blacklist",
+            "global_member_whitelist",
+            "global_blacklist_reply",
+            "global_blacklist_at_member",
+            "global_image_reject_reply",
+            "global_image_reject_at_member",
+            "global_ai_reject_reply",
+            "global_ai_reject_at_member",
+        ):
+            if key not in payload:
+                settings.pop(key, None)
         return settings
 
     @classmethod
@@ -537,6 +650,42 @@ class GroupAdminWeb:
                 )
             )
         )
+        message_reply = cls._text(
+            payload.get("message_reject_reply", ""),
+            "本群文字关键词撤回回复",
+            1_000,
+            multiline=True,
+        )
+        member_blacklist = cls._member_list(
+            payload.get("member_blacklist", ""), "本群成员黑名单"
+        )
+        member_whitelist = cls._member_list(
+            payload.get("member_whitelist", ""), "本群成员白名单"
+        )
+        blacklist_reply = cls._text(
+            payload.get("blacklist_reply", ""),
+            "本群黑名单撤回回复",
+            1_000,
+            multiline=True,
+        )
+        image_reply = cls._text(
+            payload.get("image_reject_reply", ""),
+            "本群图片关键词撤回回复",
+            1_000,
+            multiline=True,
+        )
+        image_spam_reply = cls._text(
+            payload.get("image_spam_reply", ""),
+            "连续发图撤回回复",
+            1_000,
+            multiline=True,
+        )
+        repeat_reply = cls._text(
+            payload.get("repeat_reply", ""),
+            "复读处置回复",
+            1_000,
+            multiline=True,
+        )
         bili_uids = "\n".join(
             parse_bilibili_uids(
                 cls._text(
@@ -601,11 +750,25 @@ class GroupAdminWeb:
             "moderation_exempt_admins": cls._bool(
                 payload, "moderation_exempt_admins", True, "管理员免审开关"
             ),
+            "member_blacklist": member_blacklist,
+            "member_whitelist": member_whitelist,
+            "blacklist_reply": blacklist_reply,
+            "blacklist_at_member": cls._bool(
+                payload, "blacklist_at_member", True, "本群黑名单撤回艾特"
+            ),
             "message_reject_keywords": message_keywords,
+            "message_reject_reply": message_reply,
+            "message_reject_at_member": cls._bool(
+                payload, "message_reject_at_member", True, "本群文字关键词撤回艾特"
+            ),
             "image_keyword_review_enabled": cls._bool(
                 payload, "image_keyword_review_enabled", False, "图片文字审核开关"
             ),
             "image_reject_keywords": image_keywords,
+            "image_reject_reply": image_reply,
+            "image_reject_at_member": cls._bool(
+                payload, "image_reject_at_member", True, "本群图片关键词撤回艾特"
+            ),
             "keyword_replies": cls._keyword_replies(payload.get("keyword_replies", [])),
             "ai_review_enabled": cls._bool(
                 payload, "ai_review_enabled", False, "AI 审核开关"
@@ -637,6 +800,10 @@ class GroupAdminWeb:
                 50,
                 "图片触发时撤回数量",
             ),
+            "image_spam_reply": image_spam_reply,
+            "image_spam_at_member": cls._bool(
+                payload, "image_spam_at_member", True, "连续发图撤回艾特"
+            ),
             "repeat_review_enabled": cls._bool(
                 payload, "repeat_review_enabled", False, "复读检测开关"
             ),
@@ -646,6 +813,10 @@ class GroupAdminWeb:
             ),
             "repeat_mute_min_seconds": mute_min,
             "repeat_mute_max_seconds": mute_max,
+            "repeat_reply": repeat_reply,
+            "repeat_at_member": cls._bool(
+                payload, "repeat_at_member", True, "复读处置艾特"
+            ),
             "bilibili_uids": bili_uids,
             "bilibili_dynamic_enabled": bili_dynamic_enabled,
             "bilibili_live_enabled": bili_live_enabled,

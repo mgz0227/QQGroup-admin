@@ -746,6 +746,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "fallback_action": "pending",
                 "scan_pending": True,
                 "button_reject_reason": "资料不完整",
+                "member_blacklist": "member-1, union-1",
+                "member_whitelist": "188144093",
+                "blacklist_reply": "黑名单消息已撤回",
+                "blacklist_at_member": False,
                 "keyword_replies": [
                     {
                         "name": "群帮助",
@@ -762,6 +766,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["uid_exists_auto_approve"])
         self.assertEqual(payload["approve_keywords"], "主页\n老用户")
         self.assertEqual(payload["reject_keywords"], "广告\n引流")
+        self.assertEqual(payload["member_blacklist"], "member-1\nunion-1")
+        self.assertEqual(payload["member_whitelist"], "188144093")
+        self.assertFalse(payload["blacklist_at_member"])
         self.assertEqual(payload["ai_review_provider_id"], "")
         self.assertEqual(payload["ai_review_fallback_provider_id"], "")
         self.assertEqual(payload["image_spam_group_min_members"], 2)
@@ -884,12 +891,49 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "settings_command_enabled": False,
                 "global_reject_keywords": "广告, 引流",
                 "global_message_reject_keywords": "刷屏",
+                "global_message_reject_reply": "文字已撤回",
+                "global_message_reject_at_member": False,
+                "global_member_blacklist": "member-1, union-1",
+                "global_member_whitelist": "188144093",
+                "global_blacklist_reply": "黑名单已撤回",
+                "global_blacklist_at_member": True,
+                "global_image_reject_reply": "图片已撤回",
+                "global_image_reject_at_member": True,
+                "global_ai_review_action": "record_only",
+                "global_ai_reject_reply": "AI 已撤回",
+                "global_ai_reject_at_member": False,
                 "bilibili_live_interval_seconds": 60,
                 "bilibili_dynamic_interval_seconds": 180,
             }
         )
         self.assertEqual(runtime["global_reject_keywords"], "广告\n引流")
         self.assertFalse(runtime["settings_command_enabled"])
+        self.assertEqual(runtime["global_message_reject_reply"], "文字已撤回")
+        self.assertFalse(runtime["global_message_reject_at_member"])
+        self.assertEqual(runtime["global_member_blacklist"], "member-1\nunion-1")
+        self.assertEqual(runtime["global_member_whitelist"], "188144093")
+        self.assertEqual(runtime["global_blacklist_reply"], "黑名单已撤回")
+        self.assertTrue(runtime["global_blacklist_at_member"])
+        self.assertEqual(runtime["global_image_reject_reply"], "图片已撤回")
+        self.assertTrue(runtime["global_image_reject_at_member"])
+        self.assertEqual(runtime["global_ai_review_action"], "record_only")
+
+    def test_runtime_validation_keeps_new_fields_partial_for_cached_pages(self):
+        runtime = module.GroupAdminWeb._runtime_settings(
+            {
+                "uid_review_interval_seconds": 60,
+                "mute_success_message": "ok",
+                "settings_panel_auto_recall": True,
+                "settings_command_enabled": True,
+                "global_reject_keywords": "",
+                "global_message_reject_keywords": "",
+                "bilibili_live_interval_seconds": 60,
+                "bilibili_dynamic_interval_seconds": 180,
+            }
+        )
+        self.assertNotIn("global_message_reject_reply", runtime)
+        self.assertNotIn("global_image_reject_reply", runtime)
+        self.assertNotIn("global_ai_reject_reply", runtime)
 
     def test_uid_review_waits_for_native_strategy_sync(self):
         plugin, _ = self.plugin()
@@ -1202,6 +1246,221 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.stopped)
         api.recall_group_message.assert_not_awaited()
 
+    async def test_global_keyword_uses_its_own_reply_without_mention(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_message_reject_keywords="禁止词",
+            global_message_reject_reply="这条文字消息已撤回。",
+            global_message_reject_at_member=False,
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        event = FakeEvent(client, "包含禁止词")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
+        self.assertEqual(client.api.messages[-1]["content"], "这条文字消息已撤回。")
+
+    async def test_recall_reply_variable_overrides_disabled_auto_mention(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_message_reject_keywords="禁止词",
+            global_message_reject_reply="{at_user} 这条消息已撤回。",
+            global_message_reject_at_member=False,
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        event = FakeEvent(client, "包含禁止词")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertEqual(
+            client.api.messages[-1]["markdown"]["content"],
+            '<qqbot-at-user id="admin-1" /> 这条消息已撤回。',
+        )
+
+    async def test_empty_recall_reply_can_disable_notice_when_mention_is_off(self):
+        plugin, _client = self.plugin()
+        plugin.config.update(
+            global_message_reject_reply="",
+            global_message_reject_at_member=False,
+        )
+        settings = plugin._moderation_settings(plugin.config["auto_review_groups"][0])
+        self.assertEqual(settings["global_keyword_reply"], "")
+        self.assertFalse(settings["global_keyword_at"])
+
+    async def test_empty_recall_reply_with_mention_sends_only_the_mention(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_message_reject_keywords="禁止词",
+            global_message_reject_reply="",
+            global_message_reject_at_member=True,
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        event = FakeEvent(client, "包含禁止词")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertEqual(
+            client.api.messages[-1]["markdown"]["content"],
+            '<qqbot-at-user id="admin-1" />',
+        )
+
+    async def test_global_image_keyword_has_separate_reply_and_mention_setting(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_image_ocr_enabled=True,
+            global_image_reject_keywords="图片违禁词",
+            global_image_reject_reply="图片文字违规，已撤回。",
+            global_image_reject_at_member=False,
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        event = FakeEvent(client)
+        event.message_obj.raw_message.raw_data = {
+            "author": {"member_openid": "admin-1"},
+            "attachments": [
+                {"content_type": "image/png", "url": "https://example.com/a.png"}
+            ],
+        }
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        with patch.object(
+            plugin, "_image_ocr_text", AsyncMock(return_value="图片违禁词")
+        ):
+            await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
+        self.assertEqual(client.api.messages[-1]["content"], "图片文字违规，已撤回。")
+
+    async def test_global_member_blacklist_overrides_disabled_group_audit(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_member_blacklist="member-1",
+            global_blacklist_reply="黑名单消息已撤回。",
+            global_blacklist_at_member=False,
+        )
+        event = FakeEvent(client, "普通消息")
+        event.message_obj.raw_message.author.member_openid = "member-1"
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        self.assertEqual(client.api.messages[-1]["content"], "黑名单消息已撤回。")
+
+    async def test_member_whitelist_skips_group_audit_but_keeps_keyword_reply(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0].update(
+            moderation_enabled=True,
+            moderation_exempt_admins=False,
+            member_whitelist="member-1",
+            message_reject_keywords="禁止词",
+        )
+        event = FakeEvent(client, "包含禁止词")
+        event.message_obj.raw_message.author.member_openid = "member-1"
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertFalse(event.stopped)
+        api.recall_group_message.assert_not_awaited()
+
+    async def test_member_blacklist_wins_over_whitelist(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0].update(
+            moderation_enabled=True,
+            moderation_exempt_admins=False,
+            member_blacklist="member-1",
+            member_whitelist="member-1",
+        )
+        event = FakeEvent(client, "普通消息")
+        event.message_obj.raw_message.author.member_openid = "member-1"
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+
+    async def test_member_list_matches_union_openid_and_bound_uid(self):
+        plugin, client = self.plugin()
+        plugin.config.update(global_member_whitelist="union-1")
+        plugin._uid_bindings["188144093"] = {
+            "uid": "188144093",
+            "groups": ["group-1"],
+            "members": {"group-1": "member-1"},
+        }
+        event = FakeEvent(client, "普通消息")
+        event.message_obj.raw_message.author = SimpleNamespace(
+            member_openid="member-1", union_openid="union-1"
+        )
+        self.assertTrue(
+            plugin._member_list_matches(
+                event, "group-1", "member-1", ["UNION-1"]
+            )
+        )
+        plugin.config["global_member_whitelist"] = "188144093"
+        self.assertTrue(
+            plugin._member_list_matches(
+                event,
+                "group-1",
+                "member-1",
+                module.parse_member_list("188144093"),
+            )
+        )
+
+    async def test_ai_record_only_keeps_message_and_binding_violation_count(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_action="record_only",
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        plugin._uid_bindings["188144093"] = {
+            "uid": "188144093",
+            "member_openid": "admin-1",
+            "groups": ["group-1"],
+            "violation_count": 2,
+        }
+        event = FakeEvent(client, "普通聊天")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        async def block_with_trace(*_args, **kwargs):
+            kwargs["result"].update(
+                provider="provider-1",
+                decision="BLOCK",
+                confidence=96,
+                reason="测试判定",
+            )
+            return True
+
+        with patch.object(plugin, "_ai_blocks_message", side_effect=block_with_trace):
+            await plugin.audit_group_message(event)
+
+        self.assertFalse(event.stopped)
+        api.recall_group_message.assert_not_awaited()
+        self.assertEqual(client.api.messages, [])
+        self.assertEqual(plugin._uid_bindings["188144093"]["violation_count"], 2)
+        self.assertEqual(plugin._violation_records[-1]["action"], "record_only")
+        self.assertEqual(plugin._violation_records[-1]["ai_provider"], "provider-1")
+
     async def test_group_keyword_reply_precedes_global_and_stops_llm(self):
         plugin, client = self.plugin()
         plugin.config["global_keyword_replies"] = [
@@ -1251,6 +1510,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "uid": "188144093",
             "author": "UP",
             "pub_ts": 100,
+            "type": "DYNAMIC_TYPE_DRAW",
             "title": "新动态",
             "text": "正文",
             "url": "https://www.bilibili.com/opus/dynamic-1",
@@ -1277,18 +1537,60 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(await plugin._poll_bilibili_dynamics(subscriptions))
         self.assertEqual(plugin._bilibili_state["dynamic"]["188144093"]["seen"], [])
 
+        push = AsyncMock(return_value=True)
         with (
             patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
             patch.object(module, "fetch_space_dynamics", return_value={}),
             patch.object(module, "parse_dynamic_items", return_value=[item]),
-            patch.object(
-                plugin, "_push_bilibili_message", AsyncMock(return_value=True)
-            ),
+            patch.object(plugin, "_push_bilibili_message", push),
         ):
             self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
+        push_text = push.await_args.args[1]
+        self.assertIn("# B站动态", push_text)
+        self.assertIn("**UP** · 图文", push_text)
+        self.assertIn("正文", push_text)
+        self.assertIn("[查看原动态](https://www.bilibili.com/opus/dynamic-1)", push_text)
+        self.assertNotIn("\n-\n", push_text)
+
+    async def test_bilibili_live_push_uses_named_room_link(self):
+        plugin, _client = self.plugin()
+        subscriptions = {
+            "188144093": [
+                {
+                    "group_openid": "group-1",
+                    "platform_id": "platform-1",
+                    "dynamic": False,
+                    "live": True,
+                }
+            ]
+        }
+        plugin._bilibili_state["live"]["188144093"] = {
+            "live_status": 0,
+            "live_time": "",
+            "room_id": "123",
+            "uname": "UP",
+            "title": "旧标题",
+        }
+        push = AsyncMock(return_value=True)
+        current = {
+            "live_status": 1,
+            "live_time": "2026-08-24 12:00:00",
+            "room_id": "123",
+            "uname": "UP",
+            "title": "新标题",
+        }
+        with (
+            patch.object(module, "fetch_live_statuses", return_value={"188144093": current}),
+            patch.object(plugin, "_push_bilibili_message", push),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_live(subscriptions))
+        text = push.await_args.args[1]
+        self.assertIn("# B站直播", text)
+        self.assertIn("**UP** · 已开播", text)
+        self.assertIn("[进入直播间](https://live.bilibili.com/123)", text)
         self.assertEqual(
-            plugin._bilibili_state["dynamic"]["188144093"]["seen"],
-            ["dynamic-1"],
+            plugin._bilibili_state["live"]["188144093"]["live_status"],
+            1,
         )
 
     async def test_bilibili_failure_does_not_skip_later_hard_reject(self):
@@ -1368,11 +1670,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
-            client.api.messages[-1]["content"],
+            client.api.messages[-1]["markdown"]["content"],
             '已禁言 45 秒：<qqbot-at-user id="member-1" />',
         )
-        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
-        self.assertIn('<qqbot-at-user id="member-1" />', client.api.messages[-1]["content"])
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertIn(
+            '<qqbot-at-user id="member-1" />',
+            client.api.messages[-1]["markdown"]["content"],
+        )
 
     async def test_standard_mute_stops_after_direct_mention_reply(self):
         plugin, client = self.plugin()
@@ -1391,10 +1696,29 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         self.assertTrue(
-            client.api.messages[-1]["content"].startswith(
+            client.api.messages[-1]["markdown"]["content"].startswith(
                 '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
             )
         )
+
+    async def test_notice_fallback_never_exposes_raw_mention_markup(self):
+        plugin, client = self.plugin()
+        client.api.post_group_message = AsyncMock(
+            side_effect=[RuntimeError("markdown disabled"), SimpleNamespace(id="sent")]
+        )
+
+        await plugin._send_group_notice(
+            client,
+            "group-1",
+            "图片文字命中禁止关键词，已撤回。",
+            member_openid="member-1",
+        )
+
+        calls = client.api.post_group_message.await_args_list
+        self.assertEqual(calls[0].kwargs["msg_type"], 2)
+        self.assertEqual(calls[1].kwargs["msg_type"], 0)
+        self.assertNotIn("qqbot-at-user", calls[1].kwargs["content"])
+        self.assertEqual(calls[1].kwargs["content"], "图片文字命中禁止关键词，已撤回。")
 
     async def test_mute_template_keeps_at_tag_when_text_is_long(self):
         plugin, client = self.plugin()
@@ -1409,15 +1733,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
-        content = client.api.messages[-1]["content"]
-        self.assertLessEqual(len(content), 1000)
+        content = client.api.messages[-1]["markdown"]["content"]
+        self.assertLessEqual(len(content), 4000)
         self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
-        content = client.api.messages[-1]["content"]
+        content = client.api.messages[-1]["markdown"]["content"]
         mention = '<qqbot-at-user id="member-1" />'
-        self.assertEqual(content, mention * (1000 // len(mention)))
+        self.assertEqual(content, mention * 40)
 
     async def test_web_batch_save_and_sync(self):
         plugin, _client = self.plugin()

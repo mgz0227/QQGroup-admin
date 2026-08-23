@@ -70,6 +70,7 @@ GLOBAL_AI_FALLBACKS_KEY = "global_ai_review_fallback_provider_ids"
 GLOBAL_AI_TIMEOUT_KEY = "global_ai_review_timeout_seconds"
 GLOBAL_AI_IMAGES_KEY = "global_ai_review_images_enabled"
 GLOBAL_AI_BLOCK_THRESHOLD_KEY = "global_ai_review_block_threshold"
+GLOBAL_AI_ACTION_KEY = "global_ai_review_action"
 GLOBAL_IMAGE_KEYWORDS_KEY = "global_image_reject_keywords"
 GLOBAL_IMAGE_OCR_ENABLED_KEY = "global_image_ocr_enabled"
 GLOBAL_IMAGE_OCR_PROVIDER_KEY = "global_image_ocr_provider_id"
@@ -79,6 +80,7 @@ GLOBAL_AI_MIGRATED_KEY = "global_ai_review_migrated"
 MAX_AI_FALLBACK_PROVIDERS = 3
 AI_REVIEW_TOTAL_TIMEOUT_SECONDS = 20
 AI_REVIEW_DEFAULT_BLOCK_THRESHOLD = 95
+AI_REVIEW_ACTIONS = {"recall", "record_only"}
 IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS = 4
 IMAGE_OCR_DEFAULT_MAX_IMAGES = 1
 CONDITION_LOGICS = {"all", "any"}
@@ -139,6 +141,21 @@ def normalize_provider_ids(
         if len(result) >= limit:
             break
     return result
+
+
+def parse_member_list(value: Any, *, max_items: int = 10_000) -> list[str]:
+    """Normalize member/union OpenIDs and optional bound Bilibili UIDs."""
+    items = [
+        item.strip()
+        for item in re.split(r"[\s,，;；]+", str(value or ""))
+        if item.strip()
+    ]
+    items = list(dict.fromkeys(items))
+    if len(items) > max_items:
+        raise ValueError(f"成员名单最多 {max_items} 个")
+    if any(len(item) > 128 for item in items):
+        raise ValueError("成员 OpenID 最多 128 个字符")
+    return items
 
 
 class WakeCommandFilter(filter.CustomFilter):
@@ -336,11 +353,22 @@ class QQGroupAdmin(Star):
             (GLOBAL_AI_TIMEOUT_KEY, AI_REVIEW_TOTAL_TIMEOUT_SECONDS),
             (GLOBAL_AI_IMAGES_KEY, False),
             (GLOBAL_AI_BLOCK_THRESHOLD_KEY, AI_REVIEW_DEFAULT_BLOCK_THRESHOLD),
+            (GLOBAL_AI_ACTION_KEY, "record_only"),
+            ("global_ai_reject_reply", "消息未通过 AI 内容审核，已撤回。"),
+            ("global_ai_reject_at_member", True),
+            ("global_message_reject_reply", "消息命中全局禁止关键词，已撤回。"),
+            ("global_message_reject_at_member", True),
             (GLOBAL_IMAGE_KEYWORDS_KEY, ""),
+            ("global_image_reject_reply", "图片文字命中全局禁止关键词，已撤回。"),
+            ("global_image_reject_at_member", True),
             (GLOBAL_IMAGE_OCR_ENABLED_KEY, False),
             (GLOBAL_IMAGE_OCR_PROVIDER_KEY, ""),
             (GLOBAL_IMAGE_OCR_TIMEOUT_KEY, IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS),
             (GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY, IMAGE_OCR_DEFAULT_MAX_IMAGES),
+            ("global_member_blacklist", ""),
+            ("global_member_whitelist", ""),
+            ("global_blacklist_reply", "成员命中群聊黑名单，消息已撤回。"),
+            ("global_blacklist_at_member", True),
         ):
             if key not in self.config:
                 self.config[key] = default
@@ -404,19 +432,31 @@ class QQGroupAdmin(Star):
                 ("fallback_human_verify_enabled", False),
                 ("moderation_enabled", False),
                 ("moderation_exempt_admins", True),
+                ("member_blacklist", ""),
+                ("member_whitelist", ""),
+                ("blacklist_reply", "成员命中本群黑名单，消息已撤回。"),
+                ("blacklist_at_member", True),
                 ("message_reject_keywords", ""),
+                ("message_reject_reply", "消息命中本群禁止关键词，已撤回。"),
+                ("message_reject_at_member", True),
                 ("image_keyword_review_enabled", False),
                 ("image_reject_keywords", ""),
+                ("image_reject_reply", "图片文字命中本群禁止关键词，已撤回。"),
+                ("image_reject_at_member", True),
                 ("image_spam_enabled", False),
                 ("image_spam_count", 5),
                 ("image_spam_window_seconds", 15),
                 ("image_spam_group_min_members", 2),
                 ("image_spam_recall_count", 5),
+                ("image_spam_reply", "检测到连续发送图片或表情，相关消息已撤回。"),
+                ("image_spam_at_member", True),
                 ("repeat_review_enabled", False),
                 ("repeat_count", 4),
                 ("repeat_window_seconds", 30),
                 ("repeat_mute_min_seconds", 60),
                 ("repeat_mute_max_seconds", 600),
+                ("repeat_reply", "检测到集中复读，已随机禁言一名参与者。"),
+                ("repeat_at_member", True),
                 ("bilibili_uids", ""),
                 ("bilibili_dynamic_enabled", False),
                 ("bilibili_live_enabled", False),
@@ -583,6 +623,53 @@ class QQGroupAdmin(Star):
             kwargs["msg_id"] = message_id
         return await client.api.post_group_message(**kwargs)
 
+    async def _send_group_notice(
+        self,
+        client: Any,
+        group_openid: str,
+        text: str,
+        *,
+        member_openid: str = "",
+        message_id: str = "",
+    ) -> Any:
+        """Send a moderation notice without exposing raw QQ mention markup."""
+
+        text = str(text or "").strip()
+        if not text and not member_openid:
+            return None
+        if not member_openid:
+            text = text.replace("{at_user}", "").strip()
+            if not text:
+                return None
+            return await self._send_group_text(
+                client, group_openid, text, message_id=message_id
+            )
+        mention = self._mention(member_openid)
+        rendered = text.replace("{at_user}", mention)
+        if rendered == text and mention not in rendered:
+            rendered = f"{mention} {text}".strip()
+        # QQ parses the official mention tag in Markdown.  A few accounts do
+        # not have Markdown permission, so degrade to readable text on error.
+        try:
+            return await self._send_group_markdown(
+                client,
+                group_openid,
+                rendered[:4000],
+                message_id=message_id,
+            )
+        except Exception as exc:  # noqa: BLE001 - permission fallback
+            self.logger.debug("带艾特提示发送失败，降级为普通文本：%s", exc)
+            fallback = rendered.replace(mention, "").replace("{at_user}", "")
+            fallback = re.sub(r"[ \t]{2,}", " ", fallback).strip()
+            if not fallback:
+                return None
+            return await self._send_group_text(
+                client,
+                group_openid,
+                fallback,
+                message_id=message_id,
+            )
+
     @staticmethod
     def _member_state_key(group_openid: str, member_openid: str) -> str:
         return f"{group_openid}:{member_openid}"
@@ -655,10 +742,12 @@ class QQGroupAdmin(Star):
         message_id: str = "",
         action_member_openid: str = "",
         request: dict[str, Any] | None = None,
+        action: str = "recall",
+        ai_review: dict[str, Any] | None = None,
     ) -> None:
         binding = self._uid_bindings.get(uid)
         now = int(time.time())
-        if binding:
+        if binding and action != "record_only":
             binding["violation_count"] = int(binding.get("violation_count") or 0) + 1
             binding["last_violation_at"] = now
             binding["last_violation_group"] = group_openid
@@ -690,6 +779,11 @@ class QQGroupAdmin(Star):
                 "rule": reason[:200],
                 "content": content[:1_000],
                 "message_id": message_id[:256],
+                "action": action[:32],
+                "ai_provider": str((ai_review or {}).get("provider") or "")[:128],
+                "ai_decision": str((ai_review or {}).get("decision") or "")[:16],
+                "ai_confidence": (ai_review or {}).get("confidence"),
+                "ai_reason": str((ai_review or {}).get("reason") or "")[:200],
             }
         )
         self._violation_records = self._violation_records[-2_000:]
@@ -1031,10 +1125,11 @@ class QQGroupAdmin(Star):
                     )
                 else:
                     await self._clear_suspicious(group_openid, clicker)
-                    await self._send_group_text(
+                    await self._send_group_notice(
                         client,
                         group_openid,
-                        f"{self._mention(clicker)} 真人验证已通过，可以正常发言。",
+                        "真人验证已通过，可以正常发言。",
+                        member_openid=clicker,
                     )
         except QQAPIError as exc:
             self.logger.warning("处理 QQ 群管理按钮失败：%s", exc)
@@ -1163,19 +1258,31 @@ class QQGroupAdmin(Star):
                 "button_reject_reason": "管理员拒绝",
                 "moderation_enabled": False,
                 "moderation_exempt_admins": True,
+                "member_blacklist": "",
+                "member_whitelist": "",
+                "blacklist_reply": "成员命中本群黑名单，消息已撤回。",
+                "blacklist_at_member": True,
                 "message_reject_keywords": "",
+                "message_reject_reply": "消息命中本群禁止关键词，已撤回。",
+                "message_reject_at_member": True,
                 "image_keyword_review_enabled": False,
                 "image_reject_keywords": "",
+                "image_reject_reply": "图片文字命中本群禁止关键词，已撤回。",
+                "image_reject_at_member": True,
                 "image_spam_enabled": False,
                 "image_spam_count": 5,
                 "image_spam_window_seconds": 15,
                 "image_spam_group_min_members": 2,
                 "image_spam_recall_count": 5,
+                "image_spam_reply": "检测到连续发送图片或表情，相关消息已撤回。",
+                "image_spam_at_member": True,
                 "repeat_review_enabled": False,
                 "repeat_count": 4,
                 "repeat_window_seconds": 30,
                 "repeat_mute_min_seconds": 60,
                 "repeat_mute_max_seconds": 600,
+                "repeat_reply": "检测到集中复读，已随机禁言一名参与者。",
+                "repeat_at_member": True,
                 "bilibili_uids": "",
                 "bilibili_dynamic_enabled": False,
                 "bilibili_live_enabled": False,
@@ -1242,6 +1349,10 @@ class QQGroupAdmin(Star):
 
     def _moderation_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         entry = entry or {}
+        def configured_text(source: dict[str, Any], key: str, default: str) -> str:
+            value = source[key] if key in source else default
+            return default if value is None else str(value)
+
         minimum = self._bounded_int(
             entry.get("repeat_mute_min_seconds"), 60, 1, 2_592_000
         )
@@ -1251,10 +1362,54 @@ class QQGroupAdmin(Star):
         return {
             "enabled": bool(entry.get("moderation_enabled", False)),
             "exempt_admins": bool(entry.get("moderation_exempt_admins", True)),
+            "global_member_blacklist": parse_member_list(
+                self.config.get("global_member_blacklist", "")
+            ),
+            "global_member_whitelist": parse_member_list(
+                self.config.get("global_member_whitelist", "")
+            ),
+            "global_blacklist_reply": str(
+                configured_text(
+                    self.config,
+                    "global_blacklist_reply",
+                    "成员命中群聊黑名单，消息已撤回。",
+                )
+            ),
+            "global_blacklist_at": bool(
+                self.config.get("global_blacklist_at_member", True)
+            ),
+            "member_blacklist": parse_member_list(entry.get("member_blacklist", "")),
+            "member_whitelist": parse_member_list(entry.get("member_whitelist", "")),
+            "blacklist_reply": str(
+                configured_text(
+                    entry,
+                    "blacklist_reply",
+                    "成员命中本群黑名单，消息已撤回。",
+                )
+            ),
+            "blacklist_at": bool(entry.get("blacklist_at_member", True)),
             "global_keywords": parse_keywords(
                 str(self.config.get("global_message_reject_keywords") or "")
             ),
+            "global_keyword_reply": str(
+                configured_text(
+                    self.config,
+                    "global_message_reject_reply",
+                    "消息命中全局禁止关键词，已撤回。",
+                )
+            ),
+            "global_keyword_at": bool(
+                self.config.get("global_message_reject_at_member", True)
+            ),
             "keywords": parse_keywords(str(entry.get("message_reject_keywords") or "")),
+            "keyword_reply": str(
+                configured_text(
+                    entry,
+                    "message_reject_reply",
+                    "消息命中本群禁止关键词，已撤回。",
+                )
+            ),
+            "keyword_at": bool(entry.get("message_reject_at_member", True)),
             "ai_enabled": bool(self.config.get(GLOBAL_AI_ENABLED_KEY, False)),
             "ai_provider_id": str(
                 self.config.get(GLOBAL_AI_PROVIDER_KEY) or ""
@@ -1275,8 +1430,32 @@ class QQGroupAdmin(Star):
                 50,
                 100,
             ),
+            "ai_action": (
+                str(self.config.get(GLOBAL_AI_ACTION_KEY) or "record_only")
+                if str(self.config.get(GLOBAL_AI_ACTION_KEY) or "record_only")
+                in AI_REVIEW_ACTIONS
+                else "record_only"
+            ),
+            "ai_reply": str(
+                configured_text(
+                    self.config,
+                    "global_ai_reject_reply",
+                    "消息未通过 AI 内容审核，已撤回。",
+                )
+            ),
+            "ai_at": bool(self.config.get("global_ai_reject_at_member", True)),
             "global_image_keywords": parse_keywords(
                 str(self.config.get(GLOBAL_IMAGE_KEYWORDS_KEY) or "")
+            ),
+            "global_image_reply": str(
+                configured_text(
+                    self.config,
+                    "global_image_reject_reply",
+                    "图片文字命中全局禁止关键词，已撤回。",
+                )
+            ),
+            "global_image_at": bool(
+                self.config.get("global_image_reject_at_member", True)
             ),
             "image_keyword_enabled": bool(
                 entry.get("image_keyword_review_enabled", False)
@@ -1284,6 +1463,14 @@ class QQGroupAdmin(Star):
             "image_keywords": parse_keywords(
                 str(entry.get("image_reject_keywords") or "")
             ),
+            "image_keyword_reply": str(
+                configured_text(
+                    entry,
+                    "image_reject_reply",
+                    "图片文字命中本群禁止关键词，已撤回。",
+                )
+            ),
+            "image_keyword_at": bool(entry.get("image_reject_at_member", True)),
             "image_ocr_enabled": bool(
                 self.config.get(GLOBAL_IMAGE_OCR_ENABLED_KEY, False)
             ),
@@ -1313,6 +1500,14 @@ class QQGroupAdmin(Star):
             "image_recall_count": self._bounded_int(
                 entry.get("image_spam_recall_count"), 5, 1, 50
             ),
+            "image_spam_reply": str(
+                configured_text(
+                    entry,
+                    "image_spam_reply",
+                    "检测到连续发送图片或表情，相关消息已撤回。",
+                )
+            ),
+            "image_spam_at": bool(entry.get("image_spam_at_member", True)),
             "repeat_enabled": bool(entry.get("repeat_review_enabled", False)),
             "repeat_count": self._bounded_int(entry.get("repeat_count"), 4, 3, 20),
             "repeat_window": self._bounded_int(
@@ -1320,11 +1515,42 @@ class QQGroupAdmin(Star):
             ),
             "repeat_mute_min": minimum,
             "repeat_mute_max": maximum,
+            "repeat_reply": str(
+                configured_text(
+                    entry,
+                    "repeat_reply",
+                    "检测到集中复读，已随机禁言一名参与者。",
+                )
+            ),
+            "repeat_at": bool(entry.get("repeat_at_member", True)),
         }
 
     @staticmethod
     def _bilibili_uids(entry: dict[str, Any]) -> list[str]:
         return parse_bilibili_uids(str(entry.get("bilibili_uids") or ""))
+
+    @staticmethod
+    def _bilibili_dynamic_type(value: Any) -> str:
+        return {
+            "DYNAMIC_TYPE_AV": "视频",
+            "DYNAMIC_TYPE_DRAW": "图文",
+            "DYNAMIC_TYPE_WORD": "文字",
+            "DYNAMIC_TYPE_FORWARD": "转发",
+            "DYNAMIC_TYPE_ARTICLE": "专栏",
+            "DYNAMIC_TYPE_LIVE_RCMD": "直播",
+            "DYNAMIC_TYPE_UGC_SEASON": "合集",
+            "DYNAMIC_TYPE_PGC": "番剧",
+        }.get(str(value or "").upper(), "动态")
+
+    @staticmethod
+    def _markdown_fallback_text(value: str) -> str:
+        text = re.sub(
+            r"\[([^\]]+)\]\((https?://[^)]+)\)",
+            r"\1：\2",
+            str(value or ""),
+        )
+        text = re.sub(r"(?m)^(?:#{1,6}\s+|>\s*)", "", text)
+        return text.replace("**", "").replace("\\", "").strip()
 
     def _ensure_native_mode(self, group_openid: str) -> None:
         entry = self._group_config(group_openid)
@@ -1682,7 +1908,7 @@ class QQGroupAdmin(Star):
                     await self._send_group_text(
                         client,
                         str(target["group_openid"]),
-                        text,
+                        self._markdown_fallback_text(text),
                     )
                 except Exception as fallback_exc:  # noqa: BLE001 - QQ boundary
                     success = False
@@ -1725,11 +1951,15 @@ class QQGroupAdmin(Star):
                     room_id = str(current.get("room_id") or "").strip()
                     if transition == "start":
                         text = (
-                            f"# {name} 开播了\n{title}\n"
-                            f"https://live.bilibili.com/{room_id}"
+                            f"# B站直播\n\n**{name}** · 已开播\n\n"
+                            f"> {title}\n\n"
+                            f"[进入直播间](https://live.bilibili.com/{room_id})"
                         )
                     else:
-                        text = f"# {name} 已下播\n本场直播已结束。"
+                        text = (
+                            f"# B站直播\n\n**{name}** · 已下播\n\n"
+                            f"> {title}\n\n本场直播已结束。"
+                        )
                     delivered = await self._push_bilibili_message(
                         subscriptions.get(uid, []), text, "live"
                     )
@@ -1793,14 +2023,34 @@ class QQGroupAdmin(Star):
             delivered_items = []
             for item in new_items:
                 name = self._markdown_text(item.get("author") or f"UID {uid}")
-                title = self._markdown_text(
-                    item.get("title") or item.get("text") or "发布了新动态", 300
+                raw_title = str(item.get("title") or "").strip()
+                raw_summary = str(item.get("text") or "").strip()
+                title = (
+                    self._markdown_text(raw_title, 300)
+                    if raw_title not in {"-", "新动态", "发布了新动态"}
+                    else ""
                 )
-                summary = self._markdown_text(item.get("text") or "", 500)
-                text = f"# {name} 发布了新动态\n{title}"
-                if summary and summary != title:
-                    text += f"\n{summary}"
-                text += f"\n{item['url']}"
+                summary = (
+                    self._markdown_text(raw_summary, 500)
+                    if raw_summary not in {"", "-", raw_title}
+                    else ""
+                )
+                kind = self._bilibili_dynamic_type(item.get("type"))
+                pub_ts = self._bounded_int(
+                    item.get("pub_ts"), 0, 0, 4_000_000_000
+                )
+                meta = f"**{name}** · {kind}"
+                if pub_ts:
+                    meta += time.strftime(" · %m-%d %H:%M", time.localtime(pub_ts))
+                sections = ["# B站动态", meta]
+                if title:
+                    sections.append(f"> {title}")
+                if summary:
+                    sections.append(summary)
+                if not title and not summary:
+                    sections.append("发布了新内容，点击查看详情。")
+                sections.append(f"[查看原动态]({item['url']})")
+                text = "\n\n".join(sections)
                 if not await self._push_bilibili_message(targets, text, "dynamic"):
                     break
                 delivered_items.append(item)
@@ -2024,6 +2274,22 @@ class QQGroupAdmin(Star):
             return None
         return confidence >= max(50, min(100, int(threshold)))
 
+    @staticmethod
+    def _ai_decision_details(value: str) -> tuple[str, int | None, str]:
+        text = str(value or "").strip()
+        decision = re.search(r"\b(ALLOW|BLOCK)\b", text, re.IGNORECASE)
+        confidence = re.search(
+            r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})",
+            text,
+            re.IGNORECASE,
+        )
+        reason = re.search(r"(?:REASON|理由|原因)\s*[:=：]\s*(.+)", text, re.IGNORECASE)
+        return (
+            decision.group(1).upper() if decision else "",
+            min(100, int(confidence.group(1))) if confidence else None,
+            (reason.group(1).strip() if reason else "")[:200],
+        )
+
     async def _ai_blocks_message(
         self,
         event: AstrMessageEvent,
@@ -2034,6 +2300,7 @@ class QQGroupAdmin(Star):
         timeout_seconds: int = AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
         image_review_enabled: bool = False,
         block_threshold: int = AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
+        result: dict[str, Any] | None = None,
     ) -> bool:
         vision_urls = image_urls if image_review_enabled else []
         if not text and not vision_urls:
@@ -2091,6 +2358,18 @@ class QQGroupAdmin(Star):
                 decision = self._ai_decision(raw_decision, block_threshold)
                 if decision is None:
                     raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
+                parsed_decision, confidence, ai_reason = self._ai_decision_details(
+                    raw_decision
+                )
+                if result is not None:
+                    result.update(
+                        {
+                            "provider": current_provider_id,
+                            "decision": parsed_decision,
+                            "confidence": confidence,
+                            "reason": ai_reason,
+                        }
+                    )
                 self.logger.debug(
                     "AI 群消息审核完成：provider=%s decision=%s",
                     current_provider_id,
@@ -2109,6 +2388,8 @@ class QQGroupAdmin(Star):
             detail = "; ".join(errors) or "没有可用模型"
             self.logger.warning("AI 群消息审核失败，本条已放行：%s", detail)
             self._ai_warning_at = time.monotonic() + 300
+        if result is not None:
+            result.update({"decision": "ERROR", "reason": "; ".join(errors)[:200]})
         return False
 
     async def _recall_messages(
@@ -2152,12 +2433,114 @@ class QQGroupAdmin(Star):
         message_id: str = "",
     ) -> None:
         _, group_openid, _ = self._context(event)
-        await self._send_group_text(
+        await self._send_group_notice(
             self._client(event),
             group_openid,
-            f"{self._mention(member_openid)} {reason}",
+            reason,
+            member_openid=member_openid,
             message_id=message_id,
         )
+
+    def _member_list_matches(
+        self,
+        event: AstrMessageEvent,
+        group_openid: str,
+        member_openid: str,
+        values: list[str],
+    ) -> bool:
+        if not values:
+            return False
+        candidates = {member_openid}
+        raw = getattr(event.message_obj, "raw_message", None)
+        author = getattr(raw, "author", None)
+        union_openid = (
+            str(author.get("union_openid") or "").strip()
+            if isinstance(author, dict)
+            else str(getattr(author, "union_openid", "") or "").strip()
+        )
+        raw_data = self._raw_data(event)
+        if not union_openid and isinstance(raw_data.get("author"), dict):
+            union_openid = str(
+                raw_data["author"].get("union_openid") or ""
+            ).strip()
+        if union_openid:
+            candidates.add(union_openid)
+        uid = self._uid_for_member(group_openid, member_openid)
+        if uid:
+            candidates.add(uid)
+        return bool(
+            {candidate.casefold() for candidate in candidates}
+            .intersection(value.casefold() for value in values)
+        )
+
+    async def _handle_member_blacklist(
+        self,
+        event: AstrMessageEvent,
+        group_openid: str,
+        member_openid: str,
+        message_id: str,
+        delivery_key: tuple[str, str, str, str],
+        settings: dict[str, Any],
+        *,
+        global_match: bool,
+    ) -> None:
+        reason = (
+            "成员命中全局群聊黑名单，消息已撤回。"
+            if global_match
+            else "成员命中本群黑名单，消息已撤回。"
+        )
+        raw = getattr(event.message_obj, "raw_message", None)
+        author = getattr(raw, "author", None)
+        union_openid = (
+            str(author.get("union_openid") or "")
+            if isinstance(author, dict)
+            else str(getattr(author, "union_openid", "") or "")
+        )
+        username = (
+            str(author.get("username") or "")
+            if isinstance(author, dict)
+            else str(getattr(author, "username", "") or "")
+        )
+        text = str(event.get_message_str() or "").strip()
+        images = self._image_urls(event)
+        uid = self._uid_for_member(group_openid, member_openid)
+        if hasattr(event, "stop_event"):
+            event.stop_event()
+        await self._record_uid_violation(
+            uid,
+            group_openid,
+            member_openid,
+            reason,
+            content=text or ("[图片]" * max(1, len(images))),
+            message_id=message_id,
+            action_member_openid=member_openid,
+            request={
+                "username": username,
+                "union_openid": union_openid,
+            },
+        )
+        try:
+            reply = settings[
+                "global_blacklist_reply" if global_match else "blacklist_reply"
+            ]
+            at_member = settings[
+                "global_blacklist_at" if global_match else "blacklist_at"
+            ]
+            if reply or at_member:
+                await self._send_group_notice(
+                    self._client(event),
+                    group_openid,
+                    reply,
+                    member_openid=member_openid if at_member or "{at_user}" in reply else "",
+                    message_id=message_id,
+                )
+        except Exception as exc:  # noqa: BLE001 - warning must not reopen message
+            self.logger.warning("发送黑名单提示失败：%s", exc)
+        failed = await self._recall_messages(
+            self._api(event), group_openid, [message_id]
+        )
+        if not failed:
+            self._moderation.remember(delivery_key, True)
 
     async def _reply_to_keyword(
         self,
@@ -2307,12 +2690,46 @@ class QQGroupAdmin(Star):
 
         entry = self._group_config(group_openid)
         settings = self._moderation_settings(entry)
-        text = str(event.get_message_str() or "").strip()
-        if not settings["enabled"]:
-            await self._reply_to_keyword(event, group_openid, message_id, text, entry)
-            self._moderation.remember(delivery_key, False)
+        admin_exempt = settings["exempt_admins"] and role in GROUP_ADMIN_ROLES
+        global_blacklist_match = self._member_list_matches(
+            event,
+            group_openid,
+            member_openid,
+            settings["global_member_blacklist"],
+        )
+        group_blacklist_match = self._member_list_matches(
+            event,
+            group_openid,
+            member_openid,
+            settings["member_blacklist"],
+        )
+        if not admin_exempt and (global_blacklist_match or group_blacklist_match):
+            await self._handle_member_blacklist(
+                event,
+                group_openid,
+                member_openid,
+                message_id,
+                delivery_key,
+                settings,
+                global_match=global_blacklist_match,
+            )
             return
-        if settings["exempt_admins"] and role in GROUP_ADMIN_ROLES:
+        member_whitelisted = (
+            self._member_list_matches(
+                event,
+                group_openid,
+                member_openid,
+                settings["global_member_whitelist"],
+            )
+            or self._member_list_matches(
+                event,
+                group_openid,
+                member_openid,
+                settings["member_whitelist"],
+            )
+        )
+        text = str(event.get_message_str() or "").strip()
+        if not settings["enabled"] or admin_exempt or member_whitelisted:
             if settings["image_enabled"]:
                 self._moderation.break_image_chain(group_openid, member_openid)
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
@@ -2322,14 +2739,22 @@ class QQGroupAdmin(Star):
         images = self._image_urls(event)
         image_count, pure_image_count = self._image_like_counts(event, text, images)
         reason = ""
+        warn_text = ""
+        warn_at_member = True
+        ai_review: dict[str, Any] = {}
+        ai_record_only = False
         recall_ids: list[str] = []
         ocr_text = ""
         if settings["image_enabled"] and image_count == 0:
             self._moderation.break_image_chain(group_openid, member_openid)
         if matched_keyword(text, settings["global_keywords"]):
             reason = "消息命中全局禁止关键词，已撤回。"
+            warn_text = settings["global_keyword_reply"]
+            warn_at_member = settings["global_keyword_at"]
         elif matched_keyword(text, settings["keywords"]):
             reason = "消息命中本群禁止关键词，已撤回。"
+            warn_text = settings["keyword_reply"]
+            warn_at_member = settings["keyword_at"]
         elif settings["image_ocr_enabled"] and image_count and (
             settings["global_image_keywords"]
             or (settings["image_keyword_enabled"] and settings["image_keywords"])
@@ -2343,10 +2768,14 @@ class QQGroupAdmin(Star):
             )
             if matched_keyword(ocr_text, settings["global_image_keywords"]):
                 reason = "图片文字命中全局禁止关键词，已撤回。"
+                warn_text = settings["global_image_reply"]
+                warn_at_member = settings["global_image_at"]
             elif settings["image_keyword_enabled"] and matched_keyword(
                 ocr_text, settings["image_keywords"]
             ):
                 reason = "图片文字命中本群禁止关键词，已撤回。"
+                warn_text = settings["image_keyword_reply"]
+                warn_at_member = settings["image_keyword_at"]
         if not reason and settings["image_enabled"]:
             image_recall_ids = self._moderation.add_images(
                 group_openid,
@@ -2372,6 +2801,9 @@ class QQGroupAdmin(Star):
                 reason = "检测到多人连续发送图片或表情，相关消息已撤回。"
             elif image_recall_ids:
                 reason = "短时间连续发送图片或表情，相关消息已撤回。"
+            if group_recall_ids or image_recall_ids:
+                warn_text = settings["image_spam_reply"]
+                warn_at_member = settings["image_spam_at"]
         if reason and not recall_ids and settings["image_enabled"]:
             self._moderation.break_image_chain(group_openid, member_openid)
 
@@ -2389,6 +2821,8 @@ class QQGroupAdmin(Star):
             )
             if repeat_members:
                 reason = "检测到集中复读，已随机禁言一名参与者。"
+                warn_text = settings["repeat_reply"]
+                warn_at_member = settings["repeat_at"]
                 recall_ids = [message_id]
         if (
             not reason
@@ -2402,15 +2836,23 @@ class QQGroupAdmin(Star):
                 settings["ai_timeout"],
                 settings["ai_images_enabled"],
                 settings["ai_block_threshold"],
+                result=ai_review,
             )
         ):
-            reason = "消息未通过 AI 内容审核，已撤回。"
+            ai_record_only = settings["ai_action"] == "record_only"
+            reason = (
+                "消息命中 AI 内容审核，仅记录未撤回。"
+                if ai_record_only
+                else "消息未通过 AI 内容审核，已撤回。"
+            )
+            warn_text = settings["ai_reply"]
+            warn_at_member = settings["ai_at"]
 
         if not reason:
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
-        if hasattr(event, "stop_event"):
+        if not ai_record_only and hasattr(event, "stop_event"):
             event.stop_event()
         target_member = member_openid
         if repeat_members:
@@ -2439,6 +2881,8 @@ class QQGroupAdmin(Star):
                 reason = "检测到集中复读，相关消息已撤回；随机禁言失败。"
             else:
                 reason = f"参与集中复读，已随机禁言 {duration} 秒。"
+                if "{duration}" in warn_text:
+                    warn_text = warn_text.replace("{duration}", str(duration))
         uid = self._uid_for_member(group_openid, member_openid)
         self.logger.info(
             "已处理违规群消息：group=%s member=%s uid=%s reason=%s",
@@ -2457,18 +2901,29 @@ class QQGroupAdmin(Star):
             + (f"\n[图片文字]\n{ocr_text[:2000]}" if ocr_text else ""),
             message_id=message_id,
             action_member_openid=target_member,
+            action="record_only" if ai_record_only else "recall",
+            ai_review=ai_review,
             request={
                 "username": str(getattr(author, "username", "") or ""),
                 "union_openid": str(getattr(author, "union_openid", "") or ""),
             },
         )
+        if ai_record_only:
+            self._moderation.remember(delivery_key, False)
+            return
         try:
-            await self._warn_member(
-                event,
-                target_member,
-                reason,
-                message_id=message_id,
-            )
+            if warn_text or warn_at_member:
+                await self._send_group_notice(
+                    self._client(event),
+                    group_openid,
+                    warn_text,
+                    member_openid=(
+                        target_member
+                        if warn_at_member or "{at_user}" in (warn_text or "")
+                        else ""
+                    ),
+                    message_id=message_id,
+                )
         except Exception as exc:  # noqa: BLE001 - warning should not reopen event
             self.logger.warning("发送群消息审核警告失败：%s", exc)
         failed = await self._recall_messages(
@@ -3279,7 +3734,6 @@ class QQGroupAdmin(Star):
             )
             or "已设置禁言，至 {expire_at}。"
         )
-        mention = f"<qqbot-at-user id={quoteattr(member_openid)} />"
         legacy_at = bool(self.config.get("mute_reply_at_member", False))
         has_at_variable = "{at_user}" in template
         if legacy_at and not has_at_variable:
@@ -3293,48 +3747,23 @@ class QQGroupAdmin(Star):
         if not has_at_variable and not legacy_at:
             return event.plain_result(template[:1000])
 
-        # Preserve every complete QQ tag while bounding custom text to 1000 chars.
-        parts = template.split("{at_user}")
-        tag_count = min(len(parts) - 1, 1000 // len(mention))
-        raw_limit = max(0, 1000 - tag_count * len(mention))
-        rendered_parts = []
-        for index, part in enumerate(parts):
-            chunk = part[:raw_limit]
-            rendered_parts.append(chunk)
-            raw_limit -= len(chunk)
-            if index < tag_count:
-                rendered_parts.append(mention)
-        text = "".join(rendered_parts)
-        if not text:
-            return event.plain_result(text)
+        if not template.strip():
+            return None
 
         _, group_openid, _ = self._context(event)
-        kwargs = {
-            "group_openid": group_openid,
-            # QQ mention tags are parsed reliably in the text chain.  Markdown
-            # responses are rendered as literal XML by some QQ clients.
-            "msg_type": 0,
-            "content": text,
-        }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
-        if message_id:
-            kwargs["msg_id"] = message_id
         if hasattr(event, "stop_event"):
             event.stop_event()
         try:
-            await self._client(event).api.post_group_message(**kwargs)
+            await self._send_group_notice(
+                self._client(event),
+                group_openid,
+                template,
+                member_openid=member_openid,
+                message_id=message_id,
+            )
         except Exception as exc:  # noqa: BLE001 - mute already succeeded
-            self.logger.warning("发送禁言成功艾特回复失败，改发普通文本：%s", exc)
-            fallback = text.replace(mention, member_openid)
-            try:
-                await self._send_group_text(
-                    self._client(event),
-                    group_openid,
-                    fallback,
-                    message_id=message_id,
-                )
-            except Exception as fallback_exc:  # noqa: BLE001 - do not report mute failure
-                self.logger.warning("发送禁言成功回复失败：%s", fallback_exc)
+            self.logger.warning("发送禁言成功回复失败：%s", exc)
         return None
 
     @qq_admin_command("禁言")
@@ -3745,7 +4174,13 @@ class QQGroupAdmin(Star):
             "fallback_human_verify_enabled": settings["fallback_human_verify_enabled"],
             "moderation_enabled": moderation["enabled"],
             "moderation_exempt_admins": moderation["exempt_admins"],
+            "member_blacklist": "\n".join(moderation["member_blacklist"]),
+            "member_whitelist": "\n".join(moderation["member_whitelist"]),
+            "blacklist_reply": moderation["blacklist_reply"],
+            "blacklist_at_member": moderation["blacklist_at"],
             "message_reject_keywords": "\n".join(moderation["keywords"]),
+            "message_reject_reply": moderation["keyword_reply"],
+            "message_reject_at_member": moderation["keyword_at"],
             "ai_review_enabled": moderation["ai_enabled"],
             "ai_review_provider_id": moderation["ai_provider_id"],
             "ai_review_fallback_provider_ids": list(
@@ -3759,6 +4194,8 @@ class QQGroupAdmin(Star):
             ),
             "image_keyword_review_enabled": moderation["image_keyword_enabled"],
             "image_reject_keywords": "\n".join(moderation["image_keywords"]),
+            "image_reject_reply": moderation["image_keyword_reply"],
+            "image_reject_at_member": moderation["image_keyword_at"],
             "image_spam_enabled": moderation["image_enabled"],
             "image_spam_count": moderation["image_count"],
             "image_spam_window_seconds": moderation["image_window"],
@@ -3766,11 +4203,15 @@ class QQGroupAdmin(Star):
                 "image_group_min_members"
             ],
             "image_spam_recall_count": moderation["image_recall_count"],
+            "image_spam_reply": moderation["image_spam_reply"],
+            "image_spam_at_member": moderation["image_spam_at"],
             "repeat_review_enabled": moderation["repeat_enabled"],
             "repeat_count": moderation["repeat_count"],
             "repeat_window_seconds": moderation["repeat_window"],
             "repeat_mute_min_seconds": moderation["repeat_mute_min"],
             "repeat_mute_max_seconds": moderation["repeat_mute_max"],
+            "repeat_reply": moderation["repeat_reply"],
+            "repeat_at_member": moderation["repeat_at"],
             "bilibili_uids": "\n".join(self._bilibili_uids(entry)),
             "bilibili_dynamic_enabled": bool(
                 entry.get("bilibili_dynamic_enabled", False)
@@ -3891,6 +4332,24 @@ class QQGroupAdmin(Star):
             "global_message_reject_keywords": str(
                 self.config.get("global_message_reject_keywords") or ""
             ),
+            "global_message_reject_reply": str(
+                self.config.get("global_message_reject_reply") or ""
+            ),
+            "global_message_reject_at_member": bool(
+                self.config.get("global_message_reject_at_member", True)
+            ),
+            "global_member_blacklist": str(
+                self.config.get("global_member_blacklist") or ""
+            ),
+            "global_member_whitelist": str(
+                self.config.get("global_member_whitelist") or ""
+            ),
+            "global_blacklist_reply": str(
+                self.config.get("global_blacklist_reply") or ""
+            ),
+            "global_blacklist_at_member": bool(
+                self.config.get("global_blacklist_at_member", True)
+            ),
             "global_ai_review_enabled": bool(
                 self.config.get(GLOBAL_AI_ENABLED_KEY, False)
             ),
@@ -3915,8 +4374,26 @@ class QQGroupAdmin(Star):
                 50,
                 100,
             ),
+            "global_ai_review_action": (
+                str(self.config.get(GLOBAL_AI_ACTION_KEY) or "record_only")
+                if str(self.config.get(GLOBAL_AI_ACTION_KEY) or "record_only")
+                in AI_REVIEW_ACTIONS
+                else "record_only"
+            ),
+            "global_ai_reject_reply": str(
+                self.config.get("global_ai_reject_reply") or ""
+            ),
+            "global_ai_reject_at_member": bool(
+                self.config.get("global_ai_reject_at_member", True)
+            ),
             "global_image_reject_keywords": str(
                 self.config.get(GLOBAL_IMAGE_KEYWORDS_KEY) or ""
+            ),
+            "global_image_reject_reply": str(
+                self.config.get("global_image_reject_reply") or ""
+            ),
+            "global_image_reject_at_member": bool(
+                self.config.get("global_image_reject_at_member", True)
             ),
             "global_image_ocr_enabled": bool(
                 self.config.get(GLOBAL_IMAGE_OCR_ENABLED_KEY, False)
@@ -4087,11 +4564,19 @@ class QQGroupAdmin(Star):
                 ),
                 "moderation_enabled": bool(payload["moderation_enabled"]),
                 "moderation_exempt_admins": bool(payload["moderation_exempt_admins"]),
+                "member_blacklist": str(payload["member_blacklist"]),
+                "member_whitelist": str(payload["member_whitelist"]),
+                "blacklist_reply": str(payload["blacklist_reply"]),
+                "blacklist_at_member": bool(payload["blacklist_at_member"]),
                 "message_reject_keywords": str(payload["message_reject_keywords"]),
+                "message_reject_reply": str(payload["message_reject_reply"]),
+                "message_reject_at_member": bool(payload["message_reject_at_member"]),
                 "image_keyword_review_enabled": bool(
                     payload["image_keyword_review_enabled"]
                 ),
                 "image_reject_keywords": str(payload["image_reject_keywords"]),
+                "image_reject_reply": str(payload["image_reject_reply"]),
+                "image_reject_at_member": bool(payload["image_reject_at_member"]),
                 "image_spam_enabled": bool(payload["image_spam_enabled"]),
                 "image_spam_count": int(payload["image_spam_count"]),
                 "image_spam_window_seconds": int(payload["image_spam_window_seconds"]),
@@ -4099,11 +4584,15 @@ class QQGroupAdmin(Star):
                     payload["image_spam_group_min_members"]
                 ),
                 "image_spam_recall_count": int(payload["image_spam_recall_count"]),
+                "image_spam_reply": str(payload["image_spam_reply"]),
+                "image_spam_at_member": bool(payload["image_spam_at_member"]),
                 "repeat_review_enabled": bool(payload["repeat_review_enabled"]),
                 "repeat_count": int(payload["repeat_count"]),
                 "repeat_window_seconds": int(payload["repeat_window_seconds"]),
                 "repeat_mute_min_seconds": int(payload["repeat_mute_min_seconds"]),
                 "repeat_mute_max_seconds": int(payload["repeat_mute_max_seconds"]),
+                "repeat_reply": str(payload["repeat_reply"]),
+                "repeat_at_member": bool(payload["repeat_at_member"]),
                 "bilibili_uids": str(payload["bilibili_uids"]),
                 "bilibili_dynamic_enabled": bool(payload["bilibili_dynamic_enabled"]),
                 "bilibili_live_enabled": bool(payload["bilibili_live_enabled"]),

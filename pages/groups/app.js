@@ -413,6 +413,16 @@
       recordField(body, "QQ OpenID", record.member_openid || record.qq_openid || record.openid || record.union_openid, true);
       recordField(body, "群", recordGroupLabel(record));
       recordField(body, "命中规则", record.reason || record.rule || record.category);
+      recordField(body, "处理动作", record.action === "record_only" ? "仅记录，未撤回" : "已撤回");
+      if (record.ai_provider || record.ai_decision || record.ai_reason) {
+        recordField(body, "审核模型", record.ai_provider || "-");
+        recordField(
+          body,
+          "AI 判定",
+          [record.ai_decision, record.ai_confidence == null ? "" : "置信度 " + record.ai_confidence, record.ai_reason]
+            .filter(Boolean).join(" · ") || "-"
+        );
+      }
       recordField(body, "消息内容", record.content || record.message || record.message_content || record.message_summary ||
         (record._summary ? "当前版本仅保存最近一次违规原因，暂无原始消息内容" : "暂无记录内容"));
       list.appendChild(details);
@@ -722,12 +732,23 @@
     element("runtime-panel-recall").checked = runtimeSettings.settings_panel_auto_recall !== false;
     element("runtime-global-reject-keywords").value = runtimeSettings.global_reject_keywords || "";
     element("runtime-message-reject-keywords").value = runtimeSettings.global_message_reject_keywords || "";
+    element("runtime-message-reject-reply").value = runtimeSettings.global_message_reject_reply || "";
+    element("runtime-message-reject-at").checked = runtimeSettings.global_message_reject_at_member === true;
+    element("runtime-member-blacklist").value = runtimeSettings.global_member_blacklist || "";
+    element("runtime-member-whitelist").value = runtimeSettings.global_member_whitelist || "";
+    element("runtime-blacklist-reply").value = runtimeSettings.global_blacklist_reply || "";
+    element("runtime-blacklist-at").checked = runtimeSettings.global_blacklist_at_member === true;
     element("runtime-mute-message").value = runtimeSettings.mute_success_message || "";
     element("runtime-ai-enabled").checked = runtimeSettings.global_ai_review_enabled === true;
     element("runtime-ai-timeout").value = runtimeSettings.global_ai_review_timeout_seconds || 20;
     element("runtime-ai-threshold").value = runtimeSettings.global_ai_review_block_threshold || 95;
+    element("runtime-ai-action").value = runtimeSettings.global_ai_review_action || "record_only";
+    element("runtime-ai-reject-reply").value = runtimeSettings.global_ai_reject_reply || "";
+    element("runtime-ai-reject-at").checked = runtimeSettings.global_ai_reject_at_member === true;
     element("runtime-ai-images").checked = runtimeSettings.global_ai_review_images_enabled === true;
     element("runtime-image-reject-keywords").value = runtimeSettings.global_image_reject_keywords || "";
+    element("runtime-image-reject-reply").value = runtimeSettings.global_image_reject_reply || "";
+    element("runtime-image-reject-at").checked = runtimeSettings.global_image_reject_at_member === true;
     element("runtime-image-ocr-enabled").checked = runtimeSettings.global_image_ocr_enabled === true;
     element("runtime-image-ocr-timeout").value = runtimeSettings.global_image_ocr_timeout_seconds || 4;
     element("runtime-image-ocr-max-images").value = runtimeSettings.global_image_ocr_max_images || 1;
@@ -762,14 +783,25 @@
       settings_panel_auto_recall: element("runtime-panel-recall").checked,
       global_reject_keywords: element("runtime-global-reject-keywords").value,
       global_message_reject_keywords: element("runtime-message-reject-keywords").value,
+      global_message_reject_reply: element("runtime-message-reject-reply").value,
+      global_message_reject_at_member: element("runtime-message-reject-at").checked,
+      global_member_blacklist: element("runtime-member-blacklist").value,
+      global_member_whitelist: element("runtime-member-whitelist").value,
+      global_blacklist_reply: element("runtime-blacklist-reply").value,
+      global_blacklist_at_member: element("runtime-blacklist-at").checked,
       mute_success_message: element("runtime-mute-message").value,
       global_ai_review_enabled: element("runtime-ai-enabled").checked,
       global_ai_review_provider_id: element("runtime-ai-provider").value,
       global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
       global_ai_review_timeout_seconds: Number(element("runtime-ai-timeout").value),
       global_ai_review_block_threshold: Number(element("runtime-ai-threshold").value),
+      global_ai_review_action: element("runtime-ai-action").value,
+      global_ai_reject_reply: element("runtime-ai-reject-reply").value,
+      global_ai_reject_at_member: element("runtime-ai-reject-at").checked,
       global_ai_review_images_enabled: element("runtime-ai-images").checked,
       global_image_reject_keywords: element("runtime-image-reject-keywords").value,
+      global_image_reject_reply: element("runtime-image-reject-reply").value,
+      global_image_reject_at_member: element("runtime-image-reject-at").checked,
       global_image_ocr_enabled: element("runtime-image-ocr-enabled").checked,
       global_image_ocr_provider_id: element("runtime-image-ocr-provider").value,
       global_image_ocr_timeout_seconds: Number(element("runtime-image-ocr-timeout").value),
@@ -998,20 +1030,32 @@
     element("fallback-human-verify-enabled").checked = group.fallback_human_verify_enabled === true;
     element("moderation-enabled").checked = group.moderation_enabled === true;
     element("moderation-exempt-admins").checked = group.moderation_exempt_admins !== false;
+    element("member-blacklist").value = group.member_blacklist || "";
+    element("member-whitelist").value = group.member_whitelist || "";
+    element("blacklist-reply").value = group.blacklist_reply || "";
+    element("blacklist-at").checked = group.blacklist_at_member === true;
     element("message-reject-keywords").value = group.message_reject_keywords || "";
+    element("message-reject-reply").value = group.message_reject_reply || "";
+    element("message-reject-at").checked = group.message_reject_at_member === true;
     element("image-keyword-review-enabled").checked = group.image_keyword_review_enabled === true;
     element("image-reject-keywords").value = group.image_reject_keywords || "";
+    element("image-reject-reply").value = group.image_reject_reply || "";
+    element("image-reject-at").checked = group.image_reject_at_member === true;
     renderKeywordReplies(group.keyword_replies);
     element("image-spam-enabled").checked = group.image_spam_enabled === true;
     element("image-spam-count").value = group.image_spam_count || 5;
     element("image-spam-window").value = group.image_spam_window_seconds || 15;
     element("image-spam-group-min-members").value = group.image_spam_group_min_members || 2;
     element("image-spam-recall-count").value = group.image_spam_recall_count || 5;
+    element("image-spam-reply").value = group.image_spam_reply || "";
+    element("image-spam-at").checked = group.image_spam_at_member === true;
     element("repeat-review-enabled").checked = group.repeat_review_enabled === true;
     element("repeat-count").value = group.repeat_count || 4;
     element("repeat-window").value = group.repeat_window_seconds || 30;
     element("repeat-mute-min").value = group.repeat_mute_min_seconds || 60;
     element("repeat-mute-max").value = group.repeat_mute_max_seconds || 600;
+    element("repeat-reply").value = group.repeat_reply || "";
+    element("repeat-at").checked = group.repeat_at_member === true;
     element("bilibili-uids").value = group.bilibili_uids || "";
     element("bilibili-dynamic-enabled").checked = group.bilibili_dynamic_enabled === true;
     element("bilibili-live-enabled").checked = group.bilibili_live_enabled === true;
@@ -1037,20 +1081,32 @@
       fallback_human_verify_enabled: element("fallback-human-verify-enabled").checked,
       moderation_enabled: element("moderation-enabled").checked,
       moderation_exempt_admins: element("moderation-exempt-admins").checked,
+      member_blacklist: element("member-blacklist").value,
+      member_whitelist: element("member-whitelist").value,
+      blacklist_reply: element("blacklist-reply").value,
+      blacklist_at_member: element("blacklist-at").checked,
       message_reject_keywords: element("message-reject-keywords").value,
+      message_reject_reply: element("message-reject-reply").value,
+      message_reject_at_member: element("message-reject-at").checked,
       image_keyword_review_enabled: element("image-keyword-review-enabled").checked,
       image_reject_keywords: element("image-reject-keywords").value,
+      image_reject_reply: element("image-reject-reply").value,
+      image_reject_at_member: element("image-reject-at").checked,
       keyword_replies: readKeywordReplies(),
       image_spam_enabled: element("image-spam-enabled").checked,
       image_spam_count: Number(element("image-spam-count").value),
       image_spam_window_seconds: Number(element("image-spam-window").value),
       image_spam_group_min_members: Number(element("image-spam-group-min-members").value),
       image_spam_recall_count: Number(element("image-spam-recall-count").value),
+      image_spam_reply: element("image-spam-reply").value,
+      image_spam_at_member: element("image-spam-at").checked,
       repeat_review_enabled: element("repeat-review-enabled").checked,
       repeat_count: Number(element("repeat-count").value),
       repeat_window_seconds: Number(element("repeat-window").value),
       repeat_mute_min_seconds: Number(element("repeat-mute-min").value),
       repeat_mute_max_seconds: Number(element("repeat-mute-max").value),
+      repeat_reply: element("repeat-reply").value,
+      repeat_at_member: element("repeat-at").checked,
       bilibili_uids: element("bilibili-uids").value,
       bilibili_dynamic_enabled: element("bilibili-dynamic-enabled").checked,
       bilibili_live_enabled: element("bilibili-live-enabled").checked
@@ -1088,9 +1144,14 @@
       ["batch-fallback-human-verify", "fallback_human_verify_enabled", true],
       ["batch-moderation-enabled", "moderation_enabled", true],
       ["batch-moderation-exempt-admins", "moderation_exempt_admins", true],
+      ["batch-blacklist-at", "blacklist_at_member", true],
+      ["batch-message-at", "message_reject_at_member", true],
       ["batch-image-spam-enabled", "image_spam_enabled", true],
       ["batch-image-keyword-enabled", "image_keyword_review_enabled", true],
+      ["batch-image-at", "image_reject_at_member", true],
+      ["batch-image-spam-at", "image_spam_at_member", true],
       ["batch-repeat-review-enabled", "repeat_review_enabled", true],
+      ["batch-repeat-at", "repeat_at_member", true],
       ["batch-bilibili-dynamic-enabled", "bilibili_dynamic_enabled", true],
       ["batch-bilibili-live-enabled", "bilibili_live_enabled", true]
     ].forEach(function (item) {

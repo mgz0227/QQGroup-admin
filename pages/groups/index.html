@@ -172,6 +172,13 @@
 
             <div class="section-title wide">消息与禁言</div>
             <label class="wide"><span>全局消息撤回关键词</span><textarea id="runtime-message-reject-keywords" rows="4" placeholder="每行一个关键词"></textarea></label>
+            <label class="wide"><span>全局文字关键词撤回回复</span><textarea id="runtime-message-reject-reply" maxlength="1000" rows="2"></textarea></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-message-reject-at" type="checkbox"><span>全局文字关键词撤回时艾特成员</span></label>
+            <div class="section-title wide">全局成员名单</div>
+            <label class="wide"><span>全局消息审核黑名单</span><textarea id="runtime-member-blacklist" rows="4" placeholder="成员 OpenID、Union OpenID 或已绑定的 B站 UID，每行一个"></textarea><small>黑名单优先于白名单；命中后所有群立即撤回消息。管理员豁免仍有效。</small></label>
+            <label class="wide"><span>全局消息审核白名单</span><textarea id="runtime-member-whitelist" rows="4" placeholder="成员 OpenID、Union OpenID 或已绑定的 B站 UID，每行一个"></textarea><small>命中后跳过消息审核，但仍可触发关键词回复。</small></label>
+            <label class="wide"><span>全局黑名单撤回回复</span><textarea id="runtime-blacklist-reply" maxlength="1000" rows="2"></textarea></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-blacklist-at" type="checkbox"><span>全局黑名单撤回时艾特成员</span></label>
             <label class="wide"><span>禁言成功回复</span><textarea id="runtime-mute-message" maxlength="1000" rows="3"></textarea></label>
 
             <div class="section-title wide">全局 AI 内容审核</div>
@@ -180,8 +187,13 @@
             <label class="wide"><span>回退模型（可多选，按顺序尝试）</span><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，主模型不能重复选择。</small></label>
             <label><span>审核总超时（秒）</span><input id="runtime-ai-timeout" type="number" min="5" max="120" required></label>
             <label><span>拦截置信度阈值</span><input id="runtime-ai-threshold" type="number" min="50" max="100" required></label>
+            <label><span>AI 命中动作</span><select id="runtime-ai-action"><option value="record_only">只记录，不撤回</option><option value="recall">撤回消息</option></select></label>
+            <label class="wide"><span>AI 撤回回复</span><textarea id="runtime-ai-reject-reply" maxlength="1000" rows="2"></textarea></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-reject-at" type="checkbox"><span>AI 撤回时艾特成员</span></label>
             <label class="checkbox runtime-toggle"><input id="runtime-ai-images" type="checkbox"><span>启用 AI 图片审核</span></label>
             <label class="wide"><span>全局图片文字撤回关键词</span><textarea id="runtime-image-reject-keywords" rows="3" placeholder="开启图片 OCR 后生效，每行一个关键词"></textarea></label>
+            <label class="wide"><span>全局图片关键词撤回回复</span><textarea id="runtime-image-reject-reply" maxlength="1000" rows="2"></textarea></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-image-reject-at" type="checkbox"><span>全局图片关键词撤回时艾特成员</span></label>
             <label class="checkbox runtime-toggle"><input id="runtime-image-ocr-enabled" type="checkbox"><span>启用图片 OCR 关键词审核</span></label>
             <label><span>OCR 模型（可选）</span><select id="runtime-image-ocr-provider"></select></label>
             <label><span>OCR 超时（秒）</span><input id="runtime-image-ocr-timeout" type="number" min="2" max="30" required></label>
@@ -282,10 +294,17 @@
             <input id="moderation-exempt-admins" type="checkbox">
             <span>群主和管理员免审</span>
           </label>
+          <div class="section-title wide">成员黑白名单</div>
+          <label class="wide"><span>本群消息审核黑名单</span><textarea id="member-blacklist" rows="3" placeholder="成员 OpenID、Union OpenID 或已绑定的 B站 UID，每行一个"></textarea></label>
+          <label class="wide"><span>本群消息审核白名单</span><textarea id="member-whitelist" rows="3" placeholder="命中后跳过本群消息审核；黑名单优先"></textarea></label>
+          <label class="wide"><span>本群黑名单撤回回复</span><textarea id="blacklist-reply" maxlength="1000" rows="2"></textarea></label>
+          <label class="checkbox wide"><input id="blacklist-at" type="checkbox"><span>本群黑名单撤回时艾特成员</span></label>
           <label class="wide">
             <span>消息撤回关键词</span>
             <textarea id="message-reject-keywords" rows="3" placeholder="每行一个关键词"></textarea>
           </label>
+          <label class="wide"><span>本群文字关键词撤回回复</span><textarea id="message-reject-reply" maxlength="1000" rows="2"></textarea></label>
+          <label class="checkbox wide"><input id="message-reject-at" type="checkbox"><span>本群文字关键词撤回时艾特成员</span></label>
           <label class="checkbox">
             <input id="image-keyword-review-enabled" type="checkbox">
             <span>启用本群图片文字关键词审核</span>
@@ -294,6 +313,8 @@
             <span>本群图片文字撤回关键词</span>
             <textarea id="image-reject-keywords" rows="3" placeholder="需要先在全局运行配置开启图片 OCR"></textarea>
           </label>
+          <label class="wide"><span>本群图片关键词撤回回复</span><textarea id="image-reject-reply" maxlength="1000" rows="2"></textarea></label>
+          <label class="checkbox wide"><input id="image-reject-at" type="checkbox"><span>本群图片关键词撤回时艾特成员</span></label>
           <div class="wide keyword-reply-editor">
             <div class="rule-list-header">
               <span>单群关键词回复</span>
@@ -311,6 +332,8 @@
           <label><span>发图时间窗（秒）</span><input id="image-spam-window" type="number" min="3" max="120"></label>
           <label><span>跨成员触发人数</span><input id="image-spam-group-min-members" type="number" min="2" max="10"></label>
           <label><span>触发时最多撤回图片数</span><input id="image-spam-recall-count" type="number" min="1" max="50"></label>
+          <label class="wide"><span>连续发图撤回回复</span><textarea id="image-spam-reply" maxlength="1000" rows="2"></textarea></label>
+          <label class="checkbox wide"><input id="image-spam-at" type="checkbox"><span>连续发图撤回时艾特成员</span></label>
           <label class="checkbox wide">
             <input id="repeat-review-enabled" type="checkbox">
             <span>集中复读检测并随机禁言参与者</span>
@@ -319,6 +342,8 @@
           <label><span>复读时间窗（秒）</span><input id="repeat-window" type="number" min="5" max="120"></label>
           <label><span>随机禁言最短秒数</span><input id="repeat-mute-min" type="number" min="1" max="2592000"></label>
           <label><span>随机禁言最长秒数</span><input id="repeat-mute-max" type="number" min="1" max="2592000"></label>
+          <label class="wide"><span>复读处置回复</span><textarea id="repeat-reply" maxlength="1000" rows="2" placeholder="可使用 {duration} 表示实际禁言秒数"></textarea></label>
+          <label class="checkbox wide"><input id="repeat-at" type="checkbox"><span>复读处置时艾特成员</span></label>
           <div class="section-title wide">B站推送</div>
           <label class="wide"><span>UP 主 UID</span><textarea id="bilibili-uids" rows="3" placeholder="每行一个 UID"></textarea></label>
           <label class="checkbox"><input id="bilibili-dynamic-enabled" type="checkbox"><span>推送动态</span></label>
@@ -408,18 +433,30 @@
             </label>
             <textarea id="batch-whitelist" rows="4" placeholder="每行一个 QQ 号" disabled></textarea>
           </fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-member-blacklist" data-field="member_blacklist"><span>覆盖本群消息黑名单</span></label><textarea id="batch-member-blacklist" rows="3" placeholder="成员 OpenID、Union OpenID 或已绑定的 B站 UID，每行一个" disabled></textarea></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-member-whitelist" data-field="member_whitelist"><span>覆盖本群消息白名单</span></label><textarea id="batch-member-whitelist" rows="3" placeholder="命中后跳过本群消息审核" disabled></textarea></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-blacklist-reply" data-field="blacklist_reply"><span>覆盖黑名单撤回回复</span></label><textarea id="batch-blacklist-reply" rows="2" maxlength="1000" disabled></textarea></fieldset>
+          <label><span>黑名单撤回艾特</span><select id="batch-blacklist-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-message-keywords" data-field="message_reject_keywords"><span>覆盖消息撤回关键词</span></label><textarea id="batch-message-keywords" rows="3" disabled></textarea></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-message-reply" data-field="message_reject_reply"><span>覆盖文字关键词撤回回复</span></label><textarea id="batch-message-reply" rows="2" maxlength="1000" disabled></textarea></fieldset>
+          <label><span>文字关键词撤回艾特</span><select id="batch-message-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-image-keywords" data-field="image_reject_keywords"><span>覆盖图片文字撤回关键词</span></label><textarea id="batch-image-keywords" rows="3" disabled></textarea></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-image-reply" data-field="image_reject_reply"><span>覆盖图片关键词撤回回复</span></label><textarea id="batch-image-reply" rows="2" maxlength="1000" disabled></textarea></fieldset>
+          <label><span>图片关键词撤回艾特</span><select id="batch-image-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>图片文字审核</span><select id="batch-image-keyword-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-bilibili-uids" data-field="bilibili_uids"><span>覆盖 B站 UP 主 UID</span></label><textarea id="batch-bilibili-uids" rows="3" disabled></textarea></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-count" data-field="image_spam_count"><span>覆盖连续图片数量</span></label><input id="batch-image-count" type="number" min="2" max="20" value="5" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-window" data-field="image_spam_window_seconds"><span>覆盖发图时间窗</span></label><input id="batch-image-window" type="number" min="3" max="120" value="15" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-group-members" data-field="image_spam_group_min_members"><span>覆盖跨成员触发人数</span></label><input id="batch-image-group-members" type="number" min="2" max="10" value="2" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-recall-count" data-field="image_spam_recall_count"><span>覆盖图片撤回数量</span></label><input id="batch-image-recall-count" type="number" min="1" max="50" value="5" disabled></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-image-spam-reply" data-field="image_spam_reply"><span>覆盖连续发图撤回回复</span></label><textarea id="batch-image-spam-reply" rows="2" maxlength="1000" disabled></textarea></fieldset>
+          <label><span>连续发图撤回艾特</span><select id="batch-image-spam-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-count" data-field="repeat_count"><span>覆盖复读次数</span></label><input id="batch-repeat-count" type="number" min="3" max="20" value="4" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-window" data-field="repeat_window_seconds"><span>覆盖复读时间窗</span></label><input id="batch-repeat-window" type="number" min="5" max="120" value="30" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-min" data-field="repeat_mute_min_seconds"><span>覆盖最短禁言秒数</span></label><input id="batch-mute-min" type="number" min="1" max="2592000" value="60" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-max" data-field="repeat_mute_max_seconds"><span>覆盖最长禁言秒数</span></label><input id="batch-mute-max" type="number" min="1" max="2592000" value="600" disabled></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-reply" data-field="repeat_reply"><span>覆盖复读处置回复</span></label><textarea id="batch-repeat-reply" rows="2" maxlength="1000" disabled></textarea></fieldset>
+          <label><span>复读处置艾特</span><select id="batch-repeat-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide">
             <label class="checkbox">
               <input type="checkbox" data-controls="batch-approve-keywords" data-field="approve_keywords">
