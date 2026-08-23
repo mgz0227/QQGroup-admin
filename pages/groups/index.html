@@ -119,7 +119,10 @@
               <h3>违规记录</h3>
               <p>展开记录查看命中规则、处理原因和消息内容。</p>
             </div>
-            <span id="violation-count" class="record-count"></span>
+            <div class="row-actions">
+              <span id="violation-count" class="record-count"></span>
+              <button class="button secondary small-button" id="violation-export-button" type="button" title="导出当前搜索结果">导出 CSV</button>
+            </div>
           </div>
           <div class="identity-records" id="violation-list"><p class="empty">正在加载...</p></div>
           <div class="pager" id="violation-pager"></div>

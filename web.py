@@ -1,8 +1,11 @@
 from __future__ import annotations
 
+import csv
 import re
+import time
 from collections.abc import Awaitable, Callable
 from functools import wraps
+from io import StringIO
 from typing import Any
 
 from astrbot.api.star import Context
@@ -119,6 +122,13 @@ class GroupAdminWeb:
     @staticmethod
     def _error(message: str, status: int) -> Any:
         return error_response(message, status_code=status)
+
+    @staticmethod
+    def _csv_safe(value: Any) -> str:
+        text = "" if value is None else str(value)
+        if text.startswith(("=", "+", "-", "@", "\t", "\r", "\n")):
+            return "'" + text
+        return text
 
     @staticmethod
     def _text(
@@ -1058,6 +1068,75 @@ class GroupAdminWeb:
             await self.plugin.web_identity_page(kind, query, page, page_size)
         )
 
+    async def page_violation_export(self) -> Any:
+        query = self._text(
+            request.query.get("query", ""),
+            "身份记录搜索词",
+            256,
+        )
+        records = await self.plugin.web_violation_export(query)
+        output = StringIO(newline="")
+        writer = csv.writer(output, lineterminator="\r\n")
+        writer.writerow(
+            (
+                "时间",
+                "群名称",
+                "群 OpenID",
+                "成员名称",
+                "成员 OpenID",
+                "联合 OpenID",
+                "B站 UID",
+                "命中规则",
+                "处理动作",
+                "消息内容",
+                "审核模型",
+                "AI 判定",
+                "AI 置信度",
+                "AI 理由",
+                "消息 ID",
+            )
+        )
+        for record in records:
+            action = str(record.get("action") or "")
+            writer.writerow(
+                self._csv_safe(value)
+                for value in (
+                    record.get("created_at"),
+                    record.get("group_name"),
+                    record.get("group_openid"),
+                    record.get("username") or record.get("member_name"),
+                    record.get("member_openid")
+                    or record.get("qq_openid")
+                    or record.get("openid"),
+                    record.get("union_openid"),
+                    record.get("uid") or record.get("bilibili_uid"),
+                    record.get("reason")
+                    or record.get("rule")
+                    or record.get("category"),
+                    "仅记录"
+                    if action == "record_only"
+                    else ("已撤回" if action == "recall" else action),
+                    record.get("content")
+                    or record.get("message")
+                    or record.get("message_content")
+                    or record.get("message_summary"),
+                    record.get("ai_provider"),
+                    record.get("ai_decision"),
+                    record.get("ai_confidence"),
+                    record.get("ai_reason"),
+                    record.get("message_id"),
+                )
+            )
+        return self._response(
+            {
+                "filename": time.strftime(
+                    "qqgroup-admin-violations-%Y%m%d-%H%M%S.csv"
+                ),
+                "content": "\ufeff" + output.getvalue(),
+                "count": len(records),
+            }
+        )
+
     async def page_binding_delete(self) -> Any:
         payload = await self._payload()
         if not isinstance(payload, dict):
@@ -1138,6 +1217,12 @@ class GroupAdminWeb:
             ("/batch-save", self.page_batch_save, ["POST"], "批量保存QQ群审核配置"),
             ("/batch-sync", self.page_batch_sync, ["POST"], "批量应用QQ群审核配置"),
             ("/identities", self.page_identities, ["GET"], "查询 UID 绑定和待验证成员"),
+            (
+                "/violations/export",
+                self.page_violation_export,
+                ["GET"],
+                "导出违规记录",
+            ),
             ("/binding-delete", self.page_binding_delete, ["POST"], "解除 UID 绑定"),
             (
                 "/suspicious-clear",

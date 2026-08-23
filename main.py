@@ -4781,6 +4781,15 @@ class QQGroupAdmin(Star):
             "total_pages": total_pages,
         }
 
+    async def web_violation_export(self, query: str) -> list[dict[str, Any]]:
+        query = str(query or "").strip()
+        if len(query) > 256:
+            raise ValueError("身份记录搜索词最多 256 个字符")
+        items = self._identity_items("violations", self._identity_groups_by_id())
+        if query:
+            items = [item for item in items if self._identity_matches(item, query)]
+        return items
+
     async def web_delete_binding(self, uid: str) -> dict[str, str]:
         if self._uid_bindings.pop(uid, None) is None:
             raise LookupError("找不到该 UID 绑定")

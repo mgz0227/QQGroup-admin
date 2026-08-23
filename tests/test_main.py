@@ -2143,6 +2143,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         by_openid = await plugin.web_identity_page("bindings", "union-108", 1, 50)
         suspicious = await plugin.web_identity_page("suspicious", "身份冲突", 1, 10)
         violation = await plugin.web_identity_page("violations", "违规消息原文", 1, 10)
+        exported = await plugin.web_violation_export("违规消息原文")
         hidden_time = await plugin.web_identity_page("bindings", "1700000000", 1, 10)
         hidden_confidence = await plugin.web_identity_page("violations", "97", 1, 10)
 
@@ -2154,12 +2155,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(by_openid["items"][0]["uid"], "108")
         self.assertEqual(suspicious["items"][0]["member_openid"], "member-9")
         self.assertEqual(violation["items"][0]["uid"], "777")
+        self.assertEqual([item["uid"] for item in exported], ["777"])
         self.assertEqual(hidden_time["total"], 0)
         self.assertEqual(hidden_confidence["total"], 0)
         with self.assertRaisesRegex(ValueError, "分页参数"):
             await plugin.web_identity_page("bindings", "", 1, 100)
 
-    async def test_identity_page_route_reads_validated_query_parameters(self):
+    async def test_identity_routes_read_validated_query_parameters(self):
         class Query(dict):
             def get(self, key, default=None, type=None):
                 value = super().get(key, default)
@@ -2185,6 +2187,26 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             self.assertRaisesRegex(ValueError, "必须是整数"),
         ):
             await web.page_identities()
+
+        plugin.web_violation_export = AsyncMock(
+            return_value=[
+                {
+                    "username": "=2+2",
+                    "content": "\t=HYPERLINK(\"https://example.invalid\")",
+                    "action": "record_only",
+                }
+            ]
+        )
+        query = Query(query="违规")
+        with patch.object(web_module.request, "query", query, create=True):
+            export_response = await web.page_violation_export()
+
+        export_data = export_response["data"]
+        self.assertEqual(export_data["count"], 1)
+        self.assertTrue(export_data["content"].startswith("\ufeff时间,"))
+        self.assertIn("'=2+2", export_data["content"])
+        self.assertIn("'\t=HYPERLINK", export_data["content"])
+        plugin.web_violation_export.assert_awaited_once_with("违规")
 
     async def test_recall_recent_messages_uses_received_message_cache(self):
         plugin, client = self.plugin()

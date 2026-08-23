@@ -864,6 +864,32 @@
     ]);
   }
 
+  function exportViolations() {
+    var button = element("violation-export-button");
+    button.disabled = true;
+    apiGet("violations/export", {
+      query: (element("identity-search").value || "").trim()
+    }).then(function (result) {
+      result = result || {};
+      if (typeof result.content !== "string") throw new Error("导出服务未返回 CSV 内容");
+      var url = window.URL.createObjectURL(
+        new Blob([result.content], { type: "text/csv;charset=utf-8" })
+      );
+      var link = document.createElement("a");
+      link.href = url;
+      link.download = result.filename || "qqgroup-admin-violations.csv";
+      document.body.appendChild(link);
+      link.click();
+      link.remove();
+      window.setTimeout(function () { window.URL.revokeObjectURL(url); }, 1000);
+      toast("已导出 " + (Number(result.count) || 0) + " 条违规记录");
+    }).catch(function (error) {
+      toast("导出失败：" + error.message, true);
+    }).finally(function () {
+      button.disabled = false;
+    });
+  }
+
   function load() {
     element("group-rows").innerHTML = '<tr><td class="empty" colspan="6">正在加载...</td></tr>';
     element("batch-toolbar").hidden = true;
@@ -1242,6 +1268,7 @@
   }
 
   element("refresh-button").addEventListener("click", load);
+  element("violation-export-button").addEventListener("click", exportViolations);
   var viewNames = ["groups", "global-keywords", "runtime", "identities"];
   viewNames.forEach(function (name) {
     element(name + "-tab").addEventListener("click", function () { setView(name); });
