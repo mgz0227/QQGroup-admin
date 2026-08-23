@@ -5,7 +5,9 @@
   var BATCH_GROUP_LIMIT = 100;
   var groups = [];
   var selected = new Set();
-  var identities = { bindings: [], suspicious: [] };
+  var identities = { bindings: [], suspicious: [], violations: [] };
+  var identityPages = { bindings: 1, suspicious: 1, violations: 1 };
+  var identityPageSize = 10;
   var globalKeywordConfig = { groups: [], rules: [] };
   var runtimeSettings = {};
   var bilibiliLoginKey = "";
@@ -163,58 +165,182 @@
     updateSelectionControls(visible);
   }
 
-  function tableCell(text, code) {
-    var cell = document.createElement("td");
-    var node = code ? document.createElement("code") : document.createElement("span");
-    node.textContent = text == null || text === "" ? "-" : String(text);
-    cell.appendChild(node);
-    return cell;
+  function groupLabel(groupOpenid) {
+    var group = groups.find(function (item) { return item.group_openid === groupOpenid; });
+    return group && group.group_name ? group.group_name : (groupOpenid || "未知群");
   }
 
-  function renderIdentities() {
-    var bindingRows = element("binding-rows");
-    var suspiciousRows = element("suspicious-rows");
-    bindingRows.replaceChildren();
-    suspiciousRows.replaceChildren();
-    var bindings = Array.isArray(identities.bindings) ? identities.bindings : [];
-    var suspicious = Array.isArray(identities.suspicious) ? identities.suspicious : [];
-    if (!bindings.length) {
-      bindingRows.innerHTML = '<tr><td class="empty" colspan="5">暂无 UID 身份绑定</td></tr>';
+  function recordGroupLabel(record) {
+    return record && (record.group_name || record.group) || groupLabel(record && record.group_openid);
+  }
+
+  function identityText(value) {
+    return value == null || value === "" ? "-" : String(value);
+  }
+
+  function identityGroups(binding) {
+    var values = Array.isArray(binding.groups) ? binding.groups : [];
+    var names = Array.isArray(binding.group_names) ? binding.group_names : [];
+    var labels = values.map(function (value, index) {
+      var id = value && typeof value === "object" ? value.group_openid : value;
+      return names[index] || groupLabel(String(id || ""));
+    }).filter(Boolean);
+    return labels.join("、") || groupLabel(binding.last_violation_group);
+  }
+
+  function identitySearchValue(item, extra) {
+    var values = [
+      item.uid, item.bilibili_uid, item.username, item.member_name, item.identity,
+      item.member_openid, item.qq_openid, item.openid, item.union_openid,
+      item.group_openid, item.group_name, item.group, groupLabel(item.group_openid),
+      item.last_violation_group, item.reason, item.rule, item.category, item.content,
+      item.message, item.message_content, item.message_summary, extra
+    ];
+    if (Array.isArray(item.groups)) {
+      values = values.concat(item.groups.map(function (value) {
+        var id = value && typeof value === "object" ? value.group_openid : value;
+        return String(id || "") + " " + groupLabel(String(id || ""));
+      }));
     }
-    bindings.forEach(function (binding) {
-      var row = document.createElement("tr");
-      var actions = document.createElement("td");
-      actions.className = "row-actions";
-      actions.appendChild(actionButton("解除绑定", "danger", function () {
+    if (item.members && typeof item.members === "object") {
+      values = values.concat(Object.keys(item.members), Object.values(item.members));
+    }
+    return values.filter(function (value) { return value != null; }).join(" ").toLocaleLowerCase();
+  }
+
+  function identityFiltered(items, extra) {
+    var query = (element("identity-search").value || "").trim().toLocaleLowerCase();
+    return items.filter(function (item) {
+      return !query || identitySearchValue(item, extra).includes(query);
+    });
+  }
+
+  function pageItems(items, kind) {
+    var totalPages = Math.max(1, Math.ceil(items.length / identityPageSize));
+    identityPages[kind] = Math.min(identityPages[kind], totalPages);
+    var start = (identityPages[kind] - 1) * identityPageSize;
+    return { items: items.slice(start, start + identityPageSize), totalPages: totalPages };
+  }
+
+  function renderPager(id, kind, total, totalPages) {
+    var pager = element(id);
+    pager.replaceChildren();
+    if (!total) return;
+    var label = document.createElement("span");
+    label.textContent = "第 " + identityPages[kind] + " / " + totalPages + " 页，共 " + total + " 条";
+    var previous = document.createElement("button");
+    previous.type = "button";
+    previous.className = "button secondary small-button";
+    previous.textContent = "上一页";
+    previous.disabled = identityPages[kind] <= 1;
+    previous.addEventListener("click", function () {
+      identityPages[kind] -= 1;
+      renderIdentities();
+    });
+    var next = document.createElement("button");
+    next.type = "button";
+    next.className = "button secondary small-button";
+    next.textContent = "下一页";
+    next.disabled = identityPages[kind] >= totalPages;
+    next.addEventListener("click", function () {
+      identityPages[kind] += 1;
+      renderIdentities();
+    });
+    pager.append(label, previous, next);
+  }
+
+  function recordField(parent, label, value, code) {
+    var item = document.createElement("div");
+    item.className = "identity-field";
+    var title = document.createElement("span");
+    title.className = "identity-field-label";
+    title.textContent = label;
+    var content = document.createElement(code ? "code" : "span");
+    content.textContent = identityText(value);
+    item.append(title, content);
+    parent.appendChild(item);
+  }
+
+  function timestamp(value) {
+    if (!value) return "-";
+    var number = Number(value);
+    var date = new Date(number > 100000000000 ? number : number * 1000);
+    return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
+  }
+
+  function renderBindingList(bindings) {
+    var list = element("binding-list");
+    list.replaceChildren();
+    var page = pageItems(bindings, "bindings");
+    if (!bindings.length) {
+      list.innerHTML = '<p class="empty">暂无匹配的 UID 身份绑定</p>';
+      renderPager("binding-pager", "bindings", 0, 1);
+      element("binding-count").textContent = "0 条";
+      return;
+    }
+    page.items.forEach(function (binding) {
+      var details = document.createElement("details");
+      details.className = "identity-card";
+      var summary = document.createElement("summary");
+      summary.innerHTML = '<strong></strong><span class="identity-card-meta"></span>';
+      summary.querySelector("strong").textContent = identityText(binding.username || binding.identity || binding.uid);
+      summary.querySelector(".identity-card-meta").textContent =
+        "UID " + identityText(binding.uid) + " · " + identityGroups(binding) +
+        " · 违规 " + Number(binding.violation_count || 0) + " 次";
+      var body = document.createElement("div");
+      body.className = "identity-card-body";
+      recordField(body, "B站 UID", binding.uid, true);
+      recordField(body, "成员 OpenID", binding.member_openid, true);
+      recordField(body, "联合 OpenID", binding.union_openid, true);
+      recordField(body, "唯一身份键", binding.identity, true);
+      recordField(body, "群", identityGroups(binding));
+      recordField(body, "最近违规", binding.last_violation_reason || "暂无");
+      var actions = document.createElement("div");
+      actions.className = "row-actions identity-card-actions";
+      actions.appendChild(actionButton("解除绑定", "danger", function (event) {
+        event.preventDefault();
         confirmAction("解除 UID 绑定", "确认解除 UID " + binding.uid + " 的唯一身份绑定？", function () {
           apiPost("binding-delete", { uid: String(binding.uid) })
             .then(function () { toast("UID 绑定已解除"); load(); })
             .catch(function (error) { toast("解除失败：" + error.message, true); });
         });
       }));
-      var groupNames = (binding.groups || []).map(function (id) {
-        var group = groups.find(function (item) { return item.group_openid === id; });
-        return group ? group.group_name : id;
-      }).join("、");
-      var violation = Number(binding.violation_count || 0) + " 次";
-      if (binding.last_violation_reason) violation += "；" + binding.last_violation_reason;
-      row.append(
-        tableCell(binding.uid, true),
-        tableCell(binding.username || binding.identity, false),
-        tableCell(groupNames, false),
-        tableCell(violation, false),
-        actions
-      );
-      bindingRows.appendChild(row);
+      body.appendChild(actions);
+      details.append(summary, body);
+      list.appendChild(details);
     });
+    element("binding-count").textContent = bindings.length + " 条";
+    renderPager("binding-pager", "bindings", bindings.length, page.totalPages);
+  }
+
+  function renderSuspiciousList(suspicious) {
+    var list = element("suspicious-list");
+    list.replaceChildren();
+    var page = pageItems(suspicious, "suspicious");
     if (!suspicious.length) {
-      suspiciousRows.innerHTML = '<tr><td class="empty" colspan="4">暂无待真人验证成员</td></tr>';
+      list.innerHTML = '<p class="empty">暂无匹配的待真人验证成员</p>';
+      renderPager("suspicious-pager", "suspicious", 0, 1);
+      element("suspicious-count").textContent = "0 条";
+      return;
     }
-    suspicious.forEach(function (member) {
-      var row = document.createElement("tr");
-      var actions = document.createElement("td");
-      actions.className = "row-actions";
-      actions.appendChild(actionButton("解除标记", "danger", function () {
+    page.items.forEach(function (member) {
+      var details = document.createElement("details");
+      details.className = "identity-card suspicious-card";
+      var summary = document.createElement("summary");
+      summary.innerHTML = '<strong></strong><span class="identity-card-meta"></span>';
+      summary.querySelector("strong").textContent = identityText(member.username || member.member_openid);
+      summary.querySelector(".identity-card-meta").textContent =
+        groupLabel(member.group_openid) + " · " + identityText(member.reason);
+      var body = document.createElement("div");
+      body.className = "identity-card-body";
+      recordField(body, "成员 OpenID", member.member_openid, true);
+      recordField(body, "群", groupLabel(member.group_openid));
+      recordField(body, "标记原因", member.reason);
+      recordField(body, "标记时间", timestamp(member.created_at));
+      var actions = document.createElement("div");
+      actions.className = "row-actions identity-card-actions";
+      actions.appendChild(actionButton("解除标记", "danger", function (event) {
+        event.preventDefault();
         confirmAction("解除可疑标记", "确认允许该成员恢复正常发言？", function () {
           apiPost("suspicious-clear", {
             group_openid: member.group_openid,
@@ -223,14 +349,90 @@
             .catch(function (error) { toast("解除失败：" + error.message, true); });
         });
       }));
-      row.append(
-        tableCell(member.username || member.member_openid, false),
-        tableCell(member.group_openid, true),
-        tableCell(member.reason, false),
-        actions
-      );
-      suspiciousRows.appendChild(row);
+      body.appendChild(actions);
+      details.append(summary, body);
+      list.appendChild(details);
     });
+    element("suspicious-count").textContent = suspicious.length + " 条";
+    renderPager("suspicious-pager", "suspicious", suspicious.length, page.totalPages);
+  }
+
+  function bindingViolationRecords(bindings) {
+    var records = [];
+    bindings.forEach(function (binding) {
+      var nested = Array.isArray(binding.violations)
+        ? binding.violations
+        : (Array.isArray(binding.violation_records) ? binding.violation_records : []);
+      nested.forEach(function (record) {
+        records.push(Object.assign({}, record, {
+          uid: record.uid || record.bilibili_uid || binding.uid,
+          username: record.username || binding.username || binding.identity,
+          member_openid: record.member_openid || record.qq_openid || record.openid || binding.member_openid,
+          group_openid: record.group_openid || record.last_violation_group,
+          _binding: binding
+        }));
+      });
+      if (!nested.length && Number(binding.violation_count || 0) > 0) {
+        records.push({
+          uid: binding.uid,
+          username: binding.username || binding.identity,
+          member_openid: binding.member_openid,
+          group_openid: binding.last_violation_group,
+          reason: binding.last_violation_reason,
+          created_at: binding.last_violation_at,
+          content: binding.last_violation_content || binding.last_violation_message,
+          _summary: true
+        });
+      }
+    });
+    return records;
+  }
+
+  function renderViolationList(records) {
+    var list = element("violation-list");
+    list.replaceChildren();
+    var page = pageItems(records, "violations");
+    if (!records.length) {
+      list.innerHTML = '<p class="empty">暂无匹配的违规记录</p>';
+      renderPager("violation-pager", "violations", 0, 1);
+      element("violation-count").textContent = "0 条";
+      return;
+    }
+    page.items.forEach(function (record) {
+      var details = document.createElement("details");
+      details.className = "identity-card violation-card";
+      var summary = document.createElement("summary");
+      summary.innerHTML = '<strong></strong><span class="identity-card-meta"></span>';
+      summary.querySelector("strong").textContent = identityText(record.username || record.member_name || record.member_openid || record.uid || record.bilibili_uid);
+      summary.querySelector(".identity-card-meta").textContent =
+        recordGroupLabel(record) + " · " + identityText(record.reason || record.rule || "内容审查");
+      var body = document.createElement("div");
+      body.className = "identity-card-body";
+      recordField(body, "时间", timestamp(record.created_at || record.occurred_at || record.timestamp || record.at));
+      recordField(body, "B站 UID", record.uid || record.bilibili_uid, true);
+      recordField(body, "QQ OpenID", record.member_openid || record.qq_openid || record.openid || record.union_openid, true);
+      recordField(body, "群", recordGroupLabel(record));
+      recordField(body, "命中规则", record.reason || record.rule || record.category);
+      recordField(body, "消息内容", record.content || record.message || record.message_content || record.message_summary ||
+        (record._summary ? "当前版本仅保存最近一次违规原因，暂无原始消息内容" : "暂无记录内容"));
+      list.appendChild(details);
+      details.append(summary, body);
+    });
+    element("violation-count").textContent = records.length + " 条";
+    renderPager("violation-pager", "violations", records.length, page.totalPages);
+  }
+
+  function renderIdentities() {
+    var sourceBindings = Array.isArray(identities.bindings) ? identities.bindings : [];
+    var bindings = identityFiltered(sourceBindings);
+    var suspicious = identityFiltered(Array.isArray(identities.suspicious) ? identities.suspicious : []);
+    var violations = Array.isArray(identities.violations)
+      ? identities.violations
+      : (Array.isArray(identities.violation_records) ? identities.violation_records : bindingViolationRecords(sourceBindings));
+    violations = identityFiltered(violations);
+    renderBindingList(bindings);
+    renderSuspiciousList(suspicious);
+    renderViolationList(violations);
   }
 
   function fillOverview(data) {
@@ -460,6 +662,7 @@
 
   function fillProviderSelect(id, emptyLabel, selectedValue) {
     var select = element(id);
+    if (!select) return;
     var providers = Array.isArray(runtimeSettings.providers) ? runtimeSettings.providers : [];
     select.replaceChildren();
     var empty = document.createElement("option");
@@ -482,6 +685,36 @@
     select.value = selectedValue || "";
   }
 
+  function fillProviderMultiSelect(id, selectedValues) {
+    var select = element(id);
+    if (!select) return;
+    var providers = Array.isArray(runtimeSettings.providers) ? runtimeSettings.providers : [];
+    var selected = Array.isArray(selectedValues) ? selectedValues : [];
+    select.replaceChildren();
+    providers.forEach(function (provider) {
+      if (!provider || !provider.id) return;
+      var option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.label || provider.model || provider.id;
+      option.selected = selected.indexOf(provider.id) >= 0;
+      select.appendChild(option);
+    });
+    selected.forEach(function (providerId) {
+      if (!providerId || providers.some(function (provider) { return provider && provider.id === providerId; })) return;
+      var missing = document.createElement("option");
+      missing.value = providerId;
+      missing.textContent = "已不可用：" + providerId;
+      missing.selected = true;
+      select.appendChild(missing);
+    });
+  }
+
+  function selectedValues(id) {
+    var select = element(id);
+    if (!select) return [];
+    return Array.from(select.selectedOptions).map(function (option) { return option.value; }).filter(Boolean);
+  }
+
   function fillRuntime(settings) {
     runtimeSettings = settings || {};
     element("runtime-review-interval").value = runtimeSettings.uid_review_interval_seconds || 60;
@@ -490,13 +723,21 @@
     element("runtime-global-reject-keywords").value = runtimeSettings.global_reject_keywords || "";
     element("runtime-message-reject-keywords").value = runtimeSettings.global_message_reject_keywords || "";
     element("runtime-mute-message").value = runtimeSettings.mute_success_message || "";
+    element("runtime-ai-enabled").checked = runtimeSettings.global_ai_review_enabled === true;
     element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
     element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
     element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
-    fillProviderSelect("ai-review-provider", "使用当前会话模型", "");
-    fillProviderSelect("ai-review-fallback-provider", "不使用回退模型", "");
-    fillProviderSelect("batch-ai-provider", "使用当前会话模型", "");
-    fillProviderSelect("batch-ai-fallback-provider", "不使用回退模型", "");
+    fillProviderSelect(
+      "runtime-ai-provider",
+      "使用当前会话模型",
+      runtimeSettings.global_ai_review_provider_id || ""
+    );
+    fillProviderMultiSelect(
+      "runtime-ai-fallback-providers",
+      runtimeSettings.global_ai_review_fallback_provider_ids || []
+    );
+    element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
+    element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
   }
 
   function saveRuntime(event) {
@@ -509,6 +750,9 @@
       global_reject_keywords: element("runtime-global-reject-keywords").value,
       global_message_reject_keywords: element("runtime-message-reject-keywords").value,
       mute_success_message: element("runtime-mute-message").value,
+      global_ai_review_enabled: element("runtime-ai-enabled").checked,
+      global_ai_review_provider_id: element("runtime-ai-provider").value,
+      global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
       bilibili_live_interval_seconds: Number(element("runtime-live-interval").value),
       bilibili_dynamic_interval_seconds: Number(element("runtime-dynamic-interval").value)
     };
@@ -583,7 +827,7 @@
       .then(function (result) {
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
-        identities = result[2] || { bindings: [], suspicious: [] };
+        identities = result[2] || { bindings: [], suspicious: [], violations: [] };
         globalKeywordConfig = result[3] || { groups: [], rules: [] };
         element("global-keyword-cooldown").value =
           Number(globalKeywordConfig.keyword_reply_cooldown_seconds || 0);
@@ -735,17 +979,6 @@
     element("moderation-exempt-admins").checked = group.moderation_exempt_admins !== false;
     element("message-reject-keywords").value = group.message_reject_keywords || "";
     renderKeywordReplies(group.keyword_replies);
-    element("ai-review-enabled").checked = group.ai_review_enabled === true;
-    fillProviderSelect(
-      "ai-review-provider",
-      "使用当前会话模型",
-      group.ai_review_provider_id || ""
-    );
-    fillProviderSelect(
-      "ai-review-fallback-provider",
-      "不使用回退模型",
-      group.ai_review_fallback_provider_id || ""
-    );
     element("image-spam-enabled").checked = group.image_spam_enabled === true;
     element("image-spam-count").value = group.image_spam_count || 5;
     element("image-spam-window").value = group.image_spam_window_seconds || 15;
@@ -782,9 +1015,6 @@
       moderation_exempt_admins: element("moderation-exempt-admins").checked,
       message_reject_keywords: element("message-reject-keywords").value,
       keyword_replies: readKeywordReplies(),
-      ai_review_enabled: element("ai-review-enabled").checked,
-      ai_review_provider_id: element("ai-review-provider").value,
-      ai_review_fallback_provider_id: element("ai-review-fallback-provider").value,
       image_spam_enabled: element("image-spam-enabled").checked,
       image_spam_count: Number(element("image-spam-count").value),
       image_spam_window_seconds: Number(element("image-spam-window").value),
@@ -831,7 +1061,6 @@
       ["batch-fallback-human-verify", "fallback_human_verify_enabled", true],
       ["batch-moderation-enabled", "moderation_enabled", true],
       ["batch-moderation-exempt-admins", "moderation_exempt_admins", true],
-      ["batch-ai-review-enabled", "ai_review_enabled", true],
       ["batch-image-spam-enabled", "image_spam_enabled", true],
       ["batch-repeat-review-enabled", "repeat_review_enabled", true],
       ["batch-bilibili-dynamic-enabled", "bilibili_dynamic_enabled", true],
@@ -949,6 +1178,15 @@
     element(viewNames[next] + "-tab").focus();
   });
   element("search-input").addEventListener("input", render);
+  element("identity-search").addEventListener("input", function () {
+    identityPages = { bindings: 1, suspicious: 1, violations: 1 };
+    renderIdentities();
+  });
+  element("identity-page-size").addEventListener("change", function (event) {
+    identityPageSize = Math.max(1, Math.min(50, Number(event.target.value) || 10));
+    identityPages = { bindings: 1, suspicious: 1, violations: 1 };
+    renderIdentities();
+  });
   element("select-visible").addEventListener("change", function (event) {
     var limitReached = false;
     visibleGroups().forEach(function (group) {
@@ -972,6 +1210,10 @@
   element("add-global-keyword-reply").addEventListener("click", function () { addGlobalKeywordReply(); });
   element("global-keyword-form").addEventListener("submit", saveGlobalKeywordReplies);
   element("runtime-form").addEventListener("submit", saveRuntime);
+  element("runtime-ai-enabled").addEventListener("change", function (event) {
+    element("runtime-ai-provider").disabled = !event.target.checked;
+    element("runtime-ai-fallback-providers").disabled = !event.target.checked;
+  });
   element("start-bilibili-login").addEventListener("click", startBilibiliLogin);
   element("edit-form").addEventListener("submit", save);
   element("batch-edit-form").addEventListener("submit", saveBatch);

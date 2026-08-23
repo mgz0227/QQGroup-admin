@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 from functools import wraps
+import re
 from typing import Any
 
 from astrbot.api.star import Context
@@ -15,6 +16,7 @@ PLUGIN_NAME = "astrbot_plugin_qqgroup_admin"
 BATCH_GROUP_LIMIT = 100
 BATCH_TEXT_BUDGET = 4_000_000
 KEYWORD_REPLY_LIMIT = 100
+MAX_AI_FALLBACK_PROVIDERS = 3
 BATCH_FIELDS = {
     "mode",
     "whitelist_qq_numbers",
@@ -64,6 +66,22 @@ class GroupAdminWeb:
     def __init__(self, plugin: Any, context: Context) -> None:
         self.plugin = plugin
         self.context = context
+
+    @staticmethod
+    def _provider_ids(value: Any) -> list[str]:
+        values = value if isinstance(value, (list, tuple)) else re.split(
+            r"[,，;；\r\n]+", str(value or "")
+        )
+        result: list[str] = []
+        for item in values:
+            provider_id = GroupAdminWeb._text(item, "AI 回退模型", 256)
+            if provider_id and provider_id not in result:
+                result.append(provider_id)
+        if len(result) > MAX_AI_FALLBACK_PROVIDERS:
+            raise ValueError(
+                f"AI 回退模型最多选择 {MAX_AI_FALLBACK_PROVIDERS} 个"
+            )
+        return result
 
     @staticmethod
     def _response(data: Any = None, *, message: str = "") -> Any:
@@ -288,7 +306,7 @@ class GroupAdminWeb:
     def _runtime_settings(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
-        return {
+        settings = {
             "uid_review_interval_seconds": cls._int(
                 payload, "uid_review_interval_seconds", 60, 15, 600, "审核轮询间隔"
             ),
@@ -336,6 +354,52 @@ class GroupAdminWeb:
                 "动态轮询间隔",
             ),
         }
+        ai_enabled_key = (
+            "global_ai_review_enabled"
+            if "global_ai_review_enabled" in payload
+            else "ai_review_enabled"
+            if "ai_review_enabled" in payload
+            else None
+        )
+        primary_key = (
+            "global_ai_review_provider_id"
+            if "global_ai_review_provider_id" in payload
+            else "ai_review_provider_id"
+            if "ai_review_provider_id" in payload
+            else None
+        )
+        fallback_key = next(
+            (
+                key
+                for key in (
+                    "global_ai_review_fallback_provider_ids",
+                    "ai_review_fallback_provider_ids",
+                    "ai_review_fallback_provider_id",
+                )
+                if key in payload
+            ),
+            None,
+        )
+        if ai_enabled_key is not None:
+            settings["global_ai_review_enabled"] = cls._bool(
+                payload, ai_enabled_key, False, "全局 AI 审核开关"
+            )
+        if primary_key is not None:
+            settings["global_ai_review_provider_id"] = cls._text(
+                payload[primary_key], "全局 AI 审核主模型", 256
+            )
+        if fallback_key is not None:
+            settings["global_ai_review_fallback_provider_ids"] = cls._provider_ids(
+                payload[fallback_key]
+            )
+        if (
+            "global_ai_review_provider_id" in settings
+            and "global_ai_review_fallback_provider_ids" in settings
+            and settings["global_ai_review_provider_id"]
+            in settings["global_ai_review_fallback_provider_ids"]
+        ):
+            raise ValueError("AI 审核主模型不能出现在回退模型列表")
+        return settings
 
     @classmethod
     def _validated_save(cls, payload: Any) -> dict[str, Any]:

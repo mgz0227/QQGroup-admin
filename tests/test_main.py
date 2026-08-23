@@ -1526,6 +1526,123 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin.context.llm_generate.assert_awaited_once()
 
+    def test_global_ai_config_migrates_once_and_ignores_group_overrides(self):
+        client = FakeClient()
+        platform = SimpleNamespace(get_client=lambda: client)
+        context = SimpleNamespace(get_platform_inst=lambda _platform_id: platform)
+        config = TestConfig(
+            auto_review_groups=[
+                {
+                    "group_openid": "group-1",
+                    "ai_review_enabled": True,
+                    "ai_review_provider_id": "primary-a",
+                    "ai_review_fallback_provider_id": "fallback-a",
+                },
+                {
+                    "group_openid": "group-2",
+                    "ai_review_enabled": False,
+                    "ai_review_provider_id": "primary-b",
+                    "ai_review_fallback_provider_id": "fallback-a",
+                },
+            ]
+        )
+        plugin = module.QQGroupAdmin(context, config)
+
+        self.assertTrue(config["global_ai_review_enabled"])
+        self.assertEqual(config["global_ai_review_provider_id"], "primary-a")
+        self.assertEqual(
+            config["global_ai_review_fallback_provider_ids"], ["fallback-a"]
+        )
+        first = plugin._moderation_settings(config["auto_review_groups"][0])
+        second = plugin._moderation_settings(config["auto_review_groups"][1])
+        self.assertEqual(first["ai_provider_id"], second["ai_provider_id"])
+        self.assertEqual(
+            first["ai_fallback_provider_ids"], second["ai_fallback_provider_ids"]
+        )
+
+    async def test_global_ai_fallback_list_is_ordered_and_deduped(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                RuntimeError("primary unavailable"),
+                RuntimeError("first fallback unavailable"),
+                SimpleNamespace(role="assistant", completion_text="BLOCK"),
+            ]
+        )
+
+        blocked = await plugin._ai_blocks_message(
+            event,
+            "待审核",
+            [],
+            "primary",
+            ["fallback-1", "fallback-1", "fallback-2"],
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
+            ["primary", "fallback-1", "fallback-2"],
+        )
+
+    def test_runtime_global_ai_validation_accepts_multiple_fallbacks(self):
+        runtime = module.GroupAdminWeb._runtime_settings(
+            {
+                "global_ai_review_enabled": True,
+                "global_ai_review_provider_id": "primary",
+                "global_ai_review_fallback_provider_ids": [
+                    "fallback-1",
+                    "fallback-1",
+                    "fallback-2",
+                ],
+            }
+        )
+        self.assertTrue(runtime["global_ai_review_enabled"])
+        self.assertEqual(
+            runtime["global_ai_review_fallback_provider_ids"],
+            ["fallback-1", "fallback-2"],
+        )
+        with self.assertRaisesRegex(ValueError, "不能出现在"):
+            module.GroupAdminWeb._runtime_settings(
+                {
+                    "global_ai_review_provider_id": "primary",
+                    "global_ai_review_fallback_provider_ids": "fallback-1\nprimary",
+                }
+            )
+
+    async def test_runtime_ai_save_checks_existing_fallbacks_when_provider_only_changes(self):
+        plugin, _ = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary-old",
+            global_ai_review_fallback_provider_ids=["fallback-1"],
+        )
+        with self.assertRaisesRegex(ValueError, "不能出现在"):
+            await plugin.web_save_runtime_settings(
+                {"global_ai_review_provider_id": "fallback-1"}
+            )
+
+    async def test_violation_records_keep_content_and_identity_fields(self):
+        plugin, _ = self.plugin()
+        await plugin._record_uid_violation(
+            "",
+            "group-1",
+            "member-1",
+            "命中关键词",
+            content="违规消息原文",
+            message_id="message-9",
+            request={"username": "测试成员", "union_openid": "union-1"},
+        )
+
+        identities = await plugin.web_identities()
+        self.assertEqual(len(identities["violations"]), 1)
+        record = identities["violations"][0]
+        self.assertEqual(record["content"], "违规消息原文")
+        self.assertEqual(record["username"], "测试成员")
+        self.assertEqual(record["union_openid"], "union-1")
+        self.assertEqual(record["group_openid"], "group-1")
+        self.assertEqual(record["message_id"], "message-9")
+
     async def test_recall_recent_messages_uses_received_message_cache(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "/撤回 3")

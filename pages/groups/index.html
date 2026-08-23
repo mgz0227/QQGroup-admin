@@ -80,21 +80,49 @@
         <div class="list-header">
           <div>
             <h2 id="identity-heading">UID 身份与真人验证</h2>
-            <p>有效 UID 与 QQ 身份唯一绑定；违规次数用于追溯消息审查记录。</p>
+            <p>按名称、B站 UID、QQ OpenID 或群查询，展开记录后查看详细信息。</p>
+          </div>
+          <div class="identity-tools">
+            <label class="search">
+              <span class="sr-only">搜索身份与违规记录</span>
+              <input id="identity-search" type="search" placeholder="搜索名称、UID、QQ OpenID 或群" autocomplete="off">
+            </label>
+            <label class="page-size">
+              <span>每页</span>
+              <select id="identity-page-size" aria-label="每页显示条数">
+                <option value="10">10 条</option>
+                <option value="20">20 条</option>
+                <option value="50">50 条</option>
+              </select>
+            </label>
           </div>
         </div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>B站 UID</th><th>QQ 身份</th><th>群</th><th>违规</th><th class="actions-column">操作</th></tr></thead>
-            <tbody id="binding-rows"><tr><td class="empty" colspan="5">正在加载...</td></tr></tbody>
-          </table>
+        <div class="identity-section">
+          <div class="sub-list-header">
+            <h3>UID 身份绑定</h3>
+            <span id="binding-count" class="record-count"></span>
+          </div>
+          <div class="identity-records" id="binding-list"><p class="empty">正在加载...</p></div>
+          <div class="pager" id="binding-pager"></div>
         </div>
-        <div class="sub-list-header"><h3>待真人验证</h3></div>
-        <div class="table-wrap">
-          <table>
-            <thead><tr><th>成员</th><th>群 OpenID</th><th>原因</th><th class="actions-column">操作</th></tr></thead>
-            <tbody id="suspicious-rows"><tr><td class="empty" colspan="4">正在加载...</td></tr></tbody>
-          </table>
+        <div class="identity-section">
+          <div class="sub-list-header">
+            <h3>待真人验证</h3>
+            <span id="suspicious-count" class="record-count"></span>
+          </div>
+          <div class="identity-records" id="suspicious-list"><p class="empty">正在加载...</p></div>
+          <div class="pager" id="suspicious-pager"></div>
+        </div>
+        <div class="identity-section">
+          <div class="sub-list-header">
+            <div>
+              <h3>违规记录</h3>
+              <p>展开记录查看命中规则、处理原因和消息内容。</p>
+            </div>
+            <span id="violation-count" class="record-count"></span>
+          </div>
+          <div class="identity-records" id="violation-list"><p class="empty">正在加载...</p></div>
+          <div class="pager" id="violation-pager"></div>
         </div>
       </section>
       </div>
@@ -145,6 +173,11 @@
             <div class="section-title wide">消息与禁言</div>
             <label class="wide"><span>全局消息撤回关键词</span><textarea id="runtime-message-reject-keywords" rows="4" placeholder="每行一个关键词"></textarea></label>
             <label class="wide"><span>禁言成功回复</span><textarea id="runtime-mute-message" maxlength="1000" rows="3"></textarea></label>
+
+            <div class="section-title wide">全局 AI 内容审核</div>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-enabled" type="checkbox"><span>启用全局 AI 内容审核</span></label>
+            <label><span>主模型</span><select id="runtime-ai-provider"></select></label>
+            <label class="wide"><span>回退模型（可多选，按顺序尝试）</span><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，主模型不能重复选择。</small></label>
 
             <div class="section-title wide">B站推送</div>
             <label><span>直播轮询间隔（秒）</span><input id="runtime-live-interval" type="number" min="30" max="600" required></label>
@@ -253,12 +286,7 @@
             <p>仅在当前群生效，按列表顺序匹配。</p>
             <div class="keyword-reply-list" id="keyword-replies"></div>
           </div>
-          <label class="checkbox">
-            <input id="ai-review-enabled" type="checkbox">
-            <span>AI 内容审核</span>
-          </label>
-          <label><span>AI 审核主模型</span><select id="ai-review-provider"></select></label>
-          <label><span>AI 审核回退模型</span><select id="ai-review-fallback-provider"></select></label>
+          <p class="wide config-note">AI 内容审核为全局配置，请在“运行配置 → 全局 AI 内容审核”中统一设置。</p>
           <label class="checkbox">
             <input id="image-spam-enabled" type="checkbox">
             <span>连续发图检测</span>
@@ -310,7 +338,6 @@
           <label><span>兜底真人验证</span><select id="batch-fallback-human-verify"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>消息审查</span><select id="batch-moderation-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>管理员免审</span><select id="batch-moderation-exempt-admins"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
-          <label><span>AI 审核</span><select id="batch-ai-review-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>连续发图检测</span><select id="batch-image-spam-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>复读检测</span><select id="batch-repeat-review-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>动态推送</span><select id="batch-bilibili-dynamic-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
@@ -369,8 +396,6 @@
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-count" data-field="image_spam_count"><span>覆盖连续图片数量</span></label><input id="batch-image-count" type="number" min="2" max="20" value="5" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-window" data-field="image_spam_window_seconds"><span>覆盖发图时间窗</span></label><input id="batch-image-window" type="number" min="3" max="120" value="15" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-group-members" data-field="image_spam_group_min_members"><span>覆盖跨成员触发人数</span></label><input id="batch-image-group-members" type="number" min="2" max="10" value="2" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-ai-provider" data-field="ai_review_provider_id"><span>覆盖 AI 主模型</span></label><select id="batch-ai-provider" disabled></select></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-ai-fallback-provider" data-field="ai_review_fallback_provider_id"><span>覆盖 AI 回退模型</span></label><select id="batch-ai-fallback-provider" disabled></select></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-count" data-field="repeat_count"><span>覆盖复读次数</span></label><input id="batch-repeat-count" type="number" min="3" max="20" value="4" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-window" data-field="repeat_window_seconds"><span>覆盖复读时间窗</span></label><input id="batch-repeat-window" type="number" min="5" max="120" value="30" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-min" data-field="repeat_mute_min_seconds"><span>覆盖最短禁言秒数</span></label><input id="batch-mute-min" type="number" min="1" max="2592000" value="60" disabled></fieldset>

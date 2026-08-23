@@ -63,6 +63,12 @@ VERIFICATION_TOKEN_TTL = 5 * 60
 JOIN_LIST_LIMIT = 5
 RECENT_RECALL_LIMIT = 50
 GROUP_TEMPLATE_KEY = "qq_group"
+GLOBAL_AI_ENABLED_KEY = "global_ai_review_enabled"
+GLOBAL_AI_PROVIDER_KEY = "global_ai_review_provider_id"
+GLOBAL_AI_FALLBACKS_KEY = "global_ai_review_fallback_provider_ids"
+GLOBAL_AI_MIGRATED_KEY = "global_ai_review_migrated"
+MAX_AI_FALLBACK_PROVIDERS = 3
+AI_REVIEW_TOTAL_TIMEOUT_SECONDS = 20
 CONDITION_LOGICS = {"all", "any"}
 FALLBACK_ACTIONS = {"pending", "decline", "approve"}
 GROUP_ADMIN_ROLES = {"admin", "owner"}
@@ -104,6 +110,23 @@ SETTINGS_ACTIONS = {
     "bili_live_off",
 }
 STATE_KEY = "qqgroup_admin_state_v1"
+
+
+def normalize_provider_ids(
+    value: Any, *, limit: int = MAX_AI_FALLBACK_PROVIDERS
+) -> list[str]:
+    """Normalize provider IDs from WebUI text/list values while preserving order."""
+    values = value if isinstance(value, (list, tuple)) else re.split(
+        r"[,，;；\r\n]+", str(value or "")
+    )
+    result: list[str] = []
+    for item in values:
+        provider_id = str(item or "").strip()
+        if provider_id and provider_id not in result:
+            result.append(provider_id)
+        if len(result) >= limit:
+            break
+    return result
 
 
 class WakeCommandFilter(filter.CustomFilter):
@@ -218,6 +241,9 @@ class QQGroupAdmin(Star):
         self._state_lock = asyncio.Lock()
         self._uid_bindings: dict[str, dict[str, Any]] = {}
         self._suspicious_members: dict[str, dict[str, Any]] = {}
+        self._violation_records: list[dict[str, Any]] = []
+        self._last_violation_state_save_at = 0.0
+        self._violation_state_dirty = False
         self._bilibili_state: dict[str, dict[str, Any]] = {
             "live": {},
             "dynamic": {},
@@ -244,6 +270,82 @@ class QQGroupAdmin(Star):
             changed = True
 
         entries = self.config.get("auto_review_groups") or []
+        entries_for_ai = entries if isinstance(entries, list) else []
+        legacy_ai_entries = [
+            entry
+            for entry in entries_for_ai
+            if isinstance(entry, dict)
+            and any(
+                key in entry
+                for key in (
+                    "ai_review_enabled",
+                    "ai_review_provider_id",
+                    "ai_review_fallback_provider_id",
+                )
+            )
+        ]
+        if not bool(self.config.get(GLOBAL_AI_MIGRATED_KEY, False)):
+            global_values_are_defaults = not bool(
+                self.config.get(GLOBAL_AI_ENABLED_KEY, False)
+            ) and not str(self.config.get(GLOBAL_AI_PROVIDER_KEY) or "").strip() and not normalize_provider_ids(
+                self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+            )
+            if legacy_ai_entries and global_values_are_defaults:
+                self.config[GLOBAL_AI_ENABLED_KEY] = any(
+                    bool(entry.get("ai_review_enabled")) for entry in legacy_ai_entries
+                )
+                self.config[GLOBAL_AI_PROVIDER_KEY] = next(
+                    (
+                        str(entry.get("ai_review_provider_id") or "").strip()
+                        for entry in legacy_ai_entries
+                        if str(entry.get("ai_review_provider_id") or "").strip()
+                    ),
+                    "",
+                )
+                fallback_ids: list[str] = []
+                for entry in legacy_ai_entries:
+                    fallback_ids.extend(
+                        normalize_provider_ids(entry.get("ai_review_fallback_provider_id"))
+                    )
+                self.config[GLOBAL_AI_FALLBACKS_KEY] = normalize_provider_ids(fallback_ids)
+                changed = True
+            self.config[GLOBAL_AI_MIGRATED_KEY] = True
+            changed = True
+        if GLOBAL_AI_ENABLED_KEY not in self.config:
+            self.config[GLOBAL_AI_ENABLED_KEY] = False
+            changed = True
+        if GLOBAL_AI_PROVIDER_KEY not in self.config:
+            self.config[GLOBAL_AI_PROVIDER_KEY] = ""
+            changed = True
+        if GLOBAL_AI_FALLBACKS_KEY not in self.config:
+            self.config[GLOBAL_AI_FALLBACKS_KEY] = []
+            changed = True
+        normalized_fallbacks = normalize_provider_ids(
+            self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+        )
+        if normalized_fallbacks != self.config.get(GLOBAL_AI_FALLBACKS_KEY):
+            self.config[GLOBAL_AI_FALLBACKS_KEY] = normalized_fallbacks
+            changed = True
+        for entry in legacy_ai_entries:
+            for key in (
+                "ai_review_enabled",
+                "ai_review_provider_id",
+                "ai_review_fallback_provider_id",
+            ):
+                if key in entry:
+                    entry.pop(key, None)
+                    changed = True
+        primary_provider = str(self.config.get(GLOBAL_AI_PROVIDER_KEY) or "").strip()
+        filtered_fallbacks = [
+            provider_id
+            for provider_id in normalize_provider_ids(
+                self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+            )
+            if provider_id != primary_provider
+        ]
+        if filtered_fallbacks != self.config.get(GLOBAL_AI_FALLBACKS_KEY):
+            self.config[GLOBAL_AI_FALLBACKS_KEY] = filtered_fallbacks
+            changed = True
         if not isinstance(entries, list):
             if changed:
                 self.config.save_config()
@@ -278,9 +380,6 @@ class QQGroupAdmin(Star):
                 ("moderation_enabled", False),
                 ("moderation_exempt_admins", True),
                 ("message_reject_keywords", ""),
-                ("ai_review_enabled", False),
-                ("ai_review_provider_id", ""),
-                ("ai_review_fallback_provider_id", ""),
                 ("image_spam_enabled", False),
                 ("image_spam_count", 5),
                 ("image_spam_window_seconds", 15),
@@ -335,6 +434,11 @@ class QQGroupAdmin(Star):
         self._recall_tasks.clear()
         self._bilibili_logins.clear()
         self._keyword_reply_ready_at.clear()
+        if self._violation_state_dirty:
+            try:
+                await self._save_state()
+            except Exception as exc:  # noqa: BLE001 - shutdown must continue
+                self.logger.warning("退出时保存违规记录失败：%s", exc)
         for client, previous in self._patched_clients.items():
             handler = getattr(client, "on_interaction_create", None)
             if getattr(handler, "__qqgroup_admin_owner__", None) is self:
@@ -352,6 +456,13 @@ class QQGroupAdmin(Star):
             return
         self._uid_bindings = valid_state_dict(value.get("uid_bindings"))
         self._suspicious_members = valid_state_dict(value.get("suspicious_members"))
+        records = value.get("violation_records")
+        if isinstance(records, list):
+            self._violation_records = [
+                dict(item)
+                for item in records[-2_000:]
+                if isinstance(item, dict)
+            ]
         bili = value.get("bilibili")
         if isinstance(bili, dict):
             self._bilibili_state = {
@@ -369,9 +480,11 @@ class QQGroupAdmin(Star):
                 {
                     "uid_bindings": self._uid_bindings,
                     "suspicious_members": self._suspicious_members,
+                    "violation_records": self._violation_records[-2_000:],
                     "bilibili": self._bilibili_state,
                 },
             )
+            self._violation_state_dirty = False
 
     @filter.on_platform_loaded()
     async def on_platform_loaded(self) -> None:
@@ -509,16 +622,54 @@ class QQGroupAdmin(Star):
         group_openid: str,
         member_openid: str,
         reason: str,
+        *,
+        content: str = "",
+        message_id: str = "",
+        action_member_openid: str = "",
+        request: dict[str, Any] | None = None,
     ) -> None:
         binding = self._uid_bindings.get(uid)
-        if not binding:
-            return
-        binding["violation_count"] = int(binding.get("violation_count") or 0) + 1
-        binding["last_violation_at"] = int(time.time())
-        binding["last_violation_group"] = group_openid
-        binding["last_violation_member"] = member_openid
-        binding["last_violation_reason"] = reason[:200]
-        await self._save_state()
+        now = int(time.time())
+        if binding:
+            binding["violation_count"] = int(binding.get("violation_count") or 0) + 1
+            binding["last_violation_at"] = now
+            binding["last_violation_group"] = group_openid
+            binding["last_violation_member"] = member_openid
+            binding["last_violation_reason"] = reason[:200]
+            binding["last_violation_content"] = content[:1_000]
+        request = request or {}
+        entry = self._group_config(group_openid)
+        self._violation_records.append(
+            {
+                "uid": uid,
+                "username": str(
+                    request.get("username")
+                    or (binding or {}).get("username")
+                    or ""
+                )[:120],
+                "identity": (binding or {}).get("identity", ""),
+                "union_openid": str(
+                    request.get("union_openid")
+                    or (binding or {}).get("union_openid")
+                    or ""
+                )[:128],
+                "member_openid": member_openid[:128],
+                "action_member_openid": action_member_openid[:128],
+                "group_openid": group_openid[:128],
+                "group_name": str((entry or {}).get("group_name") or "")[:160],
+                "created_at": now,
+                "reason": reason[:200],
+                "rule": reason[:200],
+                "content": content[:1_000],
+                "message_id": message_id[:256],
+            }
+        )
+        self._violation_records = self._violation_records[-2_000:]
+        self._violation_state_dirty = True
+        now_monotonic = time.monotonic()
+        if binding or now_monotonic - self._last_violation_state_save_at >= 5:
+            await self._save_state()
+            self._last_violation_state_save_at = now_monotonic
 
     async def _mark_suspicious(
         self,
@@ -985,9 +1136,6 @@ class QQGroupAdmin(Star):
                 "moderation_enabled": False,
                 "moderation_exempt_admins": True,
                 "message_reject_keywords": "",
-                "ai_review_enabled": False,
-                "ai_review_provider_id": "",
-                "ai_review_fallback_provider_id": "",
                 "image_spam_enabled": False,
                 "image_spam_count": 5,
                 "image_spam_window_seconds": 15,
@@ -1076,11 +1224,13 @@ class QQGroupAdmin(Star):
                 str(self.config.get("global_message_reject_keywords") or "")
             ),
             "keywords": parse_keywords(str(entry.get("message_reject_keywords") or "")),
-            "ai_enabled": bool(entry.get("ai_review_enabled", False)),
-            "ai_provider_id": str(entry.get("ai_review_provider_id") or "").strip(),
-            "ai_fallback_provider_id": str(
-                entry.get("ai_review_fallback_provider_id") or ""
+            "ai_enabled": bool(self.config.get(GLOBAL_AI_ENABLED_KEY, False)),
+            "ai_provider_id": str(
+                self.config.get(GLOBAL_AI_PROVIDER_KEY) or ""
             ).strip(),
+            "ai_fallback_provider_ids": normalize_provider_ids(
+                self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+            ),
             "image_enabled": bool(entry.get("image_spam_enabled", False)),
             "image_count": self._bounded_int(entry.get("image_spam_count"), 5, 2, 20),
             "image_window": self._bounded_int(
@@ -1733,7 +1883,7 @@ class QQGroupAdmin(Star):
         text: str,
         image_urls: list[str],
         provider_id: str = "",
-        fallback_provider_id: str = "",
+        fallback_provider_ids: Any = "",
     ) -> bool:
         if not text and not image_urls:
             return False
@@ -1753,15 +1903,20 @@ class QQGroupAdmin(Star):
                 )
             except Exception as exc:  # noqa: BLE001 - fallback may still work
                 self.logger.debug("读取当前 AI 审核模型失败：%s", exc)
-        providers.append(fallback_provider_id)
+        providers.extend(normalize_provider_ids(fallback_provider_ids))
         errors = []
+        deadline = time.monotonic() + AI_REVIEW_TOTAL_TIMEOUT_SECONDS
         for current_provider_id in dict.fromkeys(
             str(value or "").strip() for value in providers
         ):
             if not current_provider_id:
                 continue
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                errors.append("达到 AI 审核总超时")
+                break
             try:
-                async with asyncio.timeout(15):
+                async with asyncio.timeout(min(15, remaining)):
                     async with self._ai_semaphore:
                         response = await self.context.llm_generate(
                             chat_provider_id=current_provider_id,
@@ -2062,7 +2217,7 @@ class QQGroupAdmin(Star):
                 text,
                 images,
                 settings["ai_provider_id"],
-                settings["ai_fallback_provider_id"],
+                settings["ai_fallback_provider_ids"],
             )
         ):
             reason = "消息未通过 AI 内容审核，已撤回。"
@@ -2100,7 +2255,7 @@ class QQGroupAdmin(Star):
                 reason = "检测到集中复读，相关消息已撤回；随机禁言失败。"
             else:
                 reason = f"参与集中复读，已随机禁言 {duration} 秒。"
-        uid = self._uid_for_member(group_openid, target_member)
+        uid = self._uid_for_member(group_openid, member_openid)
         self.logger.info(
             "已处理违规群消息：group=%s member=%s uid=%s reason=%s",
             group_openid,
@@ -2108,13 +2263,20 @@ class QQGroupAdmin(Star):
             uid or "-",
             reason,
         )
-        if uid:
-            await self._record_uid_violation(
-                uid,
-                group_openid,
-                target_member,
-                reason,
-            )
+        author = getattr(event.message_obj.raw_message, "author", None)
+        await self._record_uid_violation(
+            uid,
+            group_openid,
+            member_openid,
+            reason,
+            content=text or ("[图片]" * max(1, len(images))),
+            message_id=message_id,
+            action_member_openid=target_member,
+            request={
+                "username": str(getattr(author, "username", "") or ""),
+                "union_openid": str(getattr(author, "union_openid", "") or ""),
+            },
+        )
         try:
             await self._warn_member(
                 event,
@@ -2664,7 +2826,7 @@ class QQGroupAdmin(Star):
         text = (
             f"# {self._markdown_text(group_name)} 消息审查\n"
             f"总开关：{'开' if settings['enabled'] else '关'}；"
-            f"AI：{'开' if settings['ai_enabled'] else '关'}；"
+            f"AI（全局）：{'开' if settings['ai_enabled'] else '关'}；"
             f"连图：{'开' if settings['image_enabled'] else '关'}；"
             f"复读：{'开' if settings['repeat_enabled'] else '关'}\n"
             f"图片阈值：{settings['image_count']} 条/{settings['image_window']} 秒；"
@@ -3288,8 +3450,6 @@ class QQGroupAdmin(Star):
             "approve": ("fallback_action", "approve"),
             "mod_on": ("moderation_enabled", True),
             "mod_off": ("moderation_enabled", False),
-            "ai_on": ("ai_review_enabled", True),
-            "ai_off": ("ai_review_enabled", False),
             "image_on": ("image_spam_enabled", True),
             "image_off": ("image_spam_enabled", False),
             "repeat_on": ("repeat_review_enabled", True),
@@ -3313,6 +3473,10 @@ class QQGroupAdmin(Star):
                 entry["uid_exists_auto_approve"] = False
             elif action == "direct_on":
                 entry["uid_check_enabled"] = True
+            self.config.save_config()
+            return
+        if action in {"ai_on", "ai_off"}:
+            self.config[GLOBAL_AI_ENABLED_KEY] = action == "ai_on"
             self.config.save_config()
             return
         if action in {"uid", "conditional"}:
@@ -3397,9 +3561,15 @@ class QQGroupAdmin(Star):
             "message_reject_keywords": "\n".join(moderation["keywords"]),
             "ai_review_enabled": moderation["ai_enabled"],
             "ai_review_provider_id": moderation["ai_provider_id"],
-            "ai_review_fallback_provider_id": moderation[
-                "ai_fallback_provider_id"
-            ],
+            "ai_review_fallback_provider_ids": list(
+                moderation["ai_fallback_provider_ids"]
+            ),
+            # Legacy clients expect one fallback field; expose the first only.
+            "ai_review_fallback_provider_id": (
+                moderation["ai_fallback_provider_ids"][0]
+                if moderation["ai_fallback_provider_ids"]
+                else ""
+            ),
             "image_spam_enabled": moderation["image_enabled"],
             "image_spam_count": moderation["image_count"],
             "image_spam_window_seconds": moderation["image_window"],
@@ -3531,6 +3701,28 @@ class QQGroupAdmin(Star):
             "global_message_reject_keywords": str(
                 self.config.get("global_message_reject_keywords") or ""
             ),
+            "global_ai_review_enabled": bool(
+                self.config.get(GLOBAL_AI_ENABLED_KEY, False)
+            ),
+            "global_ai_review_provider_id": str(
+                self.config.get(GLOBAL_AI_PROVIDER_KEY) or ""
+            ).strip(),
+            "global_ai_review_fallback_provider_ids": normalize_provider_ids(
+                self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+            ),
+            # Compatibility aliases for older custom pages; behavior remains global.
+            "ai_review_enabled": bool(self.config.get(GLOBAL_AI_ENABLED_KEY, False)),
+            "ai_review_provider_id": str(
+                self.config.get(GLOBAL_AI_PROVIDER_KEY) or ""
+            ).strip(),
+            "ai_review_fallback_provider_ids": normalize_provider_ids(
+                self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+            ),
+            "ai_review_fallback_provider_id": (
+                normalize_provider_ids(self.config.get(GLOBAL_AI_FALLBACKS_KEY))[0]
+                if normalize_provider_ids(self.config.get(GLOBAL_AI_FALLBACKS_KEY))
+                else ""
+            ),
             "bilibili_live_interval_seconds": self._bounded_int(
                 self.config.get("bilibili_live_interval_seconds"), 60, 30, 600
             ),
@@ -3545,6 +3737,50 @@ class QQGroupAdmin(Star):
         self,
         settings: dict[str, Any],
     ) -> dict[str, Any]:
+        ai_keys = {
+            "global_ai_review_enabled",
+            "global_ai_review_provider_id",
+            "global_ai_review_fallback_provider_ids",
+            "ai_review_enabled",
+            "ai_review_provider_id",
+            "ai_review_fallback_provider_ids",
+            "ai_review_fallback_provider_id",
+        }
+        if ai_keys.intersection(settings):
+            settings = dict(settings)
+            primary = str(
+                settings.get(
+                    "global_ai_review_provider_id",
+                    settings.get(
+                        "ai_review_provider_id",
+                        self.config.get(GLOBAL_AI_PROVIDER_KEY),
+                    ),
+                )
+                or ""
+            ).strip()
+            fallback_ids = normalize_provider_ids(
+                settings.get(
+                    "global_ai_review_fallback_provider_ids",
+                    settings.get(
+                        "ai_review_fallback_provider_ids",
+                        settings.get(
+                            "ai_review_fallback_provider_id",
+                            self.config.get(GLOBAL_AI_FALLBACKS_KEY),
+                        ),
+                    ),
+                )
+            )
+            if primary in fallback_ids:
+                raise ValueError("AI 审核主模型不能出现在回退模型列表")
+            settings["global_ai_review_provider_id"] = primary
+            settings["global_ai_review_fallback_provider_ids"] = fallback_ids
+            if "global_ai_review_enabled" not in settings:
+                settings["global_ai_review_enabled"] = bool(
+                    settings.get(
+                        "ai_review_enabled",
+                        self.config.get(GLOBAL_AI_ENABLED_KEY, False),
+                    )
+                )
         self.config.update(settings)
         self.config.save_config()
         return await self.web_runtime_settings()
@@ -3626,11 +3862,6 @@ class QQGroupAdmin(Star):
                 "moderation_enabled": bool(payload["moderation_enabled"]),
                 "moderation_exempt_admins": bool(payload["moderation_exempt_admins"]),
                 "message_reject_keywords": str(payload["message_reject_keywords"]),
-                "ai_review_enabled": bool(payload["ai_review_enabled"]),
-                "ai_review_provider_id": str(payload["ai_review_provider_id"]),
-                "ai_review_fallback_provider_id": str(
-                    payload["ai_review_fallback_provider_id"]
-                ),
                 "image_spam_enabled": bool(payload["image_spam_enabled"]),
                 "image_spam_count": int(payload["image_spam_count"]),
                 "image_spam_window_seconds": int(payload["image_spam_window_seconds"]),
@@ -3650,16 +3881,49 @@ class QQGroupAdmin(Star):
         )
 
     async def web_identities(self) -> dict[str, list[dict[str, Any]]]:
-        bindings = sorted(
-            (dict(binding) for binding in self._uid_bindings.values()),
-            key=lambda item: str(item.get("uid") or ""),
-        )
+        groups_by_id = {
+            str(item.get("group_openid") or ""): str(item.get("group_name") or "")
+            for item in (self.config.get("auto_review_groups") or [])
+            if isinstance(item, dict)
+        }
+        bindings = []
+        for binding in self._uid_bindings.values():
+            item = dict(binding)
+            item["group_names"] = [
+                groups_by_id.get(str(group_id), str(group_id))
+                for group_id in item.get("groups") or []
+            ]
+            bindings.append(item)
+        bindings.sort(key=lambda item: str(item.get("uid") or ""))
         suspicious = sorted(
-            (dict(item) for item in self._suspicious_members.values()),
+            (
+                {
+                    **dict(item),
+                    "group_name": groups_by_id.get(
+                        str(item.get("group_openid") or ""), ""
+                    ),
+                }
+                for item in self._suspicious_members.values()
+            ),
             key=lambda item: int(item.get("created_at") or 0),
             reverse=True,
         )
-        return {"bindings": bindings, "suspicious": suspicious}
+        violations = []
+        for record in self._violation_records:
+            item = dict(record)
+            item["group_name"] = item.get("group_name") or groups_by_id.get(
+                str(item.get("group_openid") or ""), ""
+            )
+            violations.append(item)
+        violations.sort(
+            key=lambda item: int(item.get("created_at") or 0), reverse=True
+        )
+        return {
+            "bindings": bindings,
+            "suspicious": suspicious,
+            "violations": violations,
+            "violation_records": violations,
+        }
 
     async def web_delete_binding(self, uid: str) -> dict[str, str]:
         if self._uid_bindings.pop(uid, None) is None:

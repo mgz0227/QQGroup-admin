@@ -47,6 +47,31 @@
     "hint": "命中后撤回所有已开启消息审查群中的普通成员消息，优先于群级规则。",
     "default": ""
   },
+  "global_ai_review_enabled": {
+    "type": "bool",
+    "description": "全局 AI 内容审核",
+    "hint": "对所有已开启群消息审查的群生效；关闭后不会调用 AI。主模型失败或返回无效结果时按顺序尝试回退模型。",
+    "default": false
+  },
+  "global_ai_review_provider_id": {
+    "type": "string",
+    "description": "全局 AI 审核主模型",
+    "hint": "填写 AstrBot 提供商 ID；留空时使用当前会话模型。",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "global_ai_review_fallback_provider_ids": {
+    "type": "list",
+    "description": "全局 AI 回退模型",
+    "hint": "按顺序填写多个提供商 ID，每行一个；最多 3 个，不能与主模型重复。主模型失败或返回无效结果时才会依次调用。",
+    "default": []
+  },
+  "global_ai_review_migrated": {
+    "type": "bool",
+    "description": "全局 AI 配置迁移标记",
+    "default": false,
+    "invisible": true
+  },
   "global_keyword_replies": {
     "type": "template_list",
     "description": "全局关键词回复",
@@ -256,23 +281,26 @@
           },
           "ai_review_enabled": {
             "type": "bool",
-            "description": "启用 AI 内容审核",
-            "hint": "使用所选模型审核未命中本地规则的消息；主备模型均异常时放行。",
-            "default": false
+            "description": "启用 AI 内容审核（已迁移到全局）",
+            "hint": "兼容旧配置；请在插件 WebUI 的全局运行配置中设置。",
+            "default": false,
+            "invisible": true
           },
           "ai_review_provider_id": {
             "type": "string",
-            "description": "AI 审核主模型",
-            "hint": "留空时使用当前会话模型。",
+            "description": "AI 审核主模型（已迁移到全局）",
+            "hint": "兼容旧配置；请在插件 WebUI 的全局运行配置中设置。",
             "_special": "select_provider",
-            "default": ""
+            "default": "",
+            "invisible": true
           },
           "ai_review_fallback_provider_id": {
             "type": "string",
-            "description": "AI 审核回退模型",
-            "hint": "仅在主模型不可用或返回无效结果时调用；留空表示不回退。",
+            "description": "AI 审核回退模型（已迁移到全局）",
+            "hint": "兼容旧配置；请在插件 WebUI 的全局运行配置中设置。",
             "_special": "select_provider",
-            "default": ""
+            "default": "",
+            "invisible": true
           },
           "image_spam_enabled": {
             "type": "bool",
