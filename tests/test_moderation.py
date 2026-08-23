@@ -117,6 +117,57 @@ class ModerationWindowsTest(unittest.TestCase):
         state.add_repeat("g", "new", "u", "member", "m", threshold=3, window=10, now=2)
         self.assertLessEqual(len(state.repeats), 2000)
 
+    def test_image_recall_limit_keeps_recent_messages_only(self):
+        state = ModerationWindows()
+        for index in range(1, 4):
+            self.assertEqual(
+                state.add_images(
+                    "g",
+                    "u",
+                    f"m{index}",
+                    1,
+                    threshold=4,
+                    window=10,
+                    recall_limit=2,
+                    now=index,
+                ),
+                [],
+            )
+        self.assertEqual(
+            state.add_images(
+                "g", "u", "m4", 1, threshold=4, window=10, recall_limit=2, now=4
+            ),
+            ["m3", "m4"],
+        )
+        self.assertEqual(
+            state.add_group_images(
+                "g",
+                "u1",
+                "m2",
+                1,
+                threshold=2,
+                min_members=2,
+                window=10,
+                recall_limit=1,
+                now=2,
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_group_images(
+                "g",
+                "u2",
+                "m3",
+                1,
+                threshold=2,
+                min_members=2,
+                window=10,
+                recall_limit=1,
+                now=3,
+            ),
+            ["m3"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

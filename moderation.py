@@ -67,6 +67,7 @@ class ModerationWindows:
         *,
         threshold: int,
         window: int,
+        recall_limit: int = 0,
         now: float | None = None,
     ) -> list[str]:
         if count <= 0:
@@ -80,7 +81,8 @@ class ModerationWindows:
         if len(events) < threshold:
             return []
         self.images.pop(key, None)
-        return list(dict.fromkeys(item[1] for item in events if item[1]))
+        message_ids = list(dict.fromkeys(item[1] for item in events if item[1]))
+        return message_ids[-recall_limit:] if recall_limit else message_ids
 
     def add_group_images(
         self,
@@ -92,6 +94,7 @@ class ModerationWindows:
         threshold: int,
         min_members: int,
         window: int,
+        recall_limit: int = 0,
         now: float | None = None,
     ) -> list[str]:
         if count <= 0:
@@ -109,7 +112,8 @@ class ModerationWindows:
         if len(events) < threshold or len(members) < min_members:
             return []
         self.group_images.pop(group_openid, None)
-        return list(dict.fromkeys(event[1] for event in events if event[1]))
+        message_ids = list(dict.fromkeys(event[1] for event in events if event[1]))
+        return message_ids[-recall_limit:] if recall_limit else message_ids
 
     def break_image_chain(self, group_openid: str, member_openid: str) -> None:
         self.images.pop((group_openid, member_openid), None)

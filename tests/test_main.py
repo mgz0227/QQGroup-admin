@@ -1368,10 +1368,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
+            client.api.messages[-1]["content"],
             '已禁言 45 秒：<qqbot-at-user id="member-1" />',
         )
-        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
+        self.assertIn('<qqbot-at-user id="member-1" />', client.api.messages[-1]["content"])
 
     async def test_standard_mute_stops_after_direct_mention_reply(self):
         plugin, client = self.plugin()
@@ -1390,7 +1391,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         self.assertTrue(
-            client.api.messages[-1]["markdown"]["content"].startswith(
+            client.api.messages[-1]["content"].startswith(
                 '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
             )
         )
@@ -1408,13 +1409,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
-        content = client.api.messages[-1]["markdown"]["content"]
+        content = client.api.messages[-1]["content"]
         self.assertLessEqual(len(content), 1000)
         self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
-        content = client.api.messages[-1]["markdown"]["content"]
+        content = client.api.messages[-1]["content"]
         mention = '<qqbot-at-user id="member-1" />'
         self.assertEqual(content, mention * (1000 // len(mention)))
 
@@ -1492,7 +1493,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         plugin.context.llm_generate = AsyncMock(
             side_effect=[
                 RuntimeError("primary unavailable"),
-                SimpleNamespace(role="assistant", completion_text="BLOCK"),
+                SimpleNamespace(
+                    role="assistant", completion_text="BLOCK confidence=95 reason=明确违规"
+                ),
             ]
         )
 
@@ -1525,6 +1528,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         plugin.context.llm_generate.assert_awaited_once()
+
+    async def test_ai_image_review_is_opt_in(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "")
+        plugin.context.llm_generate = AsyncMock()
+        self.assertFalse(
+            await plugin._ai_blocks_message(event, "", ["https://example.test/a.png"], "primary")
+        )
+        plugin.context.llm_generate.assert_not_awaited()
 
     def test_global_ai_config_migrates_once_and_ignores_group_overrides(self):
         client = FakeClient()
@@ -1567,7 +1579,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             side_effect=[
                 RuntimeError("primary unavailable"),
                 RuntimeError("first fallback unavailable"),
-                SimpleNamespace(role="assistant", completion_text="BLOCK"),
+                SimpleNamespace(
+                    role="assistant", completion_text="BLOCK confidence=95 reason=明确违规"
+                ),
             ]
         )
 
@@ -1609,6 +1623,36 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                     "global_ai_review_fallback_provider_ids": "fallback-1\nprimary",
                 }
             )
+
+        runtime = module.GroupAdminWeb._runtime_settings(
+            {
+                "global_ai_review_timeout_seconds": 90,
+                "global_ai_review_block_threshold": 97,
+                "global_ai_review_images_enabled": True,
+                "global_image_reject_keywords": "水印\n广告",
+                "global_image_ocr_enabled": True,
+                "global_image_ocr_provider_id": "vision",
+                "global_image_ocr_timeout_seconds": 8,
+                "global_image_ocr_max_images": 2,
+            }
+        )
+        self.assertEqual(runtime["global_ai_review_timeout_seconds"], 90)
+        self.assertEqual(runtime["global_ai_review_block_threshold"], 97)
+        self.assertTrue(runtime["global_ai_review_images_enabled"])
+        self.assertEqual(runtime["global_image_reject_keywords"], "水印\n广告")
+        self.assertEqual(runtime["global_image_ocr_max_images"], 2)
+
+    def test_ai_decision_requires_confidence_and_is_conservative(self):
+        self.assertIsNone(module.QQGroupAdmin._ai_decision("BLOCK", 95))
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision("BLOCK confidence=96 reason=x", 95)
+        )
+        self.assertFalse(
+            module.QQGroupAdmin._ai_decision("ALLOW confidence=1 reason=normal", 95)
+        )
+        self.assertFalse(
+            module.QQGroupAdmin._ai_decision("BLOCK confidence=80 reason=uncertain", 95)
+        )
 
     async def test_runtime_ai_save_checks_existing_fallbacks_when_provider_only_changes(self):
         plugin, _ = self.plugin()

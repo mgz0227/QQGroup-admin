@@ -66,6 +66,57 @@
     "hint": "按顺序填写多个提供商 ID，每行一个；最多 3 个，不能与主模型重复。主模型失败或返回无效结果时才会依次调用。",
     "default": []
   },
+  "global_ai_review_timeout_seconds": {
+    "type": "int",
+    "description": "AI 审核总超时（秒）",
+    "hint": "所有主模型和回退模型共享此总时限；超时后本条放行。",
+    "default": 20,
+    "slider": {"min": 5, "max": 120, "step": 5}
+  },
+  "global_ai_review_images_enabled": {
+    "type": "bool",
+    "description": "将图片发送给 AI 审核",
+    "hint": "关闭时 AI 只审核文字，普通截图不会触发视觉模型。",
+    "default": false
+  },
+  "global_ai_review_block_threshold": {
+    "type": "int",
+    "description": "AI 拦截置信度阈值",
+    "hint": "仅当模型返回 BLOCK 且置信度达到此值时撤回；建议 95 以上以减少误伤。",
+    "default": 95,
+    "slider": {"min": 50, "max": 100, "step": 5}
+  },
+  "global_image_reject_keywords": {
+    "type": "text",
+    "description": "全局图片文字撤回关键词",
+    "hint": "需要同时开启图片 OCR；命中图片中识别到的文字后撤回。",
+    "default": ""
+  },
+  "global_image_ocr_enabled": {
+    "type": "bool",
+    "description": "启用图片文字审核",
+    "hint": "默认关闭；开启后优先使用本地 OCR，配置模型后可用视觉模型补充。",
+    "default": false
+  },
+  "global_image_ocr_provider_id": {
+    "type": "string",
+    "description": "图片 OCR 回退模型",
+    "hint": "可选；只用于本地 OCR 未识别到文字时的图片转录。",
+    "_special": "select_provider",
+    "default": ""
+  },
+  "global_image_ocr_timeout_seconds": {
+    "type": "int",
+    "description": "图片 OCR 超时（秒）",
+    "default": 4,
+    "slider": {"min": 2, "max": 30, "step": 1}
+  },
+  "global_image_ocr_max_images": {
+    "type": "int",
+    "description": "单条最多 OCR 图片数",
+    "default": 1,
+    "slider": {"min": 1, "max": 3, "step": 1}
+  },
   "global_ai_review_migrated": {
     "type": "bool",
     "description": "全局 AI 配置迁移标记",
@@ -279,6 +330,17 @@
             "hint": "逗号、分号或换行分隔，命中后立即撤回。全局关键词优先。",
             "default": ""
           },
+          "image_keyword_review_enabled": {
+            "type": "bool",
+            "description": "启用本群图片文字关键词审核",
+            "hint": "全局图片文字关键词对所有群生效；此开关控制本群关键词。",
+            "default": false
+          },
+          "image_reject_keywords": {
+            "type": "text",
+            "description": "本群图片文字撤回关键词",
+            "default": ""
+          },
           "ai_review_enabled": {
             "type": "bool",
             "description": "启用 AI 内容审核（已迁移到全局）",
@@ -325,6 +387,13 @@
             "hint": "连续纯图片或表情来自至少这些不同成员时，也会触发撤回。",
             "default": 2,
             "slider": {"min": 2, "max": 10, "step": 1}
+          },
+          "image_spam_recall_count": {
+            "type": "int",
+            "description": "图片触发时最多撤回数量",
+            "hint": "达到阈值后只撤回最近这些图片消息，避免误伤更早的正常内容。",
+            "default": 5,
+            "slider": {"min": 1, "max": 50, "step": 1}
           },
           "repeat_review_enabled": {
             "type": "bool",

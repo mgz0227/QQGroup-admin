@@ -28,6 +28,7 @@ from .bilibili import (
     poll_qr_login,
     start_qr_login,
 )
+from .image_ocr import embedded_image_text, ocr_image_url
 from .moderation import ModerationWindows, normalize_message, valid_state_dict
 from .qq_api import (
     QQAPIError,
@@ -66,9 +67,20 @@ GROUP_TEMPLATE_KEY = "qq_group"
 GLOBAL_AI_ENABLED_KEY = "global_ai_review_enabled"
 GLOBAL_AI_PROVIDER_KEY = "global_ai_review_provider_id"
 GLOBAL_AI_FALLBACKS_KEY = "global_ai_review_fallback_provider_ids"
+GLOBAL_AI_TIMEOUT_KEY = "global_ai_review_timeout_seconds"
+GLOBAL_AI_IMAGES_KEY = "global_ai_review_images_enabled"
+GLOBAL_AI_BLOCK_THRESHOLD_KEY = "global_ai_review_block_threshold"
+GLOBAL_IMAGE_KEYWORDS_KEY = "global_image_reject_keywords"
+GLOBAL_IMAGE_OCR_ENABLED_KEY = "global_image_ocr_enabled"
+GLOBAL_IMAGE_OCR_PROVIDER_KEY = "global_image_ocr_provider_id"
+GLOBAL_IMAGE_OCR_TIMEOUT_KEY = "global_image_ocr_timeout_seconds"
+GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY = "global_image_ocr_max_images"
 GLOBAL_AI_MIGRATED_KEY = "global_ai_review_migrated"
 MAX_AI_FALLBACK_PROVIDERS = 3
 AI_REVIEW_TOTAL_TIMEOUT_SECONDS = 20
+AI_REVIEW_DEFAULT_BLOCK_THRESHOLD = 95
+IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS = 4
+IMAGE_OCR_DEFAULT_MAX_IMAGES = 1
 CONDITION_LOGICS = {"all", "any"}
 FALLBACK_ACTIONS = {"pending", "decline", "approve"}
 GROUP_ADMIN_ROLES = {"admin", "owner"}
@@ -320,6 +332,19 @@ class QQGroupAdmin(Star):
         if GLOBAL_AI_FALLBACKS_KEY not in self.config:
             self.config[GLOBAL_AI_FALLBACKS_KEY] = []
             changed = True
+        for key, default in (
+            (GLOBAL_AI_TIMEOUT_KEY, AI_REVIEW_TOTAL_TIMEOUT_SECONDS),
+            (GLOBAL_AI_IMAGES_KEY, False),
+            (GLOBAL_AI_BLOCK_THRESHOLD_KEY, AI_REVIEW_DEFAULT_BLOCK_THRESHOLD),
+            (GLOBAL_IMAGE_KEYWORDS_KEY, ""),
+            (GLOBAL_IMAGE_OCR_ENABLED_KEY, False),
+            (GLOBAL_IMAGE_OCR_PROVIDER_KEY, ""),
+            (GLOBAL_IMAGE_OCR_TIMEOUT_KEY, IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS),
+            (GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY, IMAGE_OCR_DEFAULT_MAX_IMAGES),
+        ):
+            if key not in self.config:
+                self.config[key] = default
+                changed = True
         normalized_fallbacks = normalize_provider_ids(
             self.config.get(GLOBAL_AI_FALLBACKS_KEY)
         )
@@ -380,10 +405,13 @@ class QQGroupAdmin(Star):
                 ("moderation_enabled", False),
                 ("moderation_exempt_admins", True),
                 ("message_reject_keywords", ""),
+                ("image_keyword_review_enabled", False),
+                ("image_reject_keywords", ""),
                 ("image_spam_enabled", False),
                 ("image_spam_count", 5),
                 ("image_spam_window_seconds", 15),
                 ("image_spam_group_min_members", 2),
+                ("image_spam_recall_count", 5),
                 ("repeat_review_enabled", False),
                 ("repeat_count", 4),
                 ("repeat_window_seconds", 30),
@@ -1003,7 +1031,7 @@ class QQGroupAdmin(Star):
                     )
                 else:
                     await self._clear_suspicious(group_openid, clicker)
-                    await self._send_group_markdown(
+                    await self._send_group_text(
                         client,
                         group_openid,
                         f"{self._mention(clicker)} 真人验证已通过，可以正常发言。",
@@ -1136,10 +1164,13 @@ class QQGroupAdmin(Star):
                 "moderation_enabled": False,
                 "moderation_exempt_admins": True,
                 "message_reject_keywords": "",
+                "image_keyword_review_enabled": False,
+                "image_reject_keywords": "",
                 "image_spam_enabled": False,
                 "image_spam_count": 5,
                 "image_spam_window_seconds": 15,
                 "image_spam_group_min_members": 2,
+                "image_spam_recall_count": 5,
                 "repeat_review_enabled": False,
                 "repeat_count": 4,
                 "repeat_window_seconds": 30,
@@ -1231,6 +1262,46 @@ class QQGroupAdmin(Star):
             "ai_fallback_provider_ids": normalize_provider_ids(
                 self.config.get(GLOBAL_AI_FALLBACKS_KEY)
             ),
+            "ai_timeout": self._bounded_int(
+                self.config.get(GLOBAL_AI_TIMEOUT_KEY),
+                AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
+                5,
+                120,
+            ),
+            "ai_images_enabled": bool(self.config.get(GLOBAL_AI_IMAGES_KEY, False)),
+            "ai_block_threshold": self._bounded_int(
+                self.config.get(GLOBAL_AI_BLOCK_THRESHOLD_KEY),
+                AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
+                50,
+                100,
+            ),
+            "global_image_keywords": parse_keywords(
+                str(self.config.get(GLOBAL_IMAGE_KEYWORDS_KEY) or "")
+            ),
+            "image_keyword_enabled": bool(
+                entry.get("image_keyword_review_enabled", False)
+            ),
+            "image_keywords": parse_keywords(
+                str(entry.get("image_reject_keywords") or "")
+            ),
+            "image_ocr_enabled": bool(
+                self.config.get(GLOBAL_IMAGE_OCR_ENABLED_KEY, False)
+            ),
+            "image_ocr_provider_id": str(
+                self.config.get(GLOBAL_IMAGE_OCR_PROVIDER_KEY) or ""
+            ).strip(),
+            "image_ocr_timeout": self._bounded_int(
+                self.config.get(GLOBAL_IMAGE_OCR_TIMEOUT_KEY),
+                IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS,
+                2,
+                30,
+            ),
+            "image_ocr_max_images": self._bounded_int(
+                self.config.get(GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY),
+                IMAGE_OCR_DEFAULT_MAX_IMAGES,
+                1,
+                3,
+            ),
             "image_enabled": bool(entry.get("image_spam_enabled", False)),
             "image_count": self._bounded_int(entry.get("image_spam_count"), 5, 2, 20),
             "image_window": self._bounded_int(
@@ -1238,6 +1309,9 @@ class QQGroupAdmin(Star):
             ),
             "image_group_min_members": self._bounded_int(
                 entry.get("image_spam_group_min_members"), 2, 2, 10
+            ),
+            "image_recall_count": self._bounded_int(
+                entry.get("image_spam_recall_count"), 5, 1, 50
             ),
             "repeat_enabled": bool(entry.get("repeat_review_enabled", False)),
             "repeat_count": self._bounded_int(entry.get("repeat_count"), 4, 3, 20),
@@ -1877,6 +1951,79 @@ class QQGroupAdmin(Star):
             has_text = bool(text.strip())
         return total, 0 if has_text else total
 
+    async def _image_ocr_text(
+        self,
+        event: AstrMessageEvent,
+        image_urls: list[str],
+        provider_id: str,
+        timeout_seconds: int,
+        max_images: int,
+    ) -> str:
+        """Best-effort OCR used only when image keyword review is enabled."""
+
+        values = [embedded_image_text(event)]
+        urls = list(dict.fromkeys(image_urls))[: max(1, min(3, max_images))]
+        for url in urls:
+            try:
+                value = await asyncio.wait_for(
+                    asyncio.to_thread(ocr_image_url, url, float(timeout_seconds)),
+                    timeout=float(timeout_seconds) + 1,
+                )
+            except Exception as exc:  # noqa: BLE001 - OCR is fail-open
+                self.logger.debug("本地图片 OCR 失败：%s", exc)
+                value = ""
+            if value:
+                values.append(value)
+
+        # A configured vision provider is an explicit opt-in fallback.  Keep it
+        # behind the existing semaphore so OCR cannot create an unbounded queue.
+        if provider_id and urls:
+            try:
+                async with asyncio.timeout(max(2, timeout_seconds)):
+                    async with self._ai_semaphore:
+                        response = await self.context.llm_generate(
+                            chat_provider_id=provider_id,
+                            prompt=(
+                                "只做图片文字转录，不进行内容审核。尽量原样输出可见文字；"
+                                "看不清时输出空行，不要猜测，不要添加解释。"
+                            ),
+                            image_urls=urls,
+                            system_prompt="你是保守的 OCR 引擎，只转录图片中确实可见的文字。",
+                        )
+                if str(getattr(response, "role", "")) != "err":
+                    value = str(getattr(response, "completion_text", "") or "").strip()
+                    if value:
+                        values.append(value)
+            except Exception as exc:  # noqa: BLE001 - OCR is fail-open
+                self.logger.debug("视觉模型图片 OCR 失败：%s", exc)
+        return "\n".join(dict.fromkeys(value for value in values if value))[:8000]
+
+    @staticmethod
+    def _ai_decision(value: str, threshold: int) -> bool | None:
+        """Return block/allow; ambiguous model output fails open."""
+
+        text = str(value or "").strip().upper()
+        text = re.sub(r"^```(?:JSON)?\s*|\s*```$", "", text).strip()
+        first = re.search(r"\b(ALLOW|BLOCK)\b", text)
+        if first and first.group(1) == "ALLOW":
+            return False
+        if first and first.group(1) == "BLOCK":
+            pass
+        elif re.search(r"^(允许|通过)\b", text):
+            return False
+        elif not re.search(r"^(拦截|拒绝)\b", text):
+            return None
+        match = re.search(
+            r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})", text
+        )
+        if not match:
+            return None
+        try:
+            confidence = int(match.group(1))
+        except ValueError:
+            return None
+        return confidence >= max(50, min(100, int(threshold)))
+
     async def _ai_blocks_message(
         self,
         event: AstrMessageEvent,
@@ -1884,12 +2031,20 @@ class QQGroupAdmin(Star):
         image_urls: list[str],
         provider_id: str = "",
         fallback_provider_ids: Any = "",
+        timeout_seconds: int = AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
+        image_review_enabled: bool = False,
+        block_threshold: int = AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
     ) -> bool:
-        if not text and not image_urls:
+        vision_urls = image_urls if image_review_enabled else []
+        if not text and not vision_urls:
             return False
         prompt = (
-            "审核以下 QQ 群消息是否包含色情、暴力威胁、违法交易、诈骗引流、"
-            "人身攻击或泄露隐私。只输出 ALLOW 或 BLOCK。\n消息：" + (text or "[仅图片]")
+            "审核以下 QQ 群消息。只有在明确的色情、暴力威胁、违法交易、诈骗引流、"
+            "严重人身攻击/隐私泄露，或明确煽动自伤他伤时才拦截。普通吐槽、轻度脏话、"
+            "玩笑、游戏术语、角色名、单个词和游戏/动漫截图中的文字必须放行。"
+            "请只输出一行：ALLOW confidence=0-100 reason=... 或 "
+            "BLOCK confidence=0-100 reason=...。\n消息："
+            + (text[:4000] if text else "[仅图片]")
         )
         providers = []
         if provider_id:
@@ -1905,7 +2060,10 @@ class QQGroupAdmin(Star):
                 self.logger.debug("读取当前 AI 审核模型失败：%s", exc)
         providers.extend(normalize_provider_ids(fallback_provider_ids))
         errors = []
-        deadline = time.monotonic() + AI_REVIEW_TOTAL_TIMEOUT_SECONDS
+        total_timeout = self._bounded_int(
+            timeout_seconds, AI_REVIEW_TOTAL_TIMEOUT_SECONDS, 5, 120
+        )
+        deadline = time.monotonic() + total_timeout
         for current_provider_id in dict.fromkeys(
             str(value or "").strip() for value in providers
         ):
@@ -1916,29 +2074,32 @@ class QQGroupAdmin(Star):
                 errors.append("达到 AI 审核总超时")
                 break
             try:
-                async with asyncio.timeout(min(15, remaining)):
+                async with asyncio.timeout(min(30, remaining)):
                     async with self._ai_semaphore:
                         response = await self.context.llm_generate(
                             chat_provider_id=current_provider_id,
                             prompt=prompt,
-                            image_urls=image_urls or None,
-                            system_prompt="你是严格但不误伤正常讨论的群消息审核器。",
+                            image_urls=vision_urls or None,
+                            system_prompt=(
+                                "你是保守的群消息审核器，宁可放行不确定内容，"
+                                "不得把普通聊天或游戏截图判为违规。"
+                            ),
                         )
                 if str(getattr(response, "role", "")) == "err":
                     raise RuntimeError("模型返回错误响应")
-                decision = str(
-                    getattr(response, "completion_text", "") or ""
-                ).strip().upper()
-                if decision not in {"ALLOW", "BLOCK"}:
-                    raise RuntimeError("模型未返回 ALLOW 或 BLOCK")
+                raw_decision = str(getattr(response, "completion_text", "") or "")
+                decision = self._ai_decision(raw_decision, block_threshold)
+                if decision is None:
+                    raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
                 self.logger.debug(
                     "AI 群消息审核完成：provider=%s decision=%s",
                     current_provider_id,
-                    decision,
+                    "BLOCK" if decision else "ALLOW",
                 )
-                return decision == "BLOCK"
+                return decision
             except Exception as exc:  # noqa: BLE001 - try configured fallback
-                errors.append(f"{current_provider_id}: {exc}")
+                detail = str(exc).strip() or type(exc).__name__
+                errors.append(f"{current_provider_id}: {detail}")
                 self.logger.debug(
                     "AI 群消息审核模型不可用：provider=%s error=%s",
                     current_provider_id,
@@ -1991,7 +2152,7 @@ class QQGroupAdmin(Star):
         message_id: str = "",
     ) -> None:
         _, group_openid, _ = self._context(event)
-        await self._send_group_markdown(
+        await self._send_group_text(
             self._client(event),
             group_openid,
             f"{self._mention(member_openid)} {reason}",
@@ -2162,13 +2323,31 @@ class QQGroupAdmin(Star):
         image_count, pure_image_count = self._image_like_counts(event, text, images)
         reason = ""
         recall_ids: list[str] = []
+        ocr_text = ""
         if settings["image_enabled"] and image_count == 0:
             self._moderation.break_image_chain(group_openid, member_openid)
         if matched_keyword(text, settings["global_keywords"]):
             reason = "消息命中全局禁止关键词，已撤回。"
         elif matched_keyword(text, settings["keywords"]):
             reason = "消息命中本群禁止关键词，已撤回。"
-        elif settings["image_enabled"]:
+        elif settings["image_ocr_enabled"] and image_count and (
+            settings["global_image_keywords"]
+            or (settings["image_keyword_enabled"] and settings["image_keywords"])
+        ):
+            ocr_text = await self._image_ocr_text(
+                event,
+                images,
+                settings["image_ocr_provider_id"],
+                settings["image_ocr_timeout"],
+                settings["image_ocr_max_images"],
+            )
+            if matched_keyword(ocr_text, settings["global_image_keywords"]):
+                reason = "图片文字命中全局禁止关键词，已撤回。"
+            elif settings["image_keyword_enabled"] and matched_keyword(
+                ocr_text, settings["image_keywords"]
+            ):
+                reason = "图片文字命中本群禁止关键词，已撤回。"
+        if not reason and settings["image_enabled"]:
             image_recall_ids = self._moderation.add_images(
                 group_openid,
                 member_openid,
@@ -2176,6 +2355,7 @@ class QQGroupAdmin(Star):
                 image_count,
                 threshold=settings["image_count"],
                 window=settings["image_window"],
+                recall_limit=settings["image_recall_count"],
             )
             group_recall_ids = self._moderation.add_group_images(
                 group_openid,
@@ -2185,6 +2365,7 @@ class QQGroupAdmin(Star):
                 threshold=settings["image_count"],
                 min_members=settings["image_group_min_members"],
                 window=settings["image_window"],
+                recall_limit=settings["image_recall_count"],
             )
             recall_ids = list(dict.fromkeys(image_recall_ids + group_recall_ids))
             if group_recall_ids:
@@ -2218,6 +2399,9 @@ class QQGroupAdmin(Star):
                 images,
                 settings["ai_provider_id"],
                 settings["ai_fallback_provider_ids"],
+                settings["ai_timeout"],
+                settings["ai_images_enabled"],
+                settings["ai_block_threshold"],
             )
         ):
             reason = "消息未通过 AI 内容审核，已撤回。"
@@ -2269,7 +2453,8 @@ class QQGroupAdmin(Star):
             group_openid,
             member_openid,
             reason,
-            content=text or ("[图片]" * max(1, len(images))),
+            content=(text or ("[图片]" * max(1, len(images))))
+            + (f"\n[图片文字]\n{ocr_text[:2000]}" if ocr_text else ""),
             message_id=message_id,
             action_member_openid=target_member,
             request={
@@ -3126,8 +3311,10 @@ class QQGroupAdmin(Star):
         _, group_openid, _ = self._context(event)
         kwargs = {
             "group_openid": group_openid,
-            "msg_type": 2,
-            "markdown": {"content": text},
+            # QQ mention tags are parsed reliably in the text chain.  Markdown
+            # responses are rendered as literal XML by some QQ clients.
+            "msg_type": 0,
+            "content": text,
         }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if message_id:
@@ -3570,12 +3757,15 @@ class QQGroupAdmin(Star):
                 if moderation["ai_fallback_provider_ids"]
                 else ""
             ),
+            "image_keyword_review_enabled": moderation["image_keyword_enabled"],
+            "image_reject_keywords": "\n".join(moderation["image_keywords"]),
             "image_spam_enabled": moderation["image_enabled"],
             "image_spam_count": moderation["image_count"],
             "image_spam_window_seconds": moderation["image_window"],
             "image_spam_group_min_members": moderation[
                 "image_group_min_members"
             ],
+            "image_spam_recall_count": moderation["image_recall_count"],
             "repeat_review_enabled": moderation["repeat_enabled"],
             "repeat_count": moderation["repeat_count"],
             "repeat_window_seconds": moderation["repeat_window"],
@@ -3709,6 +3899,42 @@ class QQGroupAdmin(Star):
             ).strip(),
             "global_ai_review_fallback_provider_ids": normalize_provider_ids(
                 self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+            ),
+            "global_ai_review_timeout_seconds": self._bounded_int(
+                self.config.get(GLOBAL_AI_TIMEOUT_KEY),
+                AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
+                5,
+                120,
+            ),
+            "global_ai_review_images_enabled": bool(
+                self.config.get(GLOBAL_AI_IMAGES_KEY, False)
+            ),
+            "global_ai_review_block_threshold": self._bounded_int(
+                self.config.get(GLOBAL_AI_BLOCK_THRESHOLD_KEY),
+                AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
+                50,
+                100,
+            ),
+            "global_image_reject_keywords": str(
+                self.config.get(GLOBAL_IMAGE_KEYWORDS_KEY) or ""
+            ),
+            "global_image_ocr_enabled": bool(
+                self.config.get(GLOBAL_IMAGE_OCR_ENABLED_KEY, False)
+            ),
+            "global_image_ocr_provider_id": str(
+                self.config.get(GLOBAL_IMAGE_OCR_PROVIDER_KEY) or ""
+            ).strip(),
+            "global_image_ocr_timeout_seconds": self._bounded_int(
+                self.config.get(GLOBAL_IMAGE_OCR_TIMEOUT_KEY),
+                IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS,
+                2,
+                30,
+            ),
+            "global_image_ocr_max_images": self._bounded_int(
+                self.config.get(GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY),
+                IMAGE_OCR_DEFAULT_MAX_IMAGES,
+                1,
+                3,
             ),
             # Compatibility aliases for older custom pages; behavior remains global.
             "ai_review_enabled": bool(self.config.get(GLOBAL_AI_ENABLED_KEY, False)),
@@ -3862,12 +4088,17 @@ class QQGroupAdmin(Star):
                 "moderation_enabled": bool(payload["moderation_enabled"]),
                 "moderation_exempt_admins": bool(payload["moderation_exempt_admins"]),
                 "message_reject_keywords": str(payload["message_reject_keywords"]),
+                "image_keyword_review_enabled": bool(
+                    payload["image_keyword_review_enabled"]
+                ),
+                "image_reject_keywords": str(payload["image_reject_keywords"]),
                 "image_spam_enabled": bool(payload["image_spam_enabled"]),
                 "image_spam_count": int(payload["image_spam_count"]),
                 "image_spam_window_seconds": int(payload["image_spam_window_seconds"]),
                 "image_spam_group_min_members": int(
                     payload["image_spam_group_min_members"]
                 ),
+                "image_spam_recall_count": int(payload["image_spam_recall_count"]),
                 "repeat_review_enabled": bool(payload["repeat_review_enabled"]),
                 "repeat_count": int(payload["repeat_count"]),
                 "repeat_window_seconds": int(payload["repeat_window_seconds"]),

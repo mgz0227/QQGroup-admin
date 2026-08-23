@@ -178,6 +178,14 @@
             <label class="checkbox runtime-toggle"><input id="runtime-ai-enabled" type="checkbox"><span>启用全局 AI 内容审核</span></label>
             <label><span>主模型</span><select id="runtime-ai-provider"></select></label>
             <label class="wide"><span>回退模型（可多选，按顺序尝试）</span><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，主模型不能重复选择。</small></label>
+            <label><span>审核总超时（秒）</span><input id="runtime-ai-timeout" type="number" min="5" max="120" required></label>
+            <label><span>拦截置信度阈值</span><input id="runtime-ai-threshold" type="number" min="50" max="100" required></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-images" type="checkbox"><span>启用 AI 图片审核</span></label>
+            <label class="wide"><span>全局图片文字撤回关键词</span><textarea id="runtime-image-reject-keywords" rows="3" placeholder="开启图片 OCR 后生效，每行一个关键词"></textarea></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-image-ocr-enabled" type="checkbox"><span>启用图片 OCR 关键词审核</span></label>
+            <label><span>OCR 模型（可选）</span><select id="runtime-image-ocr-provider"></select></label>
+            <label><span>OCR 超时（秒）</span><input id="runtime-image-ocr-timeout" type="number" min="2" max="30" required></label>
+            <label><span>单条最多 OCR 图片数</span><input id="runtime-image-ocr-max-images" type="number" min="1" max="3" required></label>
 
             <div class="section-title wide">B站推送</div>
             <label><span>直播轮询间隔（秒）</span><input id="runtime-live-interval" type="number" min="30" max="600" required></label>
@@ -278,6 +286,14 @@
             <span>消息撤回关键词</span>
             <textarea id="message-reject-keywords" rows="3" placeholder="每行一个关键词"></textarea>
           </label>
+          <label class="checkbox">
+            <input id="image-keyword-review-enabled" type="checkbox">
+            <span>启用本群图片文字关键词审核</span>
+          </label>
+          <label class="wide">
+            <span>本群图片文字撤回关键词</span>
+            <textarea id="image-reject-keywords" rows="3" placeholder="需要先在全局运行配置开启图片 OCR"></textarea>
+          </label>
           <div class="wide keyword-reply-editor">
             <div class="rule-list-header">
               <span>单群关键词回复</span>
@@ -294,6 +310,7 @@
           <label><span>连续图片数量</span><input id="image-spam-count" type="number" min="2" max="20"></label>
           <label><span>发图时间窗（秒）</span><input id="image-spam-window" type="number" min="3" max="120"></label>
           <label><span>跨成员触发人数</span><input id="image-spam-group-min-members" type="number" min="2" max="10"></label>
+          <label><span>触发时最多撤回图片数</span><input id="image-spam-recall-count" type="number" min="1" max="50"></label>
           <label class="checkbox wide">
             <input id="repeat-review-enabled" type="checkbox">
             <span>集中复读检测并随机禁言参与者</span>
@@ -392,10 +409,13 @@
             <textarea id="batch-whitelist" rows="4" placeholder="每行一个 QQ 号" disabled></textarea>
           </fieldset>
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-message-keywords" data-field="message_reject_keywords"><span>覆盖消息撤回关键词</span></label><textarea id="batch-message-keywords" rows="3" disabled></textarea></fieldset>
+          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-image-keywords" data-field="image_reject_keywords"><span>覆盖图片文字撤回关键词</span></label><textarea id="batch-image-keywords" rows="3" disabled></textarea></fieldset>
+          <label><span>图片文字审核</span><select id="batch-image-keyword-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-bilibili-uids" data-field="bilibili_uids"><span>覆盖 B站 UP 主 UID</span></label><textarea id="batch-bilibili-uids" rows="3" disabled></textarea></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-count" data-field="image_spam_count"><span>覆盖连续图片数量</span></label><input id="batch-image-count" type="number" min="2" max="20" value="5" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-window" data-field="image_spam_window_seconds"><span>覆盖发图时间窗</span></label><input id="batch-image-window" type="number" min="3" max="120" value="15" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-group-members" data-field="image_spam_group_min_members"><span>覆盖跨成员触发人数</span></label><input id="batch-image-group-members" type="number" min="2" max="10" value="2" disabled></fieldset>
+          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-recall-count" data-field="image_spam_recall_count"><span>覆盖图片撤回数量</span></label><input id="batch-image-recall-count" type="number" min="1" max="50" value="5" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-count" data-field="repeat_count"><span>覆盖复读次数</span></label><input id="batch-repeat-count" type="number" min="3" max="20" value="4" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-window" data-field="repeat_window_seconds"><span>覆盖复读时间窗</span></label><input id="batch-repeat-window" type="number" min="5" max="120" value="30" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-min" data-field="repeat_mute_min_seconds"><span>覆盖最短禁言秒数</span></label><input id="batch-mute-min" type="number" min="1" max="2592000" value="60" disabled></fieldset>

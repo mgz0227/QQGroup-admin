@@ -724,6 +724,13 @@
     element("runtime-message-reject-keywords").value = runtimeSettings.global_message_reject_keywords || "";
     element("runtime-mute-message").value = runtimeSettings.mute_success_message || "";
     element("runtime-ai-enabled").checked = runtimeSettings.global_ai_review_enabled === true;
+    element("runtime-ai-timeout").value = runtimeSettings.global_ai_review_timeout_seconds || 20;
+    element("runtime-ai-threshold").value = runtimeSettings.global_ai_review_block_threshold || 95;
+    element("runtime-ai-images").checked = runtimeSettings.global_ai_review_images_enabled === true;
+    element("runtime-image-reject-keywords").value = runtimeSettings.global_image_reject_keywords || "";
+    element("runtime-image-ocr-enabled").checked = runtimeSettings.global_image_ocr_enabled === true;
+    element("runtime-image-ocr-timeout").value = runtimeSettings.global_image_ocr_timeout_seconds || 4;
+    element("runtime-image-ocr-max-images").value = runtimeSettings.global_image_ocr_max_images || 1;
     element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
     element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
     element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
@@ -736,8 +743,14 @@
       "runtime-ai-fallback-providers",
       runtimeSettings.global_ai_review_fallback_provider_ids || []
     );
+    fillProviderSelect(
+      "runtime-image-ocr-provider",
+      "不使用视觉 OCR 模型",
+      runtimeSettings.global_image_ocr_provider_id || ""
+    );
     element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
+    element("runtime-image-ocr-provider").disabled = !element("runtime-image-ocr-enabled").checked;
   }
 
   function saveRuntime(event) {
@@ -753,6 +766,14 @@
       global_ai_review_enabled: element("runtime-ai-enabled").checked,
       global_ai_review_provider_id: element("runtime-ai-provider").value,
       global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
+      global_ai_review_timeout_seconds: Number(element("runtime-ai-timeout").value),
+      global_ai_review_block_threshold: Number(element("runtime-ai-threshold").value),
+      global_ai_review_images_enabled: element("runtime-ai-images").checked,
+      global_image_reject_keywords: element("runtime-image-reject-keywords").value,
+      global_image_ocr_enabled: element("runtime-image-ocr-enabled").checked,
+      global_image_ocr_provider_id: element("runtime-image-ocr-provider").value,
+      global_image_ocr_timeout_seconds: Number(element("runtime-image-ocr-timeout").value),
+      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value),
       bilibili_live_interval_seconds: Number(element("runtime-live-interval").value),
       bilibili_dynamic_interval_seconds: Number(element("runtime-dynamic-interval").value)
     };
@@ -978,11 +999,14 @@
     element("moderation-enabled").checked = group.moderation_enabled === true;
     element("moderation-exempt-admins").checked = group.moderation_exempt_admins !== false;
     element("message-reject-keywords").value = group.message_reject_keywords || "";
+    element("image-keyword-review-enabled").checked = group.image_keyword_review_enabled === true;
+    element("image-reject-keywords").value = group.image_reject_keywords || "";
     renderKeywordReplies(group.keyword_replies);
     element("image-spam-enabled").checked = group.image_spam_enabled === true;
     element("image-spam-count").value = group.image_spam_count || 5;
     element("image-spam-window").value = group.image_spam_window_seconds || 15;
     element("image-spam-group-min-members").value = group.image_spam_group_min_members || 2;
+    element("image-spam-recall-count").value = group.image_spam_recall_count || 5;
     element("repeat-review-enabled").checked = group.repeat_review_enabled === true;
     element("repeat-count").value = group.repeat_count || 4;
     element("repeat-window").value = group.repeat_window_seconds || 30;
@@ -1014,11 +1038,14 @@
       moderation_enabled: element("moderation-enabled").checked,
       moderation_exempt_admins: element("moderation-exempt-admins").checked,
       message_reject_keywords: element("message-reject-keywords").value,
+      image_keyword_review_enabled: element("image-keyword-review-enabled").checked,
+      image_reject_keywords: element("image-reject-keywords").value,
       keyword_replies: readKeywordReplies(),
       image_spam_enabled: element("image-spam-enabled").checked,
       image_spam_count: Number(element("image-spam-count").value),
       image_spam_window_seconds: Number(element("image-spam-window").value),
       image_spam_group_min_members: Number(element("image-spam-group-min-members").value),
+      image_spam_recall_count: Number(element("image-spam-recall-count").value),
       repeat_review_enabled: element("repeat-review-enabled").checked,
       repeat_count: Number(element("repeat-count").value),
       repeat_window_seconds: Number(element("repeat-window").value),
@@ -1062,6 +1089,7 @@
       ["batch-moderation-enabled", "moderation_enabled", true],
       ["batch-moderation-exempt-admins", "moderation_exempt_admins", true],
       ["batch-image-spam-enabled", "image_spam_enabled", true],
+      ["batch-image-keyword-enabled", "image_keyword_review_enabled", true],
       ["batch-repeat-review-enabled", "repeat_review_enabled", true],
       ["batch-bilibili-dynamic-enabled", "bilibili_dynamic_enabled", true],
       ["batch-bilibili-live-enabled", "bilibili_live_enabled", true]
@@ -1213,6 +1241,9 @@
   element("runtime-ai-enabled").addEventListener("change", function (event) {
     element("runtime-ai-provider").disabled = !event.target.checked;
     element("runtime-ai-fallback-providers").disabled = !event.target.checked;
+  });
+  element("runtime-image-ocr-enabled").addEventListener("change", function (event) {
+    element("runtime-image-ocr-provider").disabled = !event.target.checked;
   });
   element("start-bilibili-login").addEventListener("click", startBilibiliLogin);
   element("edit-form").addEventListener("submit", save);
