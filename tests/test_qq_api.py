@@ -157,6 +157,44 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("json", kwargs)
 
+    async def test_group_command_panel_routes(self):
+        client = FakeClient(FakeResponse(200, {}))
+        api = QQGroupAPI(client)
+        panel = {
+            "items": [
+                {
+                    "type": "command",
+                    "name": "/审核设置",
+                    "desc": "打开群审核设置",
+                    "only_admin": True,
+                }
+            ],
+            "remark": "QQGroup-admin",
+        }
+
+        await api.list_group_panels()
+        await api.create_group_panel(panel)
+        await api.update_panel("panel/id", panel)
+
+        calls = client.http._session.calls
+        self.assertEqual(
+            [(method, url) for method, url, _ in calls],
+            [
+                (
+                    "GET",
+                    "https://api.bot.qq.com/v2/panels?scope=group&limit=50",
+                ),
+                ("POST", "https://api.bot.qq.com/v2/panels"),
+                ("PUT", "https://api.bot.qq.com/v2/panels/panel%2Fid"),
+            ],
+        )
+        self.assertNotIn("json", calls[0][2])
+        self.assertEqual(
+            calls[1][2]["json"],
+            {"scope": "group", "target_type": "all", "panel": panel},
+        )
+        self.assertEqual(calls[2][2]["json"], {"panel": panel})
+
     async def test_error_keeps_code_and_trace_id(self):
         client = FakeClient(
             FakeResponse(

@@ -501,6 +501,91 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertEqual(client.api.messages, [])
 
+    async def test_sync_command_panel_creates_then_updates_managed_panel(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client)
+        api = SimpleNamespace(
+            list_group_panels=AsyncMock(
+                side_effect=[
+                    {"records": []},
+                    {
+                        "records": [
+                            {
+                                "panel_id": "panel-1",
+                                "target_type": "all",
+                                "panel": {
+                                    "remark": module.COMMAND_PANEL_REMARK,
+                                },
+                            }
+                        ]
+                    },
+                ]
+            ),
+            create_group_panel=AsyncMock(return_value={"panel_id": "panel-1"}),
+            update_panel=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        created = [
+            result async for result in plugin.sync_command_panel(event)
+        ]
+        updated = [
+            result async for result in plugin.sync_command_panel(event)
+        ]
+
+        api.create_group_panel.assert_awaited_once_with(module.COMMAND_PANEL)
+        api.update_panel.assert_awaited_once_with(
+            "panel-1",
+            module.COMMAND_PANEL,
+        )
+        self.assertIn("已创建", created[0])
+        self.assertIn("已更新", updated[0])
+
+    async def test_sync_command_panel_serializes_concurrent_creation(self):
+        plugin, client = self.plugin()
+        records = []
+        create_count = 0
+
+        async def list_group_panels():
+            await asyncio.sleep(0)
+            return {"records": list(records)}
+
+        async def create_group_panel(_panel):
+            nonlocal create_count
+            await asyncio.sleep(0)
+            create_count += 1
+            records.append(
+                {
+                    "panel_id": "panel-1",
+                    "target_type": "all",
+                    "panel": {"remark": module.COMMAND_PANEL_REMARK},
+                }
+            )
+            return {"panel_id": "panel-1"}
+
+        api = SimpleNamespace(
+            list_group_panels=list_group_panels,
+            create_group_panel=create_group_panel,
+            update_panel=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        async def sync():
+            return [
+                result
+                async for result in plugin.sync_command_panel(
+                    FakeEvent(client)
+                )
+            ]
+
+        await asyncio.gather(sync(), sync())
+
+        self.assertEqual(create_count, 1)
+        api.update_panel.assert_awaited_once_with(
+            "panel-1",
+            module.COMMAND_PANEL,
+        )
+
     async def test_keyword_reply_cooldown_and_recall(self):
         plugin, client = self.plugin()
         plugin.config.update(

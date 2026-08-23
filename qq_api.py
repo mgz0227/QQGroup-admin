@@ -273,6 +273,28 @@ class QQGroupAPI:
         group = self._id(group_openid, "群 OpenID")
         return await self._request("GET", f"/v2/groups/{group}/bot_state")
 
+    async def list_group_panels(self) -> dict[str, Any]:
+        return await self._request("GET", "/v2/panels?scope=group&limit=50")
+
+    async def create_group_panel(self, panel: dict[str, Any]) -> dict[str, Any]:
+        return await self._request(
+            "POST",
+            "/v2/panels",
+            body={"scope": "group", "target_type": "all", "panel": panel},
+        )
+
+    async def update_panel(
+        self,
+        panel_id: str,
+        panel: dict[str, Any],
+    ) -> Any:
+        panel_path = self._id(panel_id, "指令面板 ID")
+        return await self._request(
+            "PUT",
+            f"/v2/panels/{panel_path}",
+            body={"panel": panel},
+        )
+
     async def list_join_requests(
         self,
         group_openid: str,

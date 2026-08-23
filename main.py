@@ -67,6 +67,36 @@ SETTINGS_MESSAGE_TTL = 45
 VERIFICATION_TOKEN_TTL = 5 * 60
 JOIN_LIST_LIMIT = 5
 RECENT_RECALL_LIMIT = 50
+COMMAND_PANEL_REMARK = "astrbot_plugin_qqgroup_admin managed"
+COMMAND_PANEL = {
+    "items": [
+        {
+            "type": "command",
+            "name": "/审核设置",
+            "desc": "配置审核与消息审查",
+            "only_admin": True,
+        },
+        {
+            "type": "command",
+            "name": "/申请列表",
+            "desc": "查看待处理入群申请",
+            "only_admin": True,
+        },
+        {
+            "type": "command",
+            "name": "/禁言状态",
+            "desc": "查看成员与全员禁言",
+            "only_admin": True,
+        },
+        {
+            "type": "command",
+            "name": "/机器人状态",
+            "desc": "检查机器人群内权限",
+            "only_admin": True,
+        },
+    ],
+    "remark": COMMAND_PANEL_REMARK,
+}
 GROUP_TEMPLATE_KEY = "qq_group"
 GLOBAL_AI_ENABLED_KEY = "global_ai_review_enabled"
 GLOBAL_AI_PROVIDER_KEY = "global_ai_review_provider_id"
@@ -236,6 +266,7 @@ class QQGroupAdmin(Star):
 /机器人状态
 /申请列表 [游标]
 /审核设置
+/同步指令面板
 /禁言状态
 /禁言 <成员OpenID|@成员> <60|30m|2h|7d>
 /解禁 <成员OpenID|@成员>
@@ -258,6 +289,7 @@ class QQGroupAdmin(Star):
         self._last_approval_at = 0.0
         self._recall_lock = asyncio.Lock()
         self._last_recall_at = 0.0
+        self._command_panel_lock = asyncio.Lock()
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._verification_tokens: dict[str, tuple[float, str, str, int]] = {}
@@ -3085,6 +3117,44 @@ class QQGroupAdmin(Star):
                     f"成员数：{self._value(data.get('group_member_num'))}",
                 ]
             )
+        )
+
+    @qq_admin_command("同步指令面板")
+    async def sync_command_panel(self, event: AstrMessageEvent):
+        """创建或更新由本插件管理的 QQ 原生群指令面板。"""
+        self._context(event)
+        api = self._api(event)
+        async with self._command_panel_lock:
+            data = await api.list_group_panels()
+            records = data.get("records") if isinstance(data, dict) else None
+            if not isinstance(records, list):
+                raise TypeError("QQ API 未返回有效的指令面板列表")
+            managed = [
+                record
+                for record in records
+                if isinstance(record, dict)
+                and isinstance(record.get("panel"), dict)
+                and record["panel"].get("remark") == COMMAND_PANEL_REMARK
+            ]
+            if len(managed) > 1:
+                raise RuntimeError(
+                    "检测到多个由本插件管理的指令面板，请先在 QQ 开放平台清理"
+                )
+            if managed:
+                if managed[0].get("target_type") != "all":
+                    raise RuntimeError(
+                        "插件指令面板已改为指定群范围，请先在 QQ 开放平台清理"
+                    )
+                panel_id = str(managed[0].get("panel_id") or "").strip()
+                if not panel_id:
+                    raise RuntimeError("QQ API 未返回指令面板 ID")
+                await api.update_panel(panel_id, COMMAND_PANEL)
+                action = "更新"
+            else:
+                await api.create_group_panel(COMMAND_PANEL)
+                action = "创建"
+        yield event.plain_result(
+            f"已{action} QQ 原生群指令面板，共 {len(COMMAND_PANEL['items'])} 条命令。"
         )
 
     @qq_group_command("审核设置")
