@@ -458,6 +458,30 @@
       .finally(function () { button.disabled = false; });
   }
 
+  function fillProviderSelect(id, emptyLabel, selectedValue) {
+    var select = element(id);
+    var providers = Array.isArray(runtimeSettings.providers) ? runtimeSettings.providers : [];
+    select.replaceChildren();
+    var empty = document.createElement("option");
+    empty.value = "";
+    empty.textContent = emptyLabel;
+    select.appendChild(empty);
+    providers.forEach(function (provider) {
+      if (!provider || !provider.id) return;
+      var option = document.createElement("option");
+      option.value = provider.id;
+      option.textContent = provider.label || provider.model || provider.id;
+      select.appendChild(option);
+    });
+    if (selectedValue && !providers.some(function (provider) { return provider.id === selectedValue; })) {
+      var missing = document.createElement("option");
+      missing.value = selectedValue;
+      missing.textContent = "已不可用：" + selectedValue;
+      select.appendChild(missing);
+    }
+    select.value = selectedValue || "";
+  }
+
   function fillRuntime(settings) {
     runtimeSettings = settings || {};
     element("runtime-review-interval").value = runtimeSettings.uid_review_interval_seconds || 60;
@@ -469,6 +493,10 @@
     element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
     element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
     element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
+    fillProviderSelect("ai-review-provider", "使用当前会话模型", "");
+    fillProviderSelect("ai-review-fallback-provider", "不使用回退模型", "");
+    fillProviderSelect("batch-ai-provider", "使用当前会话模型", "");
+    fillProviderSelect("batch-ai-fallback-provider", "不使用回退模型", "");
   }
 
   function saveRuntime(event) {
@@ -708,9 +736,20 @@
     element("message-reject-keywords").value = group.message_reject_keywords || "";
     renderKeywordReplies(group.keyword_replies);
     element("ai-review-enabled").checked = group.ai_review_enabled === true;
+    fillProviderSelect(
+      "ai-review-provider",
+      "使用当前会话模型",
+      group.ai_review_provider_id || ""
+    );
+    fillProviderSelect(
+      "ai-review-fallback-provider",
+      "不使用回退模型",
+      group.ai_review_fallback_provider_id || ""
+    );
     element("image-spam-enabled").checked = group.image_spam_enabled === true;
     element("image-spam-count").value = group.image_spam_count || 5;
     element("image-spam-window").value = group.image_spam_window_seconds || 15;
+    element("image-spam-group-min-members").value = group.image_spam_group_min_members || 2;
     element("repeat-review-enabled").checked = group.repeat_review_enabled === true;
     element("repeat-count").value = group.repeat_count || 4;
     element("repeat-window").value = group.repeat_window_seconds || 30;
@@ -744,9 +783,12 @@
       message_reject_keywords: element("message-reject-keywords").value,
       keyword_replies: readKeywordReplies(),
       ai_review_enabled: element("ai-review-enabled").checked,
+      ai_review_provider_id: element("ai-review-provider").value,
+      ai_review_fallback_provider_id: element("ai-review-fallback-provider").value,
       image_spam_enabled: element("image-spam-enabled").checked,
       image_spam_count: Number(element("image-spam-count").value),
       image_spam_window_seconds: Number(element("image-spam-window").value),
+      image_spam_group_min_members: Number(element("image-spam-group-min-members").value),
       repeat_review_enabled: element("repeat-review-enabled").checked,
       repeat_count: Number(element("repeat-count").value),
       repeat_window_seconds: Number(element("repeat-window").value),

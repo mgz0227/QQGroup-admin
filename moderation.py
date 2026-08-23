@@ -19,6 +19,12 @@ class ModerationWindows:
     def __init__(self) -> None:
         self.seen: dict[tuple[str, str, str, str], tuple[float, bool]] = {}
         self.images: dict[tuple[str, str], list[tuple[float, str]]] = defaultdict(list)
+        self.group_images: dict[str, list[tuple[float, str, str]]] = defaultdict(
+            list
+        )
+        self.recent_messages: dict[
+            str, list[tuple[float, str, str, str]]
+        ] = defaultdict(list)
         self.repeats: dict[tuple[str, str], list[tuple[float, str, str, str]]] = (
             defaultdict(list)
         )
@@ -75,6 +81,106 @@ class ModerationWindows:
             return []
         self.images.pop(key, None)
         return list(dict.fromkeys(item[1] for item in events if item[1]))
+
+    def add_group_images(
+        self,
+        group_openid: str,
+        member_openid: str,
+        message_id: str,
+        count: int,
+        *,
+        threshold: int,
+        min_members: int,
+        window: int,
+        now: float | None = None,
+    ) -> list[str]:
+        if count <= 0:
+            self.group_images.pop(group_openid, None)
+            return []
+        now = time.monotonic() if now is None else now
+        events = [
+            event
+            for event in self.group_images[group_openid]
+            if event[0] >= now - window
+        ]
+        events.extend((now, message_id, member_openid) for _ in range(count))
+        self.group_images[group_openid] = events[-100:]
+        members = {event[2] for event in events if event[2]}
+        if len(events) < threshold or len(members) < min_members:
+            return []
+        self.group_images.pop(group_openid, None)
+        return list(dict.fromkeys(event[1] for event in events if event[1]))
+
+    def break_image_chain(self, group_openid: str, member_openid: str) -> None:
+        self.images.pop((group_openid, member_openid), None)
+        self.group_images.pop(group_openid, None)
+
+    def record_message(
+        self,
+        group_openid: str,
+        member_openid: str,
+        message_id: str,
+        member_role: str,
+        *,
+        now: float | None = None,
+    ) -> None:
+        if not group_openid or not member_openid or not message_id:
+            return
+        now = time.monotonic() if now is None else now
+        events = [
+            event
+            for event in self.recent_messages[group_openid]
+            if event[0] >= now - 120
+        ]
+        events.append((now, message_id, member_openid, member_role))
+        self.recent_messages[group_openid] = events[-200:]
+
+    def newest_message_ids(
+        self,
+        group_openid: str,
+        limit: int = 50,
+        *,
+        member_openid: str = "",
+        exclude_message_id: str = "",
+        now: float | None = None,
+    ) -> list[str]:
+        now = time.monotonic() if now is None else now
+        events = [
+            event
+            for event in self.recent_messages.get(group_openid, [])
+            if event[0] >= now - 120
+        ]
+        self.recent_messages[group_openid] = events
+        return [
+            event[1]
+            for event in reversed(events)
+            if event[1] != exclude_message_id
+            and event[3] not in {"admin", "owner"}
+            and (not member_openid or event[2] == member_openid)
+        ][: min(50, max(0, limit))]
+
+    def forget_messages(self, group_openid: str, message_ids: list[str]) -> None:
+        removed = set(message_ids)
+        if not removed:
+            return
+        self.recent_messages[group_openid] = [
+            event
+            for event in self.recent_messages.get(group_openid, [])
+            if event[1] not in removed
+        ]
+        self.group_images[group_openid] = [
+            event
+            for event in self.group_images.get(group_openid, [])
+            if event[1] not in removed
+        ]
+        for key in [key for key in self.images if key[0] == group_openid]:
+            self.images[key] = [
+                event for event in self.images[key] if event[1] not in removed
+            ]
+        for key in [key for key in self.repeats if key[0] == group_openid]:
+            self.repeats[key] = [
+                event for event in self.repeats[key] if event[3] not in removed
+            ]
 
     def add_repeat(
         self,

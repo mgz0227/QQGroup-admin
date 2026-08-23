@@ -257,12 +257,15 @@
             <input id="ai-review-enabled" type="checkbox">
             <span>AI 内容审核</span>
           </label>
+          <label><span>AI 审核主模型</span><select id="ai-review-provider"></select></label>
+          <label><span>AI 审核回退模型</span><select id="ai-review-fallback-provider"></select></label>
           <label class="checkbox">
             <input id="image-spam-enabled" type="checkbox">
             <span>连续发图检测</span>
           </label>
           <label><span>连续图片数量</span><input id="image-spam-count" type="number" min="2" max="20"></label>
           <label><span>发图时间窗（秒）</span><input id="image-spam-window" type="number" min="3" max="120"></label>
+          <label><span>跨成员触发人数</span><input id="image-spam-group-min-members" type="number" min="2" max="10"></label>
           <label class="checkbox wide">
             <input id="repeat-review-enabled" type="checkbox">
             <span>集中复读检测并随机禁言参与者</span>
@@ -365,6 +368,9 @@
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-bilibili-uids" data-field="bilibili_uids"><span>覆盖 B站 UP 主 UID</span></label><textarea id="batch-bilibili-uids" rows="3" disabled></textarea></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-count" data-field="image_spam_count"><span>覆盖连续图片数量</span></label><input id="batch-image-count" type="number" min="2" max="20" value="5" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-window" data-field="image_spam_window_seconds"><span>覆盖发图时间窗</span></label><input id="batch-image-window" type="number" min="3" max="120" value="15" disabled></fieldset>
+          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-group-members" data-field="image_spam_group_min_members"><span>覆盖跨成员触发人数</span></label><input id="batch-image-group-members" type="number" min="2" max="10" value="2" disabled></fieldset>
+          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-ai-provider" data-field="ai_review_provider_id"><span>覆盖 AI 主模型</span></label><select id="batch-ai-provider" disabled></select></fieldset>
+          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-ai-fallback-provider" data-field="ai_review_fallback_provider_id"><span>覆盖 AI 回退模型</span></label><select id="batch-ai-fallback-provider" disabled></select></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-count" data-field="repeat_count"><span>覆盖复读次数</span></label><input id="batch-repeat-count" type="number" min="3" max="20" value="4" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-window" data-field="repeat_window_seconds"><span>覆盖复读时间窗</span></label><input id="batch-repeat-window" type="number" min="5" max="120" value="30" disabled></fieldset>
           <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-min" data-field="repeat_mute_min_seconds"><span>覆盖最短禁言秒数</span></label><input id="batch-mute-min" type="number" min="1" max="2592000" value="60" disabled></fieldset>

@@ -257,8 +257,22 @@
           "ai_review_enabled": {
             "type": "bool",
             "description": "启用 AI 内容审核",
-            "hint": "使用当前会话模型审核未命中本地规则的消息；模型异常时放行。",
+            "hint": "使用所选模型审核未命中本地规则的消息；主备模型均异常时放行。",
             "default": false
+          },
+          "ai_review_provider_id": {
+            "type": "string",
+            "description": "AI 审核主模型",
+            "hint": "留空时使用当前会话模型。",
+            "_special": "select_provider",
+            "default": ""
+          },
+          "ai_review_fallback_provider_id": {
+            "type": "string",
+            "description": "AI 审核回退模型",
+            "hint": "仅在主模型不可用或返回无效结果时调用；留空表示不回退。",
+            "_special": "select_provider",
+            "default": ""
           },
           "image_spam_enabled": {
             "type": "bool",
@@ -276,6 +290,13 @@
             "description": "连续发图时间窗（秒）",
             "default": 15,
             "slider": {"min": 3, "max": 120, "step": 3}
+          },
+          "image_spam_group_min_members": {
+            "type": "int",
+            "description": "跨成员刷图最少人数",
+            "hint": "连续纯图片或表情来自至少这些不同成员时，也会触发撤回。",
+            "default": 2,
+            "slider": {"min": 2, "max": 10, "step": 1}
           },
           "repeat_review_enabled": {
             "type": "bool",

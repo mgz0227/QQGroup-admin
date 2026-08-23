@@ -61,6 +61,7 @@ BUTTON_TOKEN_TTL = 15 * 60
 SETTINGS_MESSAGE_TTL = 45
 VERIFICATION_TOKEN_TTL = 5 * 60
 JOIN_LIST_LIMIT = 5
+RECENT_RECALL_LIMIT = 50
 GROUP_TEMPLATE_KEY = "qq_group"
 CONDITION_LOGICS = {"all", "any"}
 FALLBACK_ACTIONS = {"pending", "decline", "approve"}
@@ -182,6 +183,9 @@ class QQGroupAdmin(Star):
 /禁言状态
 /禁言 <成员OpenID|@成员> <60|30m|2h|7d>
 /解禁 <成员OpenID|@成员>
+/撤回 <数量>|<成员OpenID|@成员> [数量]
+/全体禁言
+/全体解禁
 /自动审核状态
 /自动审核开启 <QQ号,...>
 /自动审核添加 <QQ号,...>
@@ -275,9 +279,12 @@ class QQGroupAdmin(Star):
                 ("moderation_exempt_admins", True),
                 ("message_reject_keywords", ""),
                 ("ai_review_enabled", False),
+                ("ai_review_provider_id", ""),
+                ("ai_review_fallback_provider_id", ""),
                 ("image_spam_enabled", False),
                 ("image_spam_count", 5),
                 ("image_spam_window_seconds", 15),
+                ("image_spam_group_min_members", 2),
                 ("repeat_review_enabled", False),
                 ("repeat_count", 4),
                 ("repeat_window_seconds", 30),
@@ -894,6 +901,16 @@ class QQGroupAdmin(Star):
             raise ValueError("危险操作需要在命令末尾输入“确认”")
 
     @staticmethod
+    def _recall_count(value: str) -> int:
+        value = str(value or "").strip()
+        if not value.isdigit():
+            raise ValueError("撤回数量必须是整数")
+        count = int(value)
+        if not 1 <= count <= RECENT_RECALL_LIMIT:
+            raise ValueError(f"每次最多撤回 {RECENT_RECALL_LIMIT} 条消息")
+        return count
+
+    @staticmethod
     def _value(value: Any) -> str:
         return str(value) if value not in {None, ""} else "-"
 
@@ -969,9 +986,12 @@ class QQGroupAdmin(Star):
                 "moderation_exempt_admins": True,
                 "message_reject_keywords": "",
                 "ai_review_enabled": False,
+                "ai_review_provider_id": "",
+                "ai_review_fallback_provider_id": "",
                 "image_spam_enabled": False,
                 "image_spam_count": 5,
                 "image_spam_window_seconds": 15,
+                "image_spam_group_min_members": 2,
                 "repeat_review_enabled": False,
                 "repeat_count": 4,
                 "repeat_window_seconds": 30,
@@ -1057,10 +1077,17 @@ class QQGroupAdmin(Star):
             ),
             "keywords": parse_keywords(str(entry.get("message_reject_keywords") or "")),
             "ai_enabled": bool(entry.get("ai_review_enabled", False)),
+            "ai_provider_id": str(entry.get("ai_review_provider_id") or "").strip(),
+            "ai_fallback_provider_id": str(
+                entry.get("ai_review_fallback_provider_id") or ""
+            ).strip(),
             "image_enabled": bool(entry.get("image_spam_enabled", False)),
             "image_count": self._bounded_int(entry.get("image_spam_count"), 5, 2, 20),
             "image_window": self._bounded_int(
                 entry.get("image_spam_window_seconds"), 15, 3, 120
+            ),
+            "image_group_min_members": self._bounded_int(
+                entry.get("image_spam_group_min_members"), 2, 2, 10
             ),
             "repeat_enabled": bool(entry.get("repeat_review_enabled", False)),
             "repeat_count": self._bounded_int(entry.get("repeat_count"), 4, 3, 20),
@@ -1676,11 +1703,37 @@ class QQGroupAdmin(Star):
                     urls.append(url)
         return urls
 
+    @staticmethod
+    def _image_like_counts(
+        event: AstrMessageEvent,
+        text: str,
+        image_urls: list[str],
+    ) -> tuple[int, int]:
+        components = list(getattr(event.message_obj, "message", None) or [])
+        component_count = sum(
+            type(component).__name__ in {"Image", "Face"}
+            for component in components
+        )
+        total = max(component_count, len(image_urls))
+        if not total:
+            return 0, 0
+        if components:
+            has_text = any(
+                type(component).__name__ == "Plain"
+                and str(getattr(component, "text", "") or "").strip()
+                for component in components
+            )
+        else:
+            has_text = bool(text.strip())
+        return total, 0 if has_text else total
+
     async def _ai_blocks_message(
         self,
         event: AstrMessageEvent,
         text: str,
         image_urls: list[str],
+        provider_id: str = "",
+        fallback_provider_id: str = "",
     ) -> bool:
         if not text and not image_urls:
             return False
@@ -1688,29 +1741,59 @@ class QQGroupAdmin(Star):
             "审核以下 QQ 群消息是否包含色情、暴力威胁、违法交易、诈骗引流、"
             "人身攻击或泄露隐私。只输出 ALLOW 或 BLOCK。\n消息：" + (text or "[仅图片]")
         )
-        try:
-            async with asyncio.timeout(15):
-                async with self._ai_semaphore:
-                    provider_id = await self.context.get_current_chat_provider_id(
+        providers = []
+        if provider_id:
+            providers.append(provider_id)
+        else:
+            try:
+                providers.append(
+                    await self.context.get_current_chat_provider_id(
                         event.unified_msg_origin
                     )
-                    response = await self.context.llm_generate(
-                        chat_provider_id=provider_id,
-                        prompt=prompt,
-                        image_urls=image_urls or None,
-                        system_prompt="你是严格但不误伤正常讨论的群消息审核器。",
-                    )
-        except Exception as exc:  # noqa: BLE001 - moderation is fail-open
-            if time.monotonic() >= self._ai_warning_at:
-                self.logger.warning("AI 群消息审核失败，本条已放行：%s", exc)
-                self._ai_warning_at = time.monotonic() + 300
-            return False
-        return (
-            str(getattr(response, "completion_text", ""))
-            .strip()
-            .upper()
-            .startswith("BLOCK")
-        )
+                )
+            except Exception as exc:  # noqa: BLE001 - fallback may still work
+                self.logger.debug("读取当前 AI 审核模型失败：%s", exc)
+        providers.append(fallback_provider_id)
+        errors = []
+        for current_provider_id in dict.fromkeys(
+            str(value or "").strip() for value in providers
+        ):
+            if not current_provider_id:
+                continue
+            try:
+                async with asyncio.timeout(15):
+                    async with self._ai_semaphore:
+                        response = await self.context.llm_generate(
+                            chat_provider_id=current_provider_id,
+                            prompt=prompt,
+                            image_urls=image_urls or None,
+                            system_prompt="你是严格但不误伤正常讨论的群消息审核器。",
+                        )
+                if str(getattr(response, "role", "")) == "err":
+                    raise RuntimeError("模型返回错误响应")
+                decision = str(
+                    getattr(response, "completion_text", "") or ""
+                ).strip().upper()
+                if decision not in {"ALLOW", "BLOCK"}:
+                    raise RuntimeError("模型未返回 ALLOW 或 BLOCK")
+                self.logger.debug(
+                    "AI 群消息审核完成：provider=%s decision=%s",
+                    current_provider_id,
+                    decision,
+                )
+                return decision == "BLOCK"
+            except Exception as exc:  # noqa: BLE001 - try configured fallback
+                errors.append(f"{current_provider_id}: {exc}")
+                self.logger.debug(
+                    "AI 群消息审核模型不可用：provider=%s error=%s",
+                    current_provider_id,
+                    exc,
+                )
+        if time.monotonic() >= self._ai_warning_at:
+            detail = "; ".join(errors) or "没有可用模型"
+            self.logger.warning("AI 群消息审核失败，本条已放行：%s", detail)
+            self._ai_warning_at = time.monotonic() + 300
+        return False
 
     async def _recall_messages(
         self,
@@ -1719,7 +1802,8 @@ class QQGroupAdmin(Star):
         message_ids: list[str],
     ) -> list[str]:
         failed = []
-        for message_id in dict.fromkeys(message_ids):
+        requested = list(dict.fromkeys(message_ids))
+        for message_id in requested:
             try:
                 async with self._recall_lock:
                     wait = 0.11 - (time.monotonic() - self._last_recall_at)
@@ -1737,6 +1821,10 @@ class QQGroupAdmin(Star):
                     message_id,
                     exc,
                 )
+        self._moderation.forget_messages(
+            group_openid,
+            [message_id for message_id in requested if message_id not in failed],
+        )
         return failed
 
     async def _warn_member(
@@ -1867,6 +1955,14 @@ class QQGroupAdmin(Star):
             if hasattr(event, "stop_event"):
                 event.stop_event()
             return
+        role = self._message_role(event)
+        if not bool(getattr(event, "is_at_or_wake_command", False)):
+            self._moderation.record_message(
+                group_openid,
+                member_openid,
+                message_id,
+                role,
+            )
 
         suspicious_key = self._member_state_key(group_openid, member_openid)
         if suspicious_key in self._suspicious_members:
@@ -1900,34 +1996,52 @@ class QQGroupAdmin(Star):
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
-        role = self._message_role(event)
         if settings["exempt_admins"] and role in GROUP_ADMIN_ROLES:
+            if settings["image_enabled"]:
+                self._moderation.break_image_chain(group_openid, member_openid)
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
 
         images = self._image_urls(event)
+        image_count, pure_image_count = self._image_like_counts(event, text, images)
         reason = ""
         recall_ids: list[str] = []
+        if settings["image_enabled"] and image_count == 0:
+            self._moderation.break_image_chain(group_openid, member_openid)
         if matched_keyword(text, settings["global_keywords"]):
             reason = "消息命中全局禁止关键词，已撤回。"
         elif matched_keyword(text, settings["keywords"]):
             reason = "消息命中本群禁止关键词，已撤回。"
         elif settings["image_enabled"]:
-            recall_ids = self._moderation.add_images(
+            image_recall_ids = self._moderation.add_images(
                 group_openid,
                 member_openid,
                 message_id,
-                len(images),
+                image_count,
                 threshold=settings["image_count"],
                 window=settings["image_window"],
             )
-            if recall_ids:
-                reason = "短时间连续发送图片，相关消息已撤回。"
+            group_recall_ids = self._moderation.add_group_images(
+                group_openid,
+                member_openid,
+                message_id,
+                pure_image_count,
+                threshold=settings["image_count"],
+                min_members=settings["image_group_min_members"],
+                window=settings["image_window"],
+            )
+            recall_ids = list(dict.fromkeys(image_recall_ids + group_recall_ids))
+            if group_recall_ids:
+                reason = "检测到多人连续发送图片或表情，相关消息已撤回。"
+            elif image_recall_ids:
+                reason = "短时间连续发送图片或表情，相关消息已撤回。"
+        if reason and not recall_ids and settings["image_enabled"]:
+            self._moderation.break_image_chain(group_openid, member_openid)
 
         repeat_members: list[str] = []
         if not reason and settings["repeat_enabled"]:
-            signature = normalize_message(text, len(images))
+            signature = "" if pure_image_count else normalize_message(text)
             repeat_members = self._moderation.add_repeat(
                 group_openid,
                 signature,
@@ -1943,7 +2057,13 @@ class QQGroupAdmin(Star):
         if (
             not reason
             and settings["ai_enabled"]
-            and await self._ai_blocks_message(event, text, images)
+            and await self._ai_blocks_message(
+                event,
+                text,
+                images,
+                settings["ai_provider_id"],
+                settings["ai_fallback_provider_id"],
+            )
         ):
             reason = "消息未通过 AI 内容审核，已撤回。"
 
@@ -2547,6 +2667,8 @@ class QQGroupAdmin(Star):
             f"AI：{'开' if settings['ai_enabled'] else '关'}；"
             f"连图：{'开' if settings['image_enabled'] else '关'}；"
             f"复读：{'开' if settings['repeat_enabled'] else '关'}\n"
+            f"图片阈值：{settings['image_count']} 条/{settings['image_window']} 秒；"
+            f"跨成员至少 {settings['image_group_min_members']} 人\n"
             f"兜底真人验证：{'开' if entry.get('fallback_human_verify_enabled') else '关'}；"
             "关键词和阈值请在插件页面配置。"
         )
@@ -2929,6 +3051,96 @@ class QQGroupAdmin(Star):
             event.stop_event()
         yield event.plain_result("已解除禁言。")
 
+    async def _recall_recent(
+        self,
+        event: AstrMessageEvent,
+        target_or_count: str,
+        count: str = "",
+    ) -> str:
+        _, group_openid, _ = self._context(event)
+        value = str(target_or_count or "1").strip()
+        member_openid = ""
+        if count:
+            member_openid = self._target_member(event, value)
+            requested = self._recall_count(count)
+        elif value.isdigit():
+            requested = self._recall_count(value)
+        else:
+            member_openid = self._target_member(event, value)
+            requested = 1
+        current_message_id = str(
+            getattr(event.message_obj, "message_id", "") or ""
+        )
+        message_ids = self._moderation.newest_message_ids(
+            group_openid,
+            requested,
+            member_openid=member_openid,
+            exclude_message_id=current_message_id,
+        )
+        if not message_ids:
+            return (
+                "缓存内没有可撤回的消息。QQ 官方只允许撤回最近 2 分钟内机器人"
+                "实际收到的普通成员消息；请确认已开启“接收所有群消息”。"
+            )
+        failed = await self._recall_messages(
+            self._api(event),
+            group_openid,
+            message_ids,
+        )
+        succeeded = len(message_ids) - len(failed)
+        missing = requested - len(message_ids)
+        scope = "该成员" if member_openid else "本群"
+        parts = [f"已撤回{scope}最近 {succeeded} 条消息"]
+        if failed:
+            parts.append(f"{len(failed)} 条撤回失败")
+        if missing:
+            parts.append(f"缓存不足 {missing} 条")
+        return "；".join(parts) + "。"
+
+    @qq_admin_command("撤回")
+    async def recall_recent_messages(
+        self,
+        event: AstrMessageEvent,
+        target_or_count: str = "1",
+        count: str = "",
+    ):
+        """撤回本群或指定普通成员最近收到的消息。"""
+        yield event.plain_result(
+            await self._recall_recent(event, target_or_count, count)
+        )
+
+    @qq_admin_regex(r"^/?撤回(?=<@!?[^>]+>|@\S+)")
+    async def recall_recent_messages_compact(self, event: AstrMessageEvent):
+        """兼容命令与 @成员 之间不留空格。"""
+        match = re.fullmatch(
+            r"/?撤回(?:<@!?[^>]+>|@\S+)(?:\s+(\d+))?",
+            event.get_message_str().strip(),
+        )
+        if not match:
+            raise ValueError("用法：/撤回@成员 [1-50]")
+        yield event.plain_result(
+            await self._recall_recent(event, "@", match.group(1) or "1")
+        )
+
+    async def _whole_mute_capability(self, event: AstrMessageEvent) -> str:
+        _, group_openid, _ = self._context(event)
+        state = await self._api(event).get_mute_state(group_openid)
+        mode = str((state.get("global_rule") or {}).get("mode") or "-")
+        return (
+            "未执行：QQ 官方群 OpenAPI 当前只开放全员禁言规则查询，"
+            f"没有写入全体禁言或解禁的接口。当前全员模式：{mode}。"
+        )
+
+    @qq_admin_command("全体禁言")
+    async def mute_all(self, event: AstrMessageEvent):
+        """报告 QQ 官方群接口的全员禁言写入能力。"""
+        yield event.plain_result(await self._whole_mute_capability(event))
+
+    @qq_admin_command("全体解禁")
+    async def unmute_all(self, event: AstrMessageEvent):
+        """报告 QQ 官方群接口的全员解禁写入能力。"""
+        yield event.plain_result(await self._whole_mute_capability(event))
+
     async def _auto_strategy(
         self,
         event: AstrMessageEvent,
@@ -3184,9 +3396,16 @@ class QQGroupAdmin(Star):
             "moderation_exempt_admins": moderation["exempt_admins"],
             "message_reject_keywords": "\n".join(moderation["keywords"]),
             "ai_review_enabled": moderation["ai_enabled"],
+            "ai_review_provider_id": moderation["ai_provider_id"],
+            "ai_review_fallback_provider_id": moderation[
+                "ai_fallback_provider_id"
+            ],
             "image_spam_enabled": moderation["image_enabled"],
             "image_spam_count": moderation["image_count"],
             "image_spam_window_seconds": moderation["image_window"],
+            "image_spam_group_min_members": moderation[
+                "image_group_min_members"
+            ],
             "repeat_review_enabled": moderation["repeat_enabled"],
             "repeat_count": moderation["repeat_count"],
             "repeat_window_seconds": moderation["repeat_window"],
@@ -3271,6 +3490,30 @@ class QQGroupAdmin(Star):
 
     async def web_runtime_settings(self) -> dict[str, Any]:
         cookie = str(self.config.get("bilibili_cookie") or "")
+        providers = []
+        try:
+            configured = self.context.get_all_providers()
+        except Exception as exc:  # noqa: BLE001 - WebUI remains usable without AI
+            self.logger.debug("读取 AI 提供商列表失败：%s", exc)
+            configured = []
+        for provider in configured:
+            try:
+                meta = provider.meta()
+                provider_id = str(getattr(meta, "id", "") or "").strip()
+                if not provider_id:
+                    continue
+                model = str(getattr(meta, "model", "") or "").strip()
+                provider_type = str(getattr(meta, "type", "") or "").strip()
+                providers.append(
+                    {
+                        "id": provider_id,
+                        "model": model,
+                        "type": provider_type,
+                        "label": f"{model} ({provider_id})" if model else provider_id,
+                    }
+                )
+            except Exception as exc:  # noqa: BLE001 - skip malformed providers
+                self.logger.debug("忽略无法读取的 AI 提供商：%s", exc)
         return {
             "uid_review_interval_seconds": self._bounded_int(
                 self.config.get("uid_review_interval_seconds"), 60, 15, 600
@@ -3295,6 +3538,7 @@ class QQGroupAdmin(Star):
                 self.config.get("bilibili_dynamic_interval_seconds"), 180, 60, 3_600
             ),
             "bilibili_logged_in": "SESSDATA=" in cookie and "bili_jct=" in cookie,
+            "providers": providers,
         }
 
     async def web_save_runtime_settings(
@@ -3383,9 +3627,16 @@ class QQGroupAdmin(Star):
                 "moderation_exempt_admins": bool(payload["moderation_exempt_admins"]),
                 "message_reject_keywords": str(payload["message_reject_keywords"]),
                 "ai_review_enabled": bool(payload["ai_review_enabled"]),
+                "ai_review_provider_id": str(payload["ai_review_provider_id"]),
+                "ai_review_fallback_provider_id": str(
+                    payload["ai_review_fallback_provider_id"]
+                ),
                 "image_spam_enabled": bool(payload["image_spam_enabled"]),
                 "image_spam_count": int(payload["image_spam_count"]),
                 "image_spam_window_seconds": int(payload["image_spam_window_seconds"]),
+                "image_spam_group_min_members": int(
+                    payload["image_spam_group_min_members"]
+                ),
                 "repeat_review_enabled": bool(payload["repeat_review_enabled"]),
                 "repeat_count": int(payload["repeat_count"]),
                 "repeat_window_seconds": int(payload["repeat_window_seconds"]),

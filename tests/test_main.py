@@ -762,6 +762,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(payload["uid_exists_auto_approve"])
         self.assertEqual(payload["approve_keywords"], "主页\n老用户")
         self.assertEqual(payload["reject_keywords"], "广告\n引流")
+        self.assertEqual(payload["ai_review_provider_id"], "")
+        self.assertEqual(payload["ai_review_fallback_provider_id"], "")
+        self.assertEqual(payload["image_spam_group_min_members"], 2)
         self.assertEqual(
             payload["keyword_replies"],
             [
@@ -831,6 +834,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                             "match_type": "exact",
                         }
                     ],
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "主模型和回退模型不能相同"):
+            module.GroupAdminWeb._validated_save(
+                {
+                    **payload,
+                    "ai_review_provider_id": "provider-1",
+                    "ai_review_fallback_provider_id": "provider-1",
                 }
             )
 
@@ -1474,6 +1485,86 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                     "changes": {"platform_id": "other"},
                 }
             )
+
+    async def test_ai_moderation_uses_fallback_only_after_primary_failure(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                RuntimeError("primary unavailable"),
+                SimpleNamespace(role="assistant", completion_text="BLOCK"),
+            ]
+        )
+
+        blocked = await plugin._ai_blocks_message(
+            event,
+            "待审核",
+            [],
+            "primary",
+            "fallback",
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
+            ["primary", "fallback"],
+        )
+
+        plugin.context.llm_generate.reset_mock()
+        plugin.context.llm_generate.side_effect = None
+        plugin.context.llm_generate.return_value = SimpleNamespace(
+            role="assistant", completion_text="ALLOW"
+        )
+        self.assertFalse(
+            await plugin._ai_blocks_message(
+                event,
+                "正常消息",
+                [],
+                "primary",
+                "fallback",
+            )
+        )
+        plugin.context.llm_generate.assert_awaited_once()
+
+    async def test_recall_recent_messages_uses_received_message_cache(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "/撤回 3")
+        now = module.time.monotonic()
+        plugin._moderation.record_message(
+            "group-1", "member-1", "old-1", "member", now=now
+        )
+        plugin._moderation.record_message(
+            "group-1", "member-2", "old-2", "member", now=now
+        )
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        with patch.object(module.asyncio, "sleep", AsyncMock()):
+            results = [
+                result
+                async for result in plugin.recall_recent_messages(event, "3")
+            ]
+
+        self.assertEqual(
+            [call.args[1] for call in api.recall_group_message.await_args_list],
+            ["old-2", "old-1"],
+        )
+        self.assertIn("已撤回本群最近 2 条", results[0])
+        self.assertIn("缓存不足 1 条", results[0])
+
+    async def test_whole_mute_commands_report_official_api_limit(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "/全体禁言")
+        api = SimpleNamespace(
+            get_mute_state=AsyncMock(return_value={"global_rule": {"mode": "none"}})
+        )
+        plugin._api = lambda _event: api
+
+        results = [result async for result in plugin.mute_all(event)]
+
+        self.assertIn("未执行", results[0])
+        self.assertIn("没有写入全体禁言或解禁的接口", results[0])
+        self.assertIn("none", results[0])
 
     def test_compact_commands_require_wake_prefix(self):
         _plugin, client = self.plugin()

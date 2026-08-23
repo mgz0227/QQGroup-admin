@@ -4,6 +4,79 @@ from moderation import ModerationWindows, normalize_message
 
 
 class ModerationWindowsTest(unittest.TestCase):
+    def test_recent_messages_are_newest_first_and_filter_protected_members(self):
+        state = ModerationWindows()
+        state.record_message("g", "u1", "m1", "member", now=1)
+        state.record_message("g", "u2", "m2", "admin", now=2)
+        state.record_message("g", "u1", "m3", "member", now=3)
+        state.record_message("g", "u3", "m4", "owner", now=4)
+        state.record_message("g", "u2", "command", "member", now=5)
+
+        self.assertEqual(
+            state.newest_message_ids("g", exclude_message_id="command", now=5),
+            ["m3", "m1"],
+        )
+        self.assertEqual(
+            state.newest_message_ids("g", member_openid="u1", now=5),
+            ["m3", "m1"],
+        )
+
+    def test_recent_messages_expire_and_are_bounded_per_group(self):
+        state = ModerationWindows()
+        state.record_message("old", "u", "expired", "member", now=0)
+        for index in range(205):
+            state.record_message("g", "u", f"m{index}", "member", now=100)
+
+        self.assertEqual(state.newest_message_ids("old", now=121), [])
+        ids = state.newest_message_ids("g", limit=500, now=100)
+        self.assertEqual(len(ids), 50)
+        self.assertEqual(ids[0], "m204")
+        self.assertEqual(ids[-1], "m155")
+        self.assertEqual(len(state.recent_messages["g"]), 200)
+
+    def test_group_image_chain_spans_multiple_members(self):
+        state = ModerationWindows()
+        self.assertEqual(
+            state.add_group_images(
+                "g", "u1", "m1", 2, threshold=4, min_members=2, window=10, now=1
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_group_images(
+                "g", "u2", "m2", 1, threshold=4, min_members=2, window=10, now=2
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_group_images(
+                "g", "u1", "m3", 1, threshold=4, min_members=2, window=10, now=3
+            ),
+            ["m1", "m2", "m3"],
+        )
+
+    def test_non_image_breaks_only_the_group_image_chain(self):
+        state = ModerationWindows()
+        state.add_group_images(
+            "g", "u1", "m1", 1, threshold=3, min_members=2, window=10, now=1
+        )
+        state.add_images("g", "u1", "m1", 1, threshold=2, window=10, now=1)
+
+        state.add_group_images(
+            "g", "u2", "text", 0, threshold=3, min_members=2, window=10, now=2
+        )
+
+        self.assertEqual(
+            state.add_group_images(
+                "g", "u2", "m2", 1, threshold=3, min_members=2, window=10, now=3
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_images("g", "u1", "m3", 1, threshold=2, window=10, now=3),
+            ["m1", "m3"],
+        )
+
     def test_image_repeat_and_duplicate_windows(self):
         state = ModerationWindows()
         self.assertEqual(normalize_message("  复读\n内容 "), "复读 内容")

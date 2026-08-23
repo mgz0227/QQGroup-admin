@@ -31,9 +31,12 @@ BATCH_FIELDS = {
     "moderation_exempt_admins",
     "message_reject_keywords",
     "ai_review_enabled",
+    "ai_review_provider_id",
+    "ai_review_fallback_provider_id",
     "image_spam_enabled",
     "image_spam_count",
     "image_spam_window_seconds",
+    "image_spam_group_min_members",
     "repeat_review_enabled",
     "repeat_count",
     "repeat_window_seconds",
@@ -49,6 +52,8 @@ BATCH_TEXT_FIELDS = {
     "reject_keywords",
     "button_reject_reason",
     "message_reject_keywords",
+    "ai_review_provider_id",
+    "ai_review_fallback_provider_id",
     "bilibili_uids",
 }
 
@@ -431,6 +436,18 @@ class GroupAdminWeb:
             2_592_000,
             "最长禁言秒数",
         )
+        ai_provider_id = cls._text(
+            payload.get("ai_review_provider_id", ""),
+            "AI 审核主模型",
+            256,
+        )
+        ai_fallback_provider_id = cls._text(
+            payload.get("ai_review_fallback_provider_id", ""),
+            "AI 审核回退模型",
+            256,
+        )
+        if ai_provider_id and ai_provider_id == ai_fallback_provider_id:
+            raise ValueError("AI 审核主模型和回退模型不能相同")
 
         return {
             "group_openid": group_openid,
@@ -459,6 +476,8 @@ class GroupAdminWeb:
             "ai_review_enabled": cls._bool(
                 payload, "ai_review_enabled", False, "AI 审核开关"
             ),
+            "ai_review_provider_id": ai_provider_id,
+            "ai_review_fallback_provider_id": ai_fallback_provider_id,
             "image_spam_enabled": cls._bool(
                 payload, "image_spam_enabled", False, "连续发图检测开关"
             ),
@@ -467,6 +486,14 @@ class GroupAdminWeb:
             ),
             "image_spam_window_seconds": cls._int(
                 payload, "image_spam_window_seconds", 15, 3, 120, "连续发图时间窗"
+            ),
+            "image_spam_group_min_members": cls._int(
+                payload,
+                "image_spam_group_min_members",
+                2,
+                2,
+                10,
+                "跨成员刷图最少人数",
             ),
             "repeat_review_enabled": cls._bool(
                 payload, "repeat_review_enabled", False, "复读检测开关"
