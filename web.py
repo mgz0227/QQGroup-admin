@@ -35,10 +35,13 @@ BATCH_FIELDS = {
     "ai_review_enabled",
     "ai_review_provider_id",
     "ai_review_fallback_provider_id",
+    "image_keyword_review_enabled",
+    "image_reject_keywords",
     "image_spam_enabled",
     "image_spam_count",
     "image_spam_window_seconds",
     "image_spam_group_min_members",
+    "image_spam_recall_count",
     "repeat_review_enabled",
     "repeat_count",
     "repeat_window_seconds",
@@ -56,6 +59,7 @@ BATCH_TEXT_FIELDS = {
     "message_reject_keywords",
     "ai_review_provider_id",
     "ai_review_fallback_provider_id",
+    "image_reject_keywords",
     "bilibili_uids",
 }
 
@@ -342,6 +346,16 @@ class GroupAdminWeb:
                     )
                 )
             ),
+            "global_image_reject_keywords": "\n".join(
+                parse_keywords(
+                    cls._text(
+                        payload.get("global_image_reject_keywords", ""),
+                        "全局图片文字撤回关键词",
+                        7_000,
+                        multiline=True,
+                    )
+                )
+            ),
             "bilibili_live_interval_seconds": cls._int(
                 payload, "bilibili_live_interval_seconds", 60, 30, 600, "直播轮询间隔"
             ),
@@ -391,6 +405,48 @@ class GroupAdminWeb:
         if fallback_key is not None:
             settings["global_ai_review_fallback_provider_ids"] = cls._provider_ids(
                 payload[fallback_key]
+            )
+        for key, default, minimum, maximum, label in (
+            (
+                "global_ai_review_timeout_seconds",
+                20,
+                5,
+                120,
+                "AI 审核总超时",
+            ),
+            (
+                "global_ai_review_block_threshold",
+                95,
+                50,
+                100,
+                "AI 审核拦截置信度",
+            ),
+            (
+                "global_image_ocr_timeout_seconds",
+                4,
+                2,
+                30,
+                "图片 OCR 超时",
+            ),
+            (
+                "global_image_ocr_max_images",
+                1,
+                1,
+                3,
+                "单条 OCR 图片数",
+            ),
+        ):
+            if key in payload:
+                settings[key] = cls._int(payload, key, default, minimum, maximum, label)
+        for key, label in (
+            ("global_ai_review_images_enabled", "AI 图片审核开关"),
+            ("global_image_ocr_enabled", "图片 OCR 开关"),
+        ):
+            if key in payload:
+                settings[key] = cls._bool(payload, key, False, label)
+        if "global_image_ocr_provider_id" in payload:
+            settings["global_image_ocr_provider_id"] = cls._text(
+                payload["global_image_ocr_provider_id"], "图片 OCR 模型", 256
             )
         if (
             "global_ai_review_provider_id" in settings
@@ -471,6 +527,16 @@ class GroupAdminWeb:
                 )
             )
         )
+        image_keywords = "\n".join(
+            parse_keywords(
+                cls._text(
+                    payload.get("image_reject_keywords", ""),
+                    "图片文字撤回关键词",
+                    7_000,
+                    multiline=True,
+                )
+            )
+        )
         bili_uids = "\n".join(
             parse_bilibili_uids(
                 cls._text(
@@ -536,6 +602,10 @@ class GroupAdminWeb:
                 payload, "moderation_exempt_admins", True, "管理员免审开关"
             ),
             "message_reject_keywords": message_keywords,
+            "image_keyword_review_enabled": cls._bool(
+                payload, "image_keyword_review_enabled", False, "图片文字审核开关"
+            ),
+            "image_reject_keywords": image_keywords,
             "keyword_replies": cls._keyword_replies(payload.get("keyword_replies", [])),
             "ai_review_enabled": cls._bool(
                 payload, "ai_review_enabled", False, "AI 审核开关"
@@ -558,6 +628,14 @@ class GroupAdminWeb:
                 2,
                 10,
                 "跨成员刷图最少人数",
+            ),
+            "image_spam_recall_count": cls._int(
+                payload,
+                "image_spam_recall_count",
+                5,
+                1,
+                50,
+                "图片触发时撤回数量",
             ),
             "repeat_review_enabled": cls._bool(
                 payload, "repeat_review_enabled", False, "复读检测开关"
