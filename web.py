@@ -1,8 +1,8 @@
 from __future__ import annotations
 
+import re
 from collections.abc import Awaitable, Callable
 from functools import wraps
-import re
 from typing import Any
 
 from astrbot.api.star import Context
@@ -1034,7 +1034,29 @@ class GroupAdminWeb:
         )
 
     async def page_identities(self) -> Any:
-        return self._response(await self.plugin.web_identities())
+        kind = request.query.get("kind", "")
+        if not kind:
+            return self._response(await self.plugin.web_identities())
+        kind = self._text(kind, "身份记录类型", 20, required=True)
+        if kind not in {"bindings", "suspicious", "violations"}:
+            raise ValueError("身份记录类型无效")
+        query = self._text(
+            request.query.get("query", ""),
+            "身份记录搜索词",
+            256,
+        )
+        try:
+            page = int(request.query.get("page", "1"))
+            page_size = int(request.query.get("page_size", "10"))
+        except (TypeError, ValueError) as exc:
+            raise ValueError("页码和每页条数必须是整数") from exc
+        if page < 1:
+            raise ValueError("页码必须是正整数")
+        if page_size not in {10, 20, 50}:
+            raise ValueError("每页条数只能是 10、20 或 50")
+        return self._response(
+            await self.plugin.web_identity_page(kind, query, page, page_size)
+        )
 
     async def page_binding_delete(self) -> Any:
         payload = await self._payload()

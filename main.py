@@ -4649,49 +4649,136 @@ class QQGroupAdmin(Star):
             }
         )
 
-    async def web_identities(self) -> dict[str, list[dict[str, Any]]]:
-        groups_by_id = {
+    def _identity_items(
+        self,
+        kind: str,
+        groups_by_id: dict[str, str],
+    ) -> list[dict[str, Any]]:
+        if kind == "bindings":
+            items = []
+            for binding in self._uid_bindings.values():
+                item = dict(binding)
+                item["group_names"] = [
+                    groups_by_id.get(str(group_id), str(group_id))
+                    for group_id in item.get("groups") or []
+                ]
+                items.append(item)
+            items.sort(key=lambda item: str(item.get("uid") or ""))
+            return items
+        if kind == "suspicious":
+            return sorted(
+                (
+                    {
+                        **dict(item),
+                        "group_name": groups_by_id.get(
+                            str(item.get("group_openid") or ""), ""
+                        ),
+                    }
+                    for item in self._suspicious_members.values()
+                ),
+                key=lambda item: int(item.get("created_at") or 0),
+                reverse=True,
+            )
+        if kind == "violations":
+            items = []
+            for record in self._violation_records:
+                item = dict(record)
+                item["group_name"] = item.get("group_name") or groups_by_id.get(
+                    str(item.get("group_openid") or ""), ""
+                )
+                items.append(item)
+            items.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
+            return items
+        raise ValueError("身份记录类型无效")
+
+    @staticmethod
+    def _identity_matches(item: dict[str, Any], query: str) -> bool:
+        needle = query.casefold()
+        fields = (
+            "uid",
+            "bilibili_uid",
+            "username",
+            "member_name",
+            "identity",
+            "member_openid",
+            "qq_openid",
+            "openid",
+            "union_openid",
+            "group_openid",
+            "group_name",
+            "group",
+            "groups",
+            "group_names",
+            "members",
+            "last_violation_group",
+            "last_violation_reason",
+            "last_violation_content",
+            "reason",
+            "rule",
+            "category",
+            "content",
+            "message",
+            "message_content",
+            "message_summary",
+        )
+        values: list[Any] = [item.get(field) for field in fields]
+        while values:
+            value = values.pop()
+            if isinstance(value, dict):
+                values.extend(value.values())
+            elif isinstance(value, (list, tuple, set)):
+                values.extend(value)
+            elif value is not None and needle in str(value).casefold():
+                return True
+        return False
+
+    def _identity_groups_by_id(self) -> dict[str, str]:
+        return {
             str(item.get("group_openid") or ""): str(item.get("group_name") or "")
             for item in (self.config.get("auto_review_groups") or [])
             if isinstance(item, dict)
         }
-        bindings = []
-        for binding in self._uid_bindings.values():
-            item = dict(binding)
-            item["group_names"] = [
-                groups_by_id.get(str(group_id), str(group_id))
-                for group_id in item.get("groups") or []
-            ]
-            bindings.append(item)
-        bindings.sort(key=lambda item: str(item.get("uid") or ""))
-        suspicious = sorted(
-            (
-                {
-                    **dict(item),
-                    "group_name": groups_by_id.get(
-                        str(item.get("group_openid") or ""), ""
-                    ),
-                }
-                for item in self._suspicious_members.values()
-            ),
-            key=lambda item: int(item.get("created_at") or 0),
-            reverse=True,
-        )
-        violations = []
-        for record in self._violation_records:
-            item = dict(record)
-            item["group_name"] = item.get("group_name") or groups_by_id.get(
-                str(item.get("group_openid") or ""), ""
-            )
-            violations.append(item)
-        violations.sort(
-            key=lambda item: int(item.get("created_at") or 0), reverse=True
-        )
+
+    async def web_identities(self) -> dict[str, list[dict[str, Any]]]:
+        groups_by_id = self._identity_groups_by_id()
+        bindings = self._identity_items("bindings", groups_by_id)
+        suspicious = self._identity_items("suspicious", groups_by_id)
+        violations = self._identity_items("violations", groups_by_id)
         return {
             "bindings": bindings,
             "suspicious": suspicious,
             "violations": violations,
             "violation_records": violations,
+        }
+
+    async def web_identity_page(
+        self,
+        kind: str,
+        query: str,
+        page: int,
+        page_size: int,
+    ) -> dict[str, Any]:
+        if kind not in {"bindings", "suspicious", "violations"}:
+            raise ValueError("身份记录类型无效")
+        if page < 1 or page_size not in {10, 20, 50}:
+            raise ValueError("身份记录分页参数无效")
+        query = str(query or "").strip()
+        if len(query) > 256:
+            raise ValueError("身份记录搜索词最多 256 个字符")
+        items = self._identity_items(kind, self._identity_groups_by_id())
+        if query:
+            items = [item for item in items if self._identity_matches(item, query)]
+        total = len(items)
+        total_pages = max(1, (total + page_size - 1) // page_size)
+        page = min(page, total_pages)
+        start = (page - 1) * page_size
+        return {
+            "kind": kind,
+            "items": items[start : start + page_size],
+            "page": page,
+            "page_size": page_size,
+            "total": total,
+            "total_pages": total_pages,
         }
 
     async def web_delete_binding(self, uid: str) -> dict[str, str]:

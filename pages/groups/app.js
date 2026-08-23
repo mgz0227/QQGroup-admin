@@ -5,9 +5,23 @@
   var BATCH_GROUP_LIMIT = 100;
   var groups = [];
   var selected = new Set();
-  var identities = { bindings: [], suspicious: [], violations: [] };
+  var identities = {
+    bindings: { items: [], total: 0, total_pages: 1 },
+    suspicious: { items: [], total: 0, total_pages: 1 },
+    violations: { items: [], total: 0, total_pages: 1 }
+  };
   var identityPages = { bindings: 1, suspicious: 1, violations: 1 };
-  var identityPageSize = 10;
+  var identityRequests = { bindings: 0, suspicious: 0, violations: 0 };
+  var identitySearchTimer;
+  var storedIdentityPageSize;
+  try {
+    storedIdentityPageSize = Number(window.localStorage.getItem("qqgroup-admin-identity-page-size"));
+  } catch (_) {
+    storedIdentityPageSize = 0;
+  }
+  var identityPageSize = [10, 20, 50].includes(storedIdentityPageSize)
+    ? storedIdentityPageSize
+    : 10;
   var globalKeywordConfig = { groups: [], rules: [] };
   var runtimeSettings = {};
   var bilibiliLoginKey = "";
@@ -28,8 +42,8 @@
       : response;
   }
 
-  function apiGet(path) {
-    return bridge.apiGet(path, {}).then(unwrap);
+  function apiGet(path, params) {
+    return bridge.apiGet(path, params || {}).then(unwrap);
   }
 
   function apiPost(path, body) {
@@ -188,40 +202,6 @@
     return labels.join("、") || groupLabel(binding.last_violation_group);
   }
 
-  function identitySearchValue(item, extra) {
-    var values = [
-      item.uid, item.bilibili_uid, item.username, item.member_name, item.identity,
-      item.member_openid, item.qq_openid, item.openid, item.union_openid,
-      item.group_openid, item.group_name, item.group, groupLabel(item.group_openid),
-      item.last_violation_group, item.reason, item.rule, item.category, item.content,
-      item.message, item.message_content, item.message_summary, extra
-    ];
-    if (Array.isArray(item.groups)) {
-      values = values.concat(item.groups.map(function (value) {
-        var id = value && typeof value === "object" ? value.group_openid : value;
-        return String(id || "") + " " + groupLabel(String(id || ""));
-      }));
-    }
-    if (item.members && typeof item.members === "object") {
-      values = values.concat(Object.keys(item.members), Object.values(item.members));
-    }
-    return values.filter(function (value) { return value != null; }).join(" ").toLocaleLowerCase();
-  }
-
-  function identityFiltered(items, extra) {
-    var query = (element("identity-search").value || "").trim().toLocaleLowerCase();
-    return items.filter(function (item) {
-      return !query || identitySearchValue(item, extra).includes(query);
-    });
-  }
-
-  function pageItems(items, kind) {
-    var totalPages = Math.max(1, Math.ceil(items.length / identityPageSize));
-    identityPages[kind] = Math.min(identityPages[kind], totalPages);
-    var start = (identityPages[kind] - 1) * identityPageSize;
-    return { items: items.slice(start, start + identityPageSize), totalPages: totalPages };
-  }
-
   function renderPager(id, kind, total, totalPages) {
     var pager = element(id);
     pager.replaceChildren();
@@ -235,7 +215,7 @@
     previous.disabled = identityPages[kind] <= 1;
     previous.addEventListener("click", function () {
       identityPages[kind] -= 1;
-      renderIdentities();
+      loadIdentityKind(kind);
     });
     var next = document.createElement("button");
     next.type = "button";
@@ -244,7 +224,7 @@
     next.disabled = identityPages[kind] >= totalPages;
     next.addEventListener("click", function () {
       identityPages[kind] += 1;
-      renderIdentities();
+      loadIdentityKind(kind);
     });
     pager.append(label, previous, next);
   }
@@ -268,17 +248,17 @@
     return Number.isNaN(date.getTime()) ? String(value) : date.toLocaleString();
   }
 
-  function renderBindingList(bindings) {
+  function renderBindingList(state) {
     var list = element("binding-list");
     list.replaceChildren();
-    var page = pageItems(bindings, "bindings");
+    var bindings = state.items;
     if (!bindings.length) {
       list.innerHTML = '<p class="empty">暂无匹配的 UID 身份绑定</p>';
       renderPager("binding-pager", "bindings", 0, 1);
       element("binding-count").textContent = "0 条";
       return;
     }
-    page.items.forEach(function (binding) {
+    bindings.forEach(function (binding) {
       var details = document.createElement("details");
       details.className = "identity-card";
       var summary = document.createElement("summary");
@@ -301,7 +281,7 @@
         event.preventDefault();
         confirmAction("解除 UID 绑定", "确认解除 UID " + binding.uid + " 的唯一身份绑定？", function () {
           apiPost("binding-delete", { uid: String(binding.uid) })
-            .then(function () { toast("UID 绑定已解除"); load(); })
+            .then(function () { toast("UID 绑定已解除"); loadIdentityKind("bindings"); })
             .catch(function (error) { toast("解除失败：" + error.message, true); });
         });
       }));
@@ -309,21 +289,21 @@
       details.append(summary, body);
       list.appendChild(details);
     });
-    element("binding-count").textContent = bindings.length + " 条";
-    renderPager("binding-pager", "bindings", bindings.length, page.totalPages);
+    element("binding-count").textContent = state.total + " 条";
+    renderPager("binding-pager", "bindings", state.total, state.total_pages);
   }
 
-  function renderSuspiciousList(suspicious) {
+  function renderSuspiciousList(state) {
     var list = element("suspicious-list");
     list.replaceChildren();
-    var page = pageItems(suspicious, "suspicious");
+    var suspicious = state.items;
     if (!suspicious.length) {
       list.innerHTML = '<p class="empty">暂无匹配的待真人验证成员</p>';
       renderPager("suspicious-pager", "suspicious", 0, 1);
       element("suspicious-count").textContent = "0 条";
       return;
     }
-    page.items.forEach(function (member) {
+    suspicious.forEach(function (member) {
       var details = document.createElement("details");
       details.className = "identity-card suspicious-card";
       var summary = document.createElement("summary");
@@ -345,7 +325,7 @@
           apiPost("suspicious-clear", {
             group_openid: member.group_openid,
             member_openid: member.member_openid
-          }).then(function () { toast("可疑标记已解除"); load(); })
+          }).then(function () { toast("可疑标记已解除"); loadIdentityKind("suspicious"); })
             .catch(function (error) { toast("解除失败：" + error.message, true); });
         });
       }));
@@ -353,52 +333,21 @@
       details.append(summary, body);
       list.appendChild(details);
     });
-    element("suspicious-count").textContent = suspicious.length + " 条";
-    renderPager("suspicious-pager", "suspicious", suspicious.length, page.totalPages);
+    element("suspicious-count").textContent = state.total + " 条";
+    renderPager("suspicious-pager", "suspicious", state.total, state.total_pages);
   }
 
-  function bindingViolationRecords(bindings) {
-    var records = [];
-    bindings.forEach(function (binding) {
-      var nested = Array.isArray(binding.violations)
-        ? binding.violations
-        : (Array.isArray(binding.violation_records) ? binding.violation_records : []);
-      nested.forEach(function (record) {
-        records.push(Object.assign({}, record, {
-          uid: record.uid || record.bilibili_uid || binding.uid,
-          username: record.username || binding.username || binding.identity,
-          member_openid: record.member_openid || record.qq_openid || record.openid || binding.member_openid,
-          group_openid: record.group_openid || record.last_violation_group,
-          _binding: binding
-        }));
-      });
-      if (!nested.length && Number(binding.violation_count || 0) > 0) {
-        records.push({
-          uid: binding.uid,
-          username: binding.username || binding.identity,
-          member_openid: binding.member_openid,
-          group_openid: binding.last_violation_group,
-          reason: binding.last_violation_reason,
-          created_at: binding.last_violation_at,
-          content: binding.last_violation_content || binding.last_violation_message,
-          _summary: true
-        });
-      }
-    });
-    return records;
-  }
-
-  function renderViolationList(records) {
+  function renderViolationList(state) {
     var list = element("violation-list");
     list.replaceChildren();
-    var page = pageItems(records, "violations");
+    var records = state.items;
     if (!records.length) {
       list.innerHTML = '<p class="empty">暂无匹配的违规记录</p>';
       renderPager("violation-pager", "violations", 0, 1);
       element("violation-count").textContent = "0 条";
       return;
     }
-    page.items.forEach(function (record) {
+    records.forEach(function (record) {
       var details = document.createElement("details");
       details.className = "identity-card violation-card";
       var summary = document.createElement("summary");
@@ -428,21 +377,8 @@
       list.appendChild(details);
       details.append(summary, body);
     });
-    element("violation-count").textContent = records.length + " 条";
-    renderPager("violation-pager", "violations", records.length, page.totalPages);
-  }
-
-  function renderIdentities() {
-    var sourceBindings = Array.isArray(identities.bindings) ? identities.bindings : [];
-    var bindings = identityFiltered(sourceBindings);
-    var suspicious = identityFiltered(Array.isArray(identities.suspicious) ? identities.suspicious : []);
-    var violations = Array.isArray(identities.violations)
-      ? identities.violations
-      : (Array.isArray(identities.violation_records) ? identities.violation_records : bindingViolationRecords(sourceBindings));
-    violations = identityFiltered(violations);
-    renderBindingList(bindings);
-    renderSuspiciousList(suspicious);
-    renderViolationList(violations);
+    element("violation-count").textContent = state.total + " 条";
+    renderPager("violation-pager", "violations", state.total, state.total_pages);
   }
 
   function fillOverview(data) {
@@ -872,21 +808,76 @@
       .finally(function () { button.disabled = false; });
   }
 
+  function renderIdentityKind(kind) {
+    if (kind === "bindings") renderBindingList(identities.bindings);
+    else if (kind === "suspicious") renderSuspiciousList(identities.suspicious);
+    else renderViolationList(identities.violations);
+  }
+
+  function loadIdentityKind(kind) {
+    var requestId = ++identityRequests[kind];
+    var listId = {
+      bindings: "binding-list",
+      suspicious: "suspicious-list",
+      violations: "violation-list"
+    }[kind];
+    var list = element(listId);
+    list.innerHTML = '<p class="empty">正在加载...</p>';
+    return apiGet("identities", {
+      kind: kind,
+      query: (element("identity-search").value || "").trim(),
+      page: identityPages[kind],
+      page_size: identityPageSize
+    }).then(function (result) {
+      if (requestId !== identityRequests[kind]) return;
+      result = result || {};
+      var totalPages = Math.max(1, Number(result.total_pages) || 1);
+      identityPages[kind] = Math.max(
+        1,
+        Math.min(totalPages, Number(result.page) || identityPages[kind])
+      );
+      identities[kind] = {
+        items: Array.isArray(result.items) ? result.items : [],
+        total: Math.max(0, Number(result.total) || 0),
+        total_pages: totalPages
+      };
+      renderIdentityKind(kind);
+    }).catch(function (error) {
+      if (requestId !== identityRequests[kind]) return;
+      identityPages[kind] = 1;
+      identities[kind] = { items: [], total: 0, total_pages: 1 };
+      renderIdentityKind(kind);
+      list.replaceChildren();
+      var message = document.createElement("p");
+      message.className = "empty error";
+      message.textContent = "加载失败：" + error.message;
+      list.appendChild(message);
+      toast("身份记录加载失败：" + error.message, true);
+    });
+  }
+
+  function loadIdentities() {
+    return Promise.all([
+      loadIdentityKind("bindings"),
+      loadIdentityKind("suspicious"),
+      loadIdentityKind("violations")
+    ]);
+  }
+
   function load() {
     element("group-rows").innerHTML = '<tr><td class="empty" colspan="6">正在加载...</td></tr>';
     element("batch-toolbar").hidden = true;
     element("select-visible").disabled = true;
-    Promise.all([apiGet("overview"), apiGet("list"), apiGet("identities"), apiGet("global-keyword-replies"), apiGet("runtime")])
+    Promise.all([apiGet("overview"), apiGet("list"), apiGet("global-keyword-replies"), apiGet("runtime")])
       .then(function (result) {
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
-        identities = result[2] || { bindings: [], suspicious: [], violations: [] };
-        globalKeywordConfig = result[3] || { groups: [], rules: [] };
+        globalKeywordConfig = result[2] || { groups: [], rules: [] };
         element("global-keyword-cooldown").value =
           Number(globalKeywordConfig.keyword_reply_cooldown_seconds || 0);
         element("global-keyword-recall").value =
           Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
-        fillRuntime(result[4]);
+        fillRuntime(result[3]);
         groups.forEach(function (group) {
           if (group.mode === "uid") {
             group.mode = "conditional";
@@ -901,7 +892,7 @@
           if (!groups.some(function (group) { return group.group_openid === id; })) selected.delete(id);
         });
         render();
-        renderIdentities();
+        loadIdentities();
         renderGlobalKeywordReplies(globalKeywordConfig.rules);
       })
       .catch(function (error) {
@@ -1267,14 +1258,26 @@
     element(viewNames[next] + "-tab").focus();
   });
   element("search-input").addEventListener("input", render);
+  element("identity-page-size").value = String(identityPageSize);
   element("identity-search").addEventListener("input", function () {
-    identityPages = { bindings: 1, suspicious: 1, violations: 1 };
-    renderIdentities();
+    clearTimeout(identitySearchTimer);
+    Object.keys(identityRequests).forEach(function (kind) { identityRequests[kind] += 1; });
+    identitySearchTimer = setTimeout(function () {
+      identityPages = { bindings: 1, suspicious: 1, violations: 1 };
+      loadIdentities();
+    }, 250);
   });
   element("identity-page-size").addEventListener("change", function (event) {
-    identityPageSize = Math.max(1, Math.min(50, Number(event.target.value) || 10));
+    var value = Number(event.target.value);
+    identityPageSize = [10, 20, 50].includes(value) ? value : 10;
+    event.target.value = String(identityPageSize);
+    try {
+      window.localStorage.setItem("qqgroup-admin-identity-page-size", String(identityPageSize));
+    } catch (_) {
+      // Storage can be unavailable in hardened embedded browsers.
+    }
     identityPages = { bindings: 1, suspicious: 1, violations: 1 };
-    renderIdentities();
+    loadIdentities();
   });
   element("select-visible").addEventListener("change", function (event) {
     var limitReached = false;

@@ -2103,6 +2103,89 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["group_openid"], "group-1")
         self.assertEqual(record["message_id"], "message-9")
 
+    async def test_identity_records_are_filtered_and_paginated_server_side(self):
+        plugin, _ = self.plugin()
+        plugin.config["auto_review_groups"][0]["group_name"] = "测试审核群"
+        plugin._uid_bindings = {
+            str(uid): {
+                "uid": str(uid),
+                "username": f"成员{uid}",
+                "union_openid": f"union-{uid}",
+                "groups": ["group-1"],
+                "bound_at": 1_700_000_000,
+            }
+            for uid in range(100, 112)
+        }
+        plugin._suspicious_members = {
+            "group-1:member-9": {
+                "group_openid": "group-1",
+                "member_openid": "member-9",
+                "username": "待验证成员",
+                "reason": "身份冲突",
+                "created_at": 1_700_000_001,
+            }
+        }
+        plugin._violation_records = [
+            {
+                "uid": "777",
+                "username": "违规成员",
+                "group_openid": "group-1",
+                "reason": "命中广告规则",
+                "content": "违规消息原文",
+                "created_at": 1_700_000_002,
+                "ai_confidence": 97,
+            }
+        ]
+
+        first = await plugin.web_identity_page("bindings", "测试审核群", 1, 10)
+        second = await plugin.web_identity_page("bindings", "", 2, 10)
+        by_name = await plugin.web_identity_page("bindings", "成员105", 1, 20)
+        by_openid = await plugin.web_identity_page("bindings", "union-108", 1, 50)
+        suspicious = await plugin.web_identity_page("suspicious", "身份冲突", 1, 10)
+        violation = await plugin.web_identity_page("violations", "违规消息原文", 1, 10)
+        hidden_time = await plugin.web_identity_page("bindings", "1700000000", 1, 10)
+        hidden_confidence = await plugin.web_identity_page("violations", "97", 1, 10)
+
+        self.assertEqual(first["total"], 12)
+        self.assertEqual(first["total_pages"], 2)
+        self.assertEqual(len(first["items"]), 10)
+        self.assertEqual(len(second["items"]), 2)
+        self.assertEqual(by_name["items"][0]["uid"], "105")
+        self.assertEqual(by_openid["items"][0]["uid"], "108")
+        self.assertEqual(suspicious["items"][0]["member_openid"], "member-9")
+        self.assertEqual(violation["items"][0]["uid"], "777")
+        self.assertEqual(hidden_time["total"], 0)
+        self.assertEqual(hidden_confidence["total"], 0)
+        with self.assertRaisesRegex(ValueError, "分页参数"):
+            await plugin.web_identity_page("bindings", "", 1, 100)
+
+    async def test_identity_page_route_reads_validated_query_parameters(self):
+        class Query(dict):
+            def get(self, key, default=None, type=None):
+                value = super().get(key, default)
+                return type(value) if type is not None else value
+
+        plugin, _ = self.plugin()
+        plugin.web_identity_page = AsyncMock(return_value={"items": [], "total": 0})
+        web = module.GroupAdminWeb(plugin, plugin.context)
+        web_module = sys.modules[module.GroupAdminWeb.__module__]
+        query = Query(kind="violations", query="测试群", page="2", page_size="20")
+
+        with patch.object(web_module.request, "query", query, create=True):
+            response = await web.page_identities()
+
+        self.assertEqual(response["data"]["total"], 0)
+        plugin.web_identity_page.assert_awaited_once_with(
+            "violations", "测试群", 2, 20
+        )
+
+        query["page"] = "abc"
+        with (
+            patch.object(web_module.request, "query", query, create=True),
+            self.assertRaisesRegex(ValueError, "必须是整数"),
+        ):
+            await web.page_identities()
+
     async def test_recall_recent_messages_uses_received_message_cache(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "/撤回 3")
