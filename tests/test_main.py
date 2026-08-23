@@ -1,3 +1,4 @@
+import asyncio
 import logging
 import sys
 import types
@@ -1229,6 +1230,38 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("group-1:admin-1", plugin._suspicious_members)
         self.assertEqual(client.api.acks[-1], ("verify-1", 0))
 
+    async def test_member_lists_are_checked_before_suspicious_challenge(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            moderation_enabled=True,
+            moderation_exempt_admins=False,
+            member_whitelist="member-1",
+            member_blacklist="member-2",
+        )
+        plugin._suspicious_members["group-1:member-1"] = {"reason": "stale"}
+        plugin._suspicious_members["group-1:member-2"] = {"reason": "stale"}
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        trusted = FakeEvent(client, "普通消息")
+        trusted.message_obj.raw_message.author.member_openid = "member-1"
+        await plugin.audit_group_message(trusted)
+        self.assertFalse(trusted.stopped)
+        self.assertEqual(client.api.messages, [])
+        api.recall_group_message.assert_not_awaited()
+
+        blocked = FakeEvent(client, "普通消息")
+        blocked.message_obj.raw_message.author.member_openid = "member-2"
+        blocked.message_obj.message_id = "message-2"
+        await plugin.audit_group_message(blocked)
+        self.assertTrue(blocked.stopped)
+        self.assertIn(
+            "成员命中本群黑名单，消息已撤回。",
+            client.api.messages[-1]["markdown"]["content"],
+        )
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-2")
+
     async def test_bot_message_is_not_moderated(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "禁止词")
@@ -1343,6 +1376,37 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(client.api.messages[-1]["content"], "图片文字违规，已撤回。")
+
+    async def test_qq_face_label_matches_image_keyword_without_vision_model(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_image_ocr_enabled=True,
+            global_image_reject_keywords="龙年快乐",
+            global_image_reject_reply="表情文字违规，已撤回。",
+            global_image_reject_at_member=False,
+            global_image_ocr_provider_id="vision",
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        event = FakeEvent(client, "[表情:[龙年快乐]] [图片]")
+        event.message_obj.raw_message.raw_data = {
+            "author": {"member_openid": "admin-1"},
+            "attachments": [
+                {
+                    "content_type": "image/gif",
+                    "url": "base64:data:image/gif;base64,R0lGODlhAQABAIAAAAUEBA==",
+                }
+            ],
+        }
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        with patch.object(plugin, "_image_ocr_text", AsyncMock()) as image_ocr:
+            await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        image_ocr.assert_not_awaited()
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        self.assertEqual(client.api.messages[-1]["content"], "表情文字违规，已撤回。")
 
     async def test_global_member_blacklist_overrides_disabled_group_audit(self):
         plugin, client = self.plugin()
@@ -1922,6 +1986,34 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
             ["primary", "fallback-1", "fallback-2"],
         )
+
+    async def test_ai_total_timeout_reserves_time_for_fallbacks(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        calls = []
+
+        async def provider_call(**kwargs):
+            calls.append(kwargs["chat_provider_id"])
+            if len(calls) == 1:
+                await asyncio.sleep(0.08)
+                raise TimeoutError()
+            return SimpleNamespace(
+                role="assistant",
+                completion_text="BLOCK confidence=96 reason=明确违规",
+            )
+
+        plugin.context.llm_generate = provider_call
+        blocked = await plugin._ai_blocks_message(
+            event,
+            "待审核",
+            [],
+            "primary",
+            ["fallback"],
+            timeout_seconds=5,
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(calls, ["primary", "fallback"])
 
     def test_runtime_global_ai_validation_accepts_multiple_fallbacks(self):
         runtime = module.GroupAdminWeb._runtime_settings(

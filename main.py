@@ -28,7 +28,11 @@ from .bilibili import (
     poll_qr_login,
     start_qr_login,
 )
-from .image_ocr import embedded_image_text, ocr_image_url
+from .image_ocr import (
+    embedded_image_text,
+    normalize_vision_image_ref,
+    ocr_image_url,
+)
 from .moderation import ModerationWindows, normalize_message, valid_state_dict
 from .qq_api import (
     QQAPIError,
@@ -1350,7 +1354,7 @@ class QQGroupAdmin(Star):
     def _moderation_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         entry = entry or {}
         def configured_text(source: dict[str, Any], key: str, default: str) -> str:
-            value = source[key] if key in source else default
+            value = source.get(key, default)
             return default if value is None else str(value)
 
         minimum = self._bounded_int(
@@ -2227,7 +2231,15 @@ class QQGroupAdmin(Star):
 
         # A configured vision provider is an explicit opt-in fallback.  Keep it
         # behind the existing semaphore so OCR cannot create an unbounded queue.
+        vision_urls = []
         if provider_id and urls:
+            for url in urls:
+                normalized = await asyncio.to_thread(normalize_vision_image_ref, url)
+                if normalized:
+                    vision_urls.append(normalized)
+                else:
+                    self.logger.debug("跳过无法安全转换的 GIF 图片")
+        if provider_id and vision_urls:
             try:
                 async with asyncio.timeout(max(2, timeout_seconds)):
                     async with self._ai_semaphore:
@@ -2237,7 +2249,7 @@ class QQGroupAdmin(Star):
                                 "只做图片文字转录，不进行内容审核。尽量原样输出可见文字；"
                                 "看不清时输出空行，不要猜测，不要添加解释。"
                             ),
-                            image_urls=urls,
+                            image_urls=vision_urls,
                             system_prompt="你是保守的 OCR 引擎，只转录图片中确实可见的文字。",
                         )
                 if str(getattr(response, "role", "")) != "err":
@@ -2302,7 +2314,14 @@ class QQGroupAdmin(Star):
         block_threshold: int = AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
         result: dict[str, Any] | None = None,
     ) -> bool:
-        vision_urls = image_urls if image_review_enabled else []
+        vision_urls = []
+        if image_review_enabled:
+            for url in dict.fromkeys(image_urls):
+                normalized = await asyncio.to_thread(normalize_vision_image_ref, url)
+                if normalized:
+                    vision_urls.append(normalized)
+                else:
+                    self.logger.debug("跳过无法安全转换的 GIF 图片")
         if not text and not vision_urls:
             return False
         prompt = (
@@ -2331,17 +2350,25 @@ class QQGroupAdmin(Star):
             timeout_seconds, AI_REVIEW_TOTAL_TIMEOUT_SECONDS, 5, 120
         )
         deadline = time.monotonic() + total_timeout
-        for current_provider_id in dict.fromkeys(
-            str(value or "").strip() for value in providers
-        ):
+        candidates = list(
+            dict.fromkeys(str(value or "").strip() for value in providers if value)
+        )
+        for index, current_provider_id in enumerate(candidates):
             if not current_provider_id:
                 continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 errors.append("达到 AI 审核总超时")
                 break
+            # Reserve a slice for every remaining candidate.  A hung primary
+            # must not consume the entire shared budget before fallbacks run.
+            remaining_candidates = len(candidates) - index
+            provider_timeout = max(
+                1.0,
+                min(30.0, remaining / max(1, remaining_candidates)),
+            )
             try:
-                async with asyncio.timeout(min(30, remaining)):
+                async with asyncio.timeout(min(provider_timeout, remaining)):
                     async with self._ai_semaphore:
                         response = await self.context.llm_generate(
                             chat_provider_id=current_provider_id,
@@ -2377,7 +2404,14 @@ class QQGroupAdmin(Star):
                 )
                 return decision
             except Exception as exc:  # noqa: BLE001 - try configured fallback
-                detail = str(exc).strip() or type(exc).__name__
+                if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                    detail = "模型超时"
+                else:
+                    detail = str(exc).strip() or type(exc).__name__
+                # Provider adapters may include request URLs or credentials in
+                # exception text. Keep the warning useful without echoing raw
+                # transport details; the full exception remains debug-only.
+                detail = re.sub(r"https?://\S+", "<url>", detail)[:120]
                 errors.append(f"{current_provider_id}: {detail}")
                 self.logger.debug(
                     "AI 群消息审核模型不可用：provider=%s error=%s",
@@ -2663,31 +2697,6 @@ class QQGroupAdmin(Star):
                 role,
             )
 
-        suspicious_key = self._member_state_key(group_openid, member_openid)
-        if suspicious_key in self._suspicious_members:
-            if hasattr(event, "stop_event"):
-                event.stop_event()
-            try:
-                self._cleanup_tokens()
-                if not any(
-                    data[1:3] == (group_openid, member_openid)
-                    for data in self._verification_tokens.values()
-                ):
-                    await self._send_verification_challenge(
-                        self._client(event),
-                        group_openid,
-                        member_openid,
-                        message_id=message_id,
-                    )
-            except Exception as exc:  # noqa: BLE001 - QQ keyboard boundary
-                self.logger.warning("发送真人验证按钮失败：%s", exc)
-            failed = await self._recall_messages(
-                self._api(event), group_openid, [message_id]
-            )
-            if not failed:
-                self._moderation.remember(delivery_key, True)
-            return
-
         entry = self._group_config(group_openid)
         settings = self._moderation_settings(entry)
         admin_exempt = settings["exempt_admins"] and role in GROUP_ADMIN_ROLES
@@ -2728,6 +2737,38 @@ class QQGroupAdmin(Star):
                 settings["member_whitelist"],
             )
         )
+        # Trusted lists are evaluated before the suspicious-member challenge.
+        # A blacklist still wins over a whitelist above; an explicitly trusted
+        # member can therefore recover from a stale challenge without needing
+        # to solve it first.
+        suspicious_key = self._member_state_key(group_openid, member_openid)
+        if (
+            suspicious_key in self._suspicious_members
+            and not admin_exempt
+            and not member_whitelisted
+        ):
+            if hasattr(event, "stop_event"):
+                event.stop_event()
+            try:
+                self._cleanup_tokens()
+                if not any(
+                    data[1:3] == (group_openid, member_openid)
+                    for data in self._verification_tokens.values()
+                ):
+                    await self._send_verification_challenge(
+                        self._client(event),
+                        group_openid,
+                        member_openid,
+                        message_id=message_id,
+                    )
+            except Exception as exc:  # noqa: BLE001 - QQ keyboard boundary
+                self.logger.warning("发送真人验证按钮失败：%s", exc)
+            failed = await self._recall_messages(
+                self._api(event), group_openid, [message_id]
+            )
+            if not failed:
+                self._moderation.remember(delivery_key, True)
+            return
         text = str(event.get_message_str() or "").strip()
         if not settings["enabled"] or admin_exempt or member_whitelisted:
             if settings["image_enabled"]:
@@ -2759,13 +2800,21 @@ class QQGroupAdmin(Star):
             settings["global_image_keywords"]
             or (settings["image_keyword_enabled"] and settings["image_keywords"])
         ):
-            ocr_text = await self._image_ocr_text(
-                event,
-                images,
-                settings["image_ocr_provider_id"],
-                settings["image_ocr_timeout"],
-                settings["image_ocr_max_images"],
+            ocr_text = embedded_image_text(event)
+            embedded_match = matched_keyword(
+                ocr_text, settings["global_image_keywords"]
+            ) or (
+                settings["image_keyword_enabled"]
+                and matched_keyword(ocr_text, settings["image_keywords"])
             )
+            if not embedded_match:
+                ocr_text = await self._image_ocr_text(
+                    event,
+                    images,
+                    settings["image_ocr_provider_id"],
+                    settings["image_ocr_timeout"],
+                    settings["image_ocr_max_images"],
+                )
             if matched_keyword(ocr_text, settings["global_image_keywords"]):
                 reason = "图片文字命中全局禁止关键词，已撤回。"
                 warn_text = settings["global_image_reply"]
