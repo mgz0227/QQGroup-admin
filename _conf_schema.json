@@ -100,10 +100,17 @@
     "hint": "按顺序填写多个提供商 ID，每行一个；最多 3 个，不能与主模型重复。主模型失败或返回无效结果时才会依次调用。",
     "default": []
   },
+  "global_ai_review_confirm_provider_id": {
+    "type": "string",
+    "description": "AI 二次确认模型",
+    "hint": "可选；仅在初判 BLOCK 后独立复核。确认 ALLOW 时放行，确认失败时只记录、不撤回。不能与主模型或回退模型重复。",
+    "_special": "select_provider",
+    "default": ""
+  },
   "global_ai_review_timeout_seconds": {
     "type": "int",
     "description": "AI 审核总超时（秒）",
-    "hint": "所有主模型和回退模型共享此总时限；超时后本条放行。",
+    "hint": "主模型、回退模型和二次确认共享此总时限；初判全部超时则放行，二次确认超时则只记录。",
     "default": 20,
     "slider": {"min": 5, "max": 120, "step": 5}
   },

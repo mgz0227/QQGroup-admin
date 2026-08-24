@@ -372,6 +372,15 @@
             .filter(Boolean).join(" · ") || "-"
         );
       }
+      if (record.ai_confirm_provider || record.ai_confirm_decision || record.ai_confirm_reason) {
+        recordField(body, "确认模型", record.ai_confirm_provider || "-");
+        recordField(
+          body,
+          "确认判定",
+          [record.ai_confirm_decision, record.ai_confirm_confidence == null ? "" : "置信度 " + record.ai_confirm_confidence, record.ai_confirm_reason]
+            .filter(Boolean).join(" · ") || "-"
+        );
+      }
       recordField(body, "消息内容", record.content || record.message || record.message_content || record.message_summary ||
         (record._summary ? "当前版本仅保存最近一次违规原因，暂无原始消息内容" : "暂无记录内容"));
       list.appendChild(details);
@@ -701,12 +710,18 @@
       runtimeSettings.global_ai_review_fallback_provider_ids || []
     );
     fillProviderSelect(
+      "runtime-ai-confirm-provider",
+      "不进行二次确认",
+      runtimeSettings.global_ai_review_confirm_provider_id || ""
+    );
+    fillProviderSelect(
       "runtime-image-ocr-provider",
       "不使用视觉 OCR 模型",
       runtimeSettings.global_image_ocr_provider_id || ""
     );
     element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
+    element("runtime-ai-confirm-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-image-ocr-provider").disabled = !element("runtime-image-ocr-enabled").checked;
   }
 
@@ -729,6 +744,7 @@
       global_ai_review_enabled: element("runtime-ai-enabled").checked,
       global_ai_review_provider_id: element("runtime-ai-provider").value,
       global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
+      global_ai_review_confirm_provider_id: element("runtime-ai-confirm-provider").value,
       global_ai_review_timeout_seconds: Number(element("runtime-ai-timeout").value),
       global_ai_review_block_threshold: Number(element("runtime-ai-threshold").value),
       global_ai_review_action: element("runtime-ai-action").value,
@@ -1332,6 +1348,7 @@
   element("runtime-ai-enabled").addEventListener("change", function (event) {
     element("runtime-ai-provider").disabled = !event.target.checked;
     element("runtime-ai-fallback-providers").disabled = !event.target.checked;
+    element("runtime-ai-confirm-provider").disabled = !event.target.checked;
   });
   element("runtime-image-ocr-enabled").addEventListener("change", function (event) {
     element("runtime-image-ocr-provider").disabled = !event.target.checked;

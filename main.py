@@ -101,6 +101,7 @@ GROUP_TEMPLATE_KEY = "qq_group"
 GLOBAL_AI_ENABLED_KEY = "global_ai_review_enabled"
 GLOBAL_AI_PROVIDER_KEY = "global_ai_review_provider_id"
 GLOBAL_AI_FALLBACKS_KEY = "global_ai_review_fallback_provider_ids"
+GLOBAL_AI_CONFIRM_PROVIDER_KEY = "global_ai_review_confirm_provider_id"
 GLOBAL_AI_TIMEOUT_KEY = "global_ai_review_timeout_seconds"
 GLOBAL_AI_IMAGES_KEY = "global_ai_review_images_enabled"
 GLOBAL_AI_BLOCK_THRESHOLD_KEY = "global_ai_review_block_threshold"
@@ -387,6 +388,7 @@ class QQGroupAdmin(Star):
             changed = True
         for key, default in (
             (GLOBAL_AI_TIMEOUT_KEY, AI_REVIEW_TOTAL_TIMEOUT_SECONDS),
+            (GLOBAL_AI_CONFIRM_PROVIDER_KEY, ""),
             (GLOBAL_AI_IMAGES_KEY, False),
             (GLOBAL_AI_BLOCK_THRESHOLD_KEY, AI_REVIEW_DEFAULT_BLOCK_THRESHOLD),
             (GLOBAL_AI_ACTION_KEY, "record_only"),
@@ -820,6 +822,18 @@ class QQGroupAdmin(Star):
                 "ai_decision": str((ai_review or {}).get("decision") or "")[:16],
                 "ai_confidence": (ai_review or {}).get("confidence"),
                 "ai_reason": str((ai_review or {}).get("reason") or "")[:200],
+                "ai_confirm_provider": str(
+                    (ai_review or {}).get("confirm_provider") or ""
+                )[:128],
+                "ai_confirm_decision": str(
+                    (ai_review or {}).get("confirm_decision") or ""
+                )[:16],
+                "ai_confirm_confidence": (ai_review or {}).get(
+                    "confirm_confidence"
+                ),
+                "ai_confirm_reason": str(
+                    (ai_review or {}).get("confirm_reason") or ""
+                )[:200],
             }
         )
         self._violation_records = self._violation_records[-2_000:]
@@ -1453,6 +1467,9 @@ class QQGroupAdmin(Star):
             "ai_fallback_provider_ids": normalize_provider_ids(
                 self.config.get(GLOBAL_AI_FALLBACKS_KEY)
             ),
+            "ai_confirm_provider_id": str(
+                self.config.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
+            ).strip(),
             "ai_timeout": self._bounded_int(
                 self.config.get(GLOBAL_AI_TIMEOUT_KEY),
                 AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
@@ -2344,6 +2361,7 @@ class QQGroupAdmin(Star):
         timeout_seconds: int = AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
         image_review_enabled: bool = False,
         block_threshold: int = AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
+        confirm_provider_id: str = "",
         result: dict[str, Any] | None = None,
     ) -> bool:
         vision_urls = []
@@ -2392,9 +2410,11 @@ class QQGroupAdmin(Star):
             if remaining <= 0:
                 errors.append("达到 AI 审核总超时")
                 break
-            # Reserve a slice for every remaining candidate.  A hung primary
-            # must not consume the entire shared budget before fallbacks run.
-            remaining_candidates = len(candidates) - index
+            # Reserve a slice for every remaining candidate so a hung model
+            # cannot consume the budget needed by fallbacks or confirmation.
+            remaining_candidates = len(candidates) - index + bool(
+                str(confirm_provider_id or "").strip()
+            )
             provider_timeout = max(
                 1.0,
                 min(30.0, remaining / max(1, remaining_candidates)),
@@ -2417,14 +2437,14 @@ class QQGroupAdmin(Star):
                 decision = self._ai_decision(raw_decision, block_threshold)
                 if decision is None:
                     raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
-                parsed_decision, confidence, ai_reason = self._ai_decision_details(
+                _, confidence, ai_reason = self._ai_decision_details(
                     raw_decision
                 )
                 if result is not None:
                     result.update(
                         {
                             "provider": current_provider_id,
-                            "decision": parsed_decision,
+                            "decision": "BLOCK" if decision else "ALLOW",
                             "confidence": confidence,
                             "reason": ai_reason,
                         }
@@ -2434,7 +2454,96 @@ class QQGroupAdmin(Star):
                     current_provider_id,
                     "BLOCK" if decision else "ALLOW",
                 )
-                return decision
+                if not decision or not str(confirm_provider_id or "").strip():
+                    return decision
+
+                confirm_provider = str(confirm_provider_id).strip()
+
+                def confirmation_failed(
+                    detail: str,
+                    provider: str = confirm_provider,
+                ) -> bool:
+                    safe_detail = re.sub(r"https?://\S+", "<url>", detail)[:120]
+                    if result is not None:
+                        result.update(
+                            {
+                                "confirm_provider": provider,
+                                "confirm_decision": "ERROR",
+                                "confirm_reason": safe_detail,
+                                "confirmation_failed": True,
+                            }
+                        )
+                    if time.monotonic() >= self._ai_warning_at:
+                        self.logger.warning(
+                            "AI 二次确认失败，本条仅记录未撤回：provider=%s error=%s",
+                            provider,
+                            safe_detail,
+                        )
+                        self._ai_warning_at = time.monotonic() + 300
+                    return True
+
+                if confirm_provider in candidates:
+                    return confirmation_failed("确认模型与初判候选模型重复")
+                confirm_remaining = deadline - time.monotonic()
+                if confirm_remaining <= 0:
+                    return confirmation_failed("达到 AI 审核总超时")
+                try:
+                    async with asyncio.timeout(min(30.0, confirm_remaining)):
+                        async with self._ai_semaphore:
+                            confirm_response = await self.context.llm_generate(
+                                chat_provider_id=confirm_provider,
+                                prompt=prompt,
+                                image_urls=vision_urls or None,
+                                system_prompt=(
+                                    "你是独立的群消息复核器，宁可放行不确定内容。"
+                                    "只按消息本身判断，不得扩大违规范围。"
+                                ),
+                            )
+                    if str(getattr(confirm_response, "role", "")) == "err":
+                        raise RuntimeError("模型返回错误响应")
+                    raw_confirm = str(
+                        getattr(confirm_response, "completion_text", "") or ""
+                    )
+                    confirmed = self._ai_decision(raw_confirm, block_threshold)
+                    if confirmed is None:
+                        raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
+                    _, confirm_confidence, confirm_reason = (
+                        self._ai_decision_details(raw_confirm)
+                    )
+                    if result is not None:
+                        result.update(
+                            {
+                                "confirm_provider": confirm_provider,
+                                "confirm_decision": (
+                                    "BLOCK" if confirmed else "ALLOW"
+                                ),
+                                "confirm_confidence": confirm_confidence,
+                                "confirm_reason": confirm_reason,
+                                "confirmation_failed": False,
+                            }
+                        )
+                    self.logger.debug(
+                        "AI 群消息二次确认完成：provider=%s decision=%s",
+                        confirm_provider,
+                        "BLOCK" if confirmed else "ALLOW",
+                    )
+                    return confirmed
+                except Exception as exc:  # noqa: BLE001 - downgrade to record-only
+                    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                        detail = "模型超时"
+                    elif str(exc) in {
+                        "模型返回错误响应",
+                        "模型未返回带置信度的 ALLOW/BLOCK",
+                    }:
+                        detail = str(exc)
+                    else:
+                        detail = "模型调用失败"
+                    self.logger.debug(
+                        "AI 二次确认模型不可用：provider=%s error_type=%s",
+                        confirm_provider,
+                        type(exc).__name__,
+                    )
+                    return confirmation_failed(detail)
             except Exception as exc:  # noqa: BLE001 - try configured fallback
                 if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                     detail = "模型超时"
@@ -2917,12 +3026,17 @@ class QQGroupAdmin(Star):
                 settings["ai_timeout"],
                 settings["ai_images_enabled"],
                 settings["ai_block_threshold"],
+                settings["ai_confirm_provider_id"],
                 result=ai_review,
             )
         ):
-            ai_record_only = settings["ai_action"] == "record_only"
+            ai_record_only = settings["ai_action"] == "record_only" or bool(
+                ai_review.get("confirmation_failed")
+            )
             reason = (
-                "消息命中 AI 内容审核，仅记录未撤回。"
+                "消息命中 AI 内容审核，二次确认失败，仅记录未撤回。"
+                if ai_review.get("confirmation_failed")
+                else "消息命中 AI 内容审核，仅记录未撤回。"
                 if ai_record_only
                 else "消息未通过 AI 内容审核，已撤回。"
             )
@@ -4478,6 +4592,9 @@ class QQGroupAdmin(Star):
             "global_ai_review_fallback_provider_ids": normalize_provider_ids(
                 self.config.get(GLOBAL_AI_FALLBACKS_KEY)
             ),
+            "global_ai_review_confirm_provider_id": str(
+                self.config.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
+            ).strip(),
             "global_ai_review_timeout_seconds": self._bounded_int(
                 self.config.get(GLOBAL_AI_TIMEOUT_KEY),
                 AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
@@ -4563,6 +4680,7 @@ class QQGroupAdmin(Star):
             "global_ai_review_enabled",
             "global_ai_review_provider_id",
             "global_ai_review_fallback_provider_ids",
+            "global_ai_review_confirm_provider_id",
             "ai_review_enabled",
             "ai_review_provider_id",
             "ai_review_fallback_provider_ids",
@@ -4592,10 +4710,22 @@ class QQGroupAdmin(Star):
                     ),
                 )
             )
+            confirm_provider = str(
+                settings.get(
+                    "global_ai_review_confirm_provider_id",
+                    self.config.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY),
+                )
+                or ""
+            ).strip()
             if primary in fallback_ids:
                 raise ValueError("AI 审核主模型不能出现在回退模型列表")
+            if confirm_provider and (
+                confirm_provider == primary or confirm_provider in fallback_ids
+            ):
+                raise ValueError("AI 二次确认模型不能与主模型或回退模型重复")
             settings["global_ai_review_provider_id"] = primary
             settings["global_ai_review_fallback_provider_ids"] = fallback_ids
+            settings["global_ai_review_confirm_provider_id"] = confirm_provider
             if "global_ai_review_enabled" not in settings:
                 settings["global_ai_review_enabled"] = bool(
                     settings.get(

@@ -512,6 +512,12 @@ class GroupAdminWeb:
             settings["global_ai_review_fallback_provider_ids"] = cls._provider_ids(
                 payload[fallback_key]
             )
+        if "global_ai_review_confirm_provider_id" in payload:
+            settings["global_ai_review_confirm_provider_id"] = cls._text(
+                payload["global_ai_review_confirm_provider_id"],
+                "AI 二次确认模型",
+                256,
+            )
         for key, default, minimum, maximum, label in (
             (
                 "global_ai_review_timeout_seconds",
@@ -561,6 +567,13 @@ class GroupAdminWeb:
             in settings["global_ai_review_fallback_provider_ids"]
         ):
             raise ValueError("AI 审核主模型不能出现在回退模型列表")
+        confirm_provider = settings.get("global_ai_review_confirm_provider_id", "")
+        if confirm_provider and (
+            confirm_provider == settings.get("global_ai_review_provider_id")
+            or confirm_provider
+            in settings.get("global_ai_review_fallback_provider_ids", [])
+        ):
+            raise ValueError("AI 二次确认模型不能与主模型或回退模型重复")
         # Older cached WebUI bundles do not send the newer per-reason reply
         # fields.  Treat those keys as a partial update so a stale page cannot
         # erase values already configured in the current runtime settings.
@@ -1093,6 +1106,10 @@ class GroupAdminWeb:
                 "AI 判定",
                 "AI 置信度",
                 "AI 理由",
+                "确认模型",
+                "确认判定",
+                "确认置信度",
+                "确认理由",
                 "消息 ID",
             )
         )
@@ -1124,6 +1141,10 @@ class GroupAdminWeb:
                     record.get("ai_decision"),
                     record.get("ai_confidence"),
                     record.get("ai_reason"),
+                    record.get("ai_confirm_provider"),
+                    record.get("ai_confirm_decision"),
+                    record.get("ai_confirm_confidence"),
+                    record.get("ai_confirm_reason"),
                     record.get("message_id"),
                 )
             )

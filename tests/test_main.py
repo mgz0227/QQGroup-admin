@@ -1,4 +1,5 @@
 import asyncio
+import json
 import logging
 import sys
 import types
@@ -2002,6 +2003,131 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin.context.llm_generate.assert_awaited_once()
 
+    async def test_ai_confirmation_allow_overrides_primary_block(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=疑似违规",
+                ),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="ALLOW confidence=99 reason=正常聊天",
+                ),
+            ]
+        )
+        result = {}
+
+        blocked = await plugin._ai_blocks_message(
+            event,
+            "待审核",
+            [],
+            "primary",
+            confirm_provider_id="confirm",
+            result=result,
+        )
+
+        self.assertFalse(blocked)
+        self.assertEqual(
+            [
+                call.kwargs["chat_provider_id"]
+                for call in plugin.context.llm_generate.await_args_list
+            ],
+            ["primary", "confirm"],
+        )
+        self.assertEqual(result["confirm_provider"], "confirm")
+        self.assertEqual(result["confirm_decision"], "ALLOW")
+
+    async def test_ai_confirmation_block_confirms_primary_block(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=疑似违规",
+                ),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="拦截 置信度=97 原因=确认违规",
+                ),
+            ]
+        )
+        result = {}
+
+        blocked = await plugin._ai_blocks_message(
+            event,
+            "待审核",
+            [],
+            "primary",
+            confirm_provider_id="confirm",
+            result=result,
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(result["confirm_decision"], "BLOCK")
+        self.assertFalse(result["confirmation_failed"])
+
+    async def test_ai_confirmation_failure_downgrades_recall_to_record_only(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary",
+            global_ai_review_confirm_provider_id="confirm",
+            global_ai_review_action="recall",
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=疑似违规",
+                ),
+                RuntimeError("Authorization: Bearer sk-confirm-secret"),
+            ]
+        )
+        event = FakeEvent(client, "待审核")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertFalse(event.stopped)
+        api.recall_group_message.assert_not_awaited()
+        record = plugin._violation_records[-1]
+        self.assertEqual(record["action"], "record_only")
+        self.assertEqual(record["ai_confirm_provider"], "confirm")
+        self.assertEqual(record["ai_confirm_decision"], "ERROR")
+        self.assertEqual(record["ai_confirm_reason"], "模型调用失败")
+        self.assertNotIn("sk-confirm-secret", str(record))
+
+    async def test_ai_confirmation_provider_cannot_be_initial_candidate(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant",
+                completion_text="BLOCK confidence=98 reason=疑似违规",
+            )
+        )
+        result = {}
+
+        blocked = await plugin._ai_blocks_message(
+            FakeEvent(client, "待审核"),
+            "待审核",
+            [],
+            "primary",
+            ["confirm"],
+            confirm_provider_id="confirm",
+            result=result,
+        )
+
+        self.assertTrue(blocked)
+        plugin.context.llm_generate.assert_awaited_once()
+        self.assertTrue(result["confirmation_failed"])
+        self.assertEqual(result["confirm_reason"], "确认模型与初判候选模型重复")
+
     async def test_ai_image_review_is_opt_in(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "")
@@ -2143,6 +2269,55 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(runtime["global_image_reject_keywords"], "水印\n广告")
         self.assertEqual(runtime["global_image_ocr_max_images"], 2)
 
+    async def test_runtime_ai_confirmation_provider_is_distinct(self):
+        runtime = module.GroupAdminWeb._runtime_settings(
+            {"global_ai_review_confirm_provider_id": "confirm"}
+        )
+        self.assertEqual(
+            runtime["global_ai_review_confirm_provider_id"],
+            "confirm",
+        )
+        for settings in (
+            {
+                "global_ai_review_provider_id": "same",
+                "global_ai_review_confirm_provider_id": "same",
+            },
+            {
+                "global_ai_review_fallback_provider_ids": ["same"],
+                "global_ai_review_confirm_provider_id": "same",
+            },
+        ):
+            with self.subTest(settings=settings), self.assertRaisesRegex(
+                ValueError,
+                "确认模型不能",
+            ):
+                module.GroupAdminWeb._runtime_settings(settings)
+
+        plugin, _ = self.plugin()
+        plugin.config.update(
+            global_ai_review_provider_id="primary",
+            global_ai_review_fallback_provider_ids=["fallback"],
+        )
+        with self.assertRaisesRegex(ValueError, "确认模型不能"):
+            await plugin.web_save_runtime_settings(
+                {"global_ai_review_confirm_provider_id": "fallback"}
+            )
+
+    def test_runtime_page_exposes_ai_confirmation_provider(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        field = schema["global_ai_review_confirm_provider_id"]
+        self.assertEqual(field["_special"], "select_provider")
+        self.assertEqual(field["default"], "")
+
+        html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
+        script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="runtime-ai-confirm-provider"', html)
+        self.assertIn(
+            'global_ai_review_confirm_provider_id: element("runtime-ai-confirm-provider").value',
+            script,
+        )
+        self.assertGreaterEqual(script.count('"runtime-ai-confirm-provider"'), 3)
+
     def test_ai_decision_requires_confidence_and_is_conservative(self):
         self.assertIsNone(module.QQGroupAdmin._ai_decision("BLOCK", 95))
         self.assertTrue(
@@ -2279,6 +2454,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                     "username": "=2+2",
                     "content": "\t=HYPERLINK(\"https://example.invalid\")",
                     "action": "record_only",
+                    "ai_confirm_provider": "confirm",
+                    "ai_confirm_decision": "ERROR",
+                    "ai_confirm_reason": "timeout",
                 }
             ]
         )
@@ -2291,6 +2469,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(export_data["content"].startswith("\ufeff时间,"))
         self.assertIn("'=2+2", export_data["content"])
         self.assertIn("'\t=HYPERLINK", export_data["content"])
+        self.assertIn("确认模型", export_data["content"])
+        self.assertIn("confirm", export_data["content"])
+        self.assertIn("timeout", export_data["content"])
         plugin.web_violation_export.assert_awaited_once_with("违规")
 
     async def test_recall_recent_messages_uses_received_message_cache(self):

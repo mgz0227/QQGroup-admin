@@ -188,6 +188,7 @@
             <label class="checkbox runtime-toggle"><input id="runtime-ai-enabled" type="checkbox"><span>启用全局 AI 内容审核</span></label>
             <label><span>主模型</span><select id="runtime-ai-provider"></select></label>
             <label class="wide"><span>回退模型（可多选，按顺序尝试）</span><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，主模型不能重复选择。</small></label>
+            <label><span>二次确认模型（可选）</span><select id="runtime-ai-confirm-provider"></select><small>仅在初判 BLOCK 后调用；确认失败时只记录。</small></label>
             <label><span>审核总超时（秒）</span><input id="runtime-ai-timeout" type="number" min="5" max="120" required></label>
             <label><span>拦截置信度阈值</span><input id="runtime-ai-threshold" type="number" min="50" max="100" required></label>
             <label><span>AI 命中动作</span><select id="runtime-ai-action"><option value="record_only">只记录，不撤回</option><option value="recall">撤回消息</option></select></label>
