@@ -542,6 +542,62 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已创建", created[0])
         self.assertIn("已更新", updated[0])
 
+    async def test_sync_command_panel_finds_managed_panel_on_later_page(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client)
+        api = SimpleNamespace(
+            list_group_panels=AsyncMock(
+                side_effect=[
+                    {"records": [], "next_cursor": "page-2", "is_end": False},
+                    {
+                        "records": [
+                            {
+                                "panel_id": "panel-2",
+                                "target_type": "all",
+                                "panel": {"remark": module.COMMAND_PANEL_REMARK},
+                            }
+                        ],
+                        "next_cursor": "",
+                        "is_end": True,
+                    },
+                ]
+            ),
+            create_group_panel=AsyncMock(),
+            update_panel=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        results = [result async for result in plugin.sync_command_panel(event)]
+
+        self.assertIn("已更新", results[0])
+        api.create_group_panel.assert_not_awaited()
+        api.update_panel.assert_awaited_once_with("panel-2", module.COMMAND_PANEL)
+        self.assertEqual(
+            [call.kwargs for call in api.list_group_panels.await_args_list],
+            [{}, {"cursor": "page-2"}],
+        )
+
+    async def test_sync_command_panel_rejects_repeated_cursor(self):
+        plugin, client = self.plugin()
+        api = SimpleNamespace(
+            list_group_panels=AsyncMock(
+                side_effect=[
+                    {"records": [], "next_cursor": "same", "is_end": False},
+                    {"records": [], "next_cursor": "same", "is_end": False},
+                ]
+            ),
+            create_group_panel=AsyncMock(),
+            update_panel=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        results = [
+            result async for result in plugin.sync_command_panel(FakeEvent(client))
+        ]
+
+        self.assertIn("游标重复", results[0])
+        api.create_group_panel.assert_not_awaited()
+
     async def test_sync_command_panel_serializes_concurrent_creation(self):
         plugin, client = self.plugin()
         records = []
@@ -1547,6 +1603,109 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(event.stopped)
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+
+    async def test_repeat_mutes_random_member_and_sends_separate_notice(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            moderation_enabled=True,
+            moderation_exempt_admins=False,
+            repeat_review_enabled=True,
+            repeat_count=3,
+            repeat_window_seconds=30,
+            repeat_mute_min_seconds=10,
+            repeat_mute_max_seconds=20,
+            repeat_reply="复读成员已禁言 {duration} 秒。",
+            repeat_at_member=False,
+        )
+        order = []
+
+        async def mute(*args):
+            order.append(("mute", args))
+
+        async def recall(*args):
+            order.append(("recall", args))
+
+        async def notice(**kwargs):
+            order.append(("notice", kwargs))
+            return SimpleNamespace(id="notice-1")
+
+        api = SimpleNamespace(
+            set_member_mutes=mute,
+            recall_group_message=recall,
+        )
+        plugin._api = lambda _event: api
+        client.api.post_group_message = notice
+        members = ["member-1", "member-2", "member-1"]
+
+        with (
+            patch.object(module.secrets, "choice", return_value="member-2"),
+            patch.object(module.secrets, "randbelow", return_value=7),
+            patch.object(module, "future_rfc3339", return_value="expires-17"),
+        ):
+            for index, member in enumerate(members, 1):
+                event = FakeEvent(client, "同一条消息")
+                event.message_obj.message_id = f"message-{index}"
+                event.message_obj.raw_message.author = SimpleNamespace(
+                    member_openid=member
+                )
+                await plugin.audit_group_message(event)
+
+        self.assertEqual([item[0] for item in order], ["mute", "notice", "recall"])
+        self.assertEqual(
+            order[0][1],
+            (
+                "group-1",
+                [
+                    {
+                        "op": "add",
+                        "member_openid": "member-2",
+                        "mute_expire_at": "expires-17",
+                    }
+                ],
+            ),
+        )
+        self.assertEqual(order[1][1]["content"], "复读成员已禁言 17 秒。")
+        self.assertEqual(order[2][1], ("group-1", "message-3"))
+
+    async def test_repeat_mute_failure_does_not_send_success_notice(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            moderation_enabled=True,
+            moderation_exempt_admins=False,
+            repeat_review_enabled=True,
+            repeat_count=3,
+            repeat_window_seconds=30,
+            repeat_mute_min_seconds=10,
+            repeat_mute_max_seconds=20,
+            repeat_reply="禁言成功 {duration} 秒。",
+            repeat_at_member=True,
+        )
+        notice = AsyncMock()
+        client.api.post_group_message = notice
+        api = SimpleNamespace(
+            set_member_mutes=AsyncMock(side_effect=module.QQAPIError(status=500)),
+            recall_group_message=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+
+        with (
+            patch.object(module.secrets, "choice", return_value="member-2"),
+            patch.object(module.secrets, "randbelow", return_value=0),
+            patch.object(module, "future_rfc3339", return_value="expires-10"),
+        ):
+            for index, member in enumerate(
+                ["member-1", "member-2", "member-1"], 1
+            ):
+                event = FakeEvent(client, "同一条消息")
+                event.message_obj.message_id = f"message-{index}"
+                event.message_obj.raw_message.author = SimpleNamespace(
+                    member_openid=member
+                )
+                await plugin.audit_group_message(event)
+
+        notice.assert_not_awaited()
 
     async def test_member_list_matches_union_openid_and_bound_uid(self):
         plugin, client = self.plugin()

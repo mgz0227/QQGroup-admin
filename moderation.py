@@ -28,6 +28,7 @@ class ModerationWindows:
         self.repeats: dict[tuple[str, str], list[tuple[float, str, str, str]]] = (
             defaultdict(list)
         )
+        self.repeat_last_signature: dict[str, str] = {}
 
     def duplicate(
         self,
@@ -199,8 +200,12 @@ class ModerationWindows:
         now: float | None = None,
     ) -> list[str]:
         if not signature:
+            self._reset_repeat_group(group_openid)
             return []
         now = time.monotonic() if now is None else now
+        if self.repeat_last_signature.get(group_openid) != signature:
+            self._reset_repeat_group(group_openid)
+            self.repeat_last_signature[group_openid] = signature
         key = (group_openid, signature)
         if len(self.repeats) >= 2000 and key not in self.repeats:
             # ponytail: a hard cap may forget an old pattern; persistent evidence
@@ -220,6 +225,16 @@ class ModerationWindows:
             return []
         self.repeats.pop(key, None)
         return members
+
+    def _reset_repeat_group(self, group_openid: str) -> None:
+        self.repeat_last_signature.pop(group_openid, None)
+        # ponytail: scan at most 2,000 phrase keys; index by group only if this
+        # bound becomes a measurable hot path.
+        for key in [key for key in self.repeats if key[0] == group_openid]:
+            self.repeats.pop(key, None)
+
+    def break_repeat(self, group_openid: str) -> None:
+        self._reset_repeat_group(group_openid)
 
 
 def valid_state_dict(value: Any) -> dict[str, dict[str, Any]]:

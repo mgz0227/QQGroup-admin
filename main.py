@@ -2854,6 +2854,7 @@ class QQGroupAdmin(Star):
             settings["member_blacklist"],
         )
         if not admin_exempt and (global_blacklist_match or group_blacklist_match):
+            self._moderation.break_repeat(group_openid)
             await self._handle_member_blacklist(
                 event,
                 group_openid,
@@ -2888,6 +2889,7 @@ class QQGroupAdmin(Star):
             and not admin_exempt
             and not member_whitelisted
         ):
+            self._moderation.break_repeat(group_openid)
             if hasattr(event, "stop_event"):
                 event.stop_event()
             try:
@@ -2912,6 +2914,7 @@ class QQGroupAdmin(Star):
             return
         text = str(event.get_message_str() or "").strip()
         if not settings["enabled"] or admin_exempt or member_whitelisted:
+            self._moderation.break_repeat(group_openid)
             if settings["image_enabled"]:
                 self._moderation.break_image_chain(group_openid, member_openid)
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
@@ -2998,7 +3001,9 @@ class QQGroupAdmin(Star):
             self._moderation.break_image_chain(group_openid, member_openid)
 
         repeat_members: list[str] = []
-        if not reason and settings["repeat_enabled"]:
+        if reason:
+            self._moderation.break_repeat(group_openid)
+        elif settings["repeat_enabled"]:
             signature = "" if pure_image_count else normalize_message(text)
             repeat_members = self._moderation.add_repeat(
                 group_openid,
@@ -3014,6 +3019,8 @@ class QQGroupAdmin(Star):
                 warn_text = settings["repeat_reply"]
                 warn_at_member = settings["repeat_at"]
                 recall_ids = [message_id]
+        else:
+            self._moderation.break_repeat(group_openid)
         if (
             not reason
             and settings["ai_enabled"]
@@ -3074,6 +3081,8 @@ class QQGroupAdmin(Star):
             except (QQAPIError, ValueError) as exc:
                 self.logger.warning("复读随机禁言失败：%s", exc)
                 reason = "检测到集中复读，相关消息已撤回；随机禁言失败。"
+                warn_text = ""
+                warn_at_member = False
             else:
                 reason = f"参与集中复读，已随机禁言 {duration} 秒。"
                 if "{duration}" in warn_text:
@@ -3239,10 +3248,35 @@ class QQGroupAdmin(Star):
         self._context(event)
         api = self._api(event)
         async with self._command_panel_lock:
-            data = await api.list_group_panels()
-            records = data.get("records") if isinstance(data, dict) else None
-            if not isinstance(records, list):
-                raise TypeError("QQ API 未返回有效的指令面板列表")
+            records = []
+            cursor = ""
+            seen_cursors = {""}
+            while True:
+                data = (
+                    await api.list_group_panels(cursor=cursor)
+                    if cursor
+                    else await api.list_group_panels()
+                )
+                page_records = data.get("records") if isinstance(data, dict) else None
+                if not isinstance(page_records, list):
+                    raise TypeError("QQ API 未返回有效的指令面板列表")
+                records.extend(page_records)
+                raw_next_cursor = data.get("next_cursor")
+                if raw_next_cursor is None:
+                    next_cursor = ""
+                elif isinstance(raw_next_cursor, str):
+                    next_cursor = raw_next_cursor.strip()
+                else:
+                    raise TypeError("QQ API 返回了无效的指令面板分页游标")
+                is_end = data.get("is_end")
+                if is_end is False and not next_cursor:
+                    raise RuntimeError("QQ API 指令面板分页游标缺失")
+                if is_end is True or not next_cursor:
+                    break
+                if next_cursor in seen_cursors:
+                    raise RuntimeError("QQ API 指令面板分页游标重复")
+                seen_cursors.add(next_cursor)
+                cursor = next_cursor
             managed = [
                 record
                 for record in records

@@ -519,7 +519,8 @@
           },
           "repeat_review_enabled": {
             "type": "bool",
-            "description": "检测集中复读",
+            "description": "检测不同成员连续复读并随机禁言",
+            "hint": "只有连续消息内容相同且来自至少 2 名普通成员时触发；任意不同内容会打断当前序列。",
             "default": false
           },
           "repeat_count": {
@@ -546,7 +547,8 @@
           },
           "repeat_reply": {
             "type": "string",
-            "description": "复读处置回复",
+            "description": "复读禁言后提示",
+            "hint": "禁言成功后单独发送；支持 {duration} 实际秒数和 {at_user} QQ 艾特。留空且关闭艾特时不发送。",
             "default": "检测到集中复读，已随机禁言一名参与者。"
           },
           "repeat_at_member": {

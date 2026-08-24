@@ -273,8 +273,11 @@ class QQGroupAPI:
         group = self._id(group_openid, "群 OpenID")
         return await self._request("GET", f"/v2/groups/{group}/bot_state")
 
-    async def list_group_panels(self) -> dict[str, Any]:
-        return await self._request("GET", "/v2/panels?scope=group&limit=50")
+    async def list_group_panels(self, *, cursor: str = "") -> dict[str, Any]:
+        path = "/v2/panels?scope=group&limit=50"
+        if cursor:
+            path += f"&cursor={quote(str(cursor), safe='')}"
+        return await self._request("GET", path)
 
     async def create_group_panel(self, panel: dict[str, Any]) -> dict[str, Any]:
         return await self._request(

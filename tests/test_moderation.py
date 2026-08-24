@@ -106,6 +106,23 @@ class ModerationWindowsTest(unittest.TestCase):
             ),
             ["u1", "u2"],
         )
+
+        state = ModerationWindows()
+        state.add_repeat("g", "x", "u1", "member", "m1", threshold=3, window=10, now=1)
+        state.add_repeat("g", "y", "u2", "member", "m2", threshold=3, window=10, now=2)
+        state.add_repeat("g", "x", "u2", "member", "m3", threshold=3, window=10, now=3)
+        self.assertEqual(
+            state.add_repeat(
+                "g", "x", "u1", "member", "m4", threshold=3, window=10, now=4
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_repeat(
+                "g", "x", "u2", "member", "m5", threshold=3, window=10, now=5
+            ),
+            ["u2", "u1"],
+        )
         key = ("p", "g", "m", "1")
         self.assertIsNone(state.duplicate(key, now=1))
         state.remember(key, True, now=1)

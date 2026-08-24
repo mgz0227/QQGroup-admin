@@ -195,6 +195,16 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(calls[2][2]["json"], {"panel": panel})
 
+    async def test_group_command_panel_cursor_is_encoded(self):
+        client = FakeClient(FakeResponse(200, {}))
+
+        await QQGroupAPI(client).list_group_panels(cursor="a+/=")
+
+        self.assertEqual(
+            client.http._session.calls[0][1],
+            "https://api.bot.qq.com/v2/panels?scope=group&limit=50&cursor=a%2B%2F%3D",
+        )
+
     async def test_error_keeps_code_and_trace_id(self):
         client = FakeClient(
             FakeResponse(
