@@ -144,24 +144,12 @@
           <div class="list-header global-keyword-header">
             <div>
               <h2>全局关键词回复</h2>
-              <p>单群规则优先，全局规则按列表顺序匹配。</p>
+              <p>单群规则优先，全局规则按列表顺序匹配；冷却和自动撤回时间请在“运行配置”的群级策略中设置。</p>
             </div>
             <div class="header-actions">
               <button class="button secondary" id="add-global-keyword-reply" type="button">添加回复</button>
               <button class="button" id="save-global-keyword-replies" type="submit">保存</button>
             </div>
-          </div>
-          <div class="global-keyword-defaults">
-            <label>
-              <span>单群冷却（秒）</span>
-              <input id="global-keyword-cooldown" type="number" min="0" max="3600" required>
-              <small>同一群触发回复后，冷却期间不再触发其他关键词回复；0 表示关闭。</small>
-            </label>
-            <label>
-              <span>回复自动撤回（秒）</span>
-              <input id="global-keyword-recall" type="number" min="0" max="120" required>
-              <small>0 表示不撤回，最大 120 秒。</small>
-            </label>
           </div>
           <div class="global-keyword-list" id="global-keyword-replies">
             <p class="empty-rules">正在加载...</p>
@@ -176,6 +164,23 @@
             <button class="button" id="save-runtime" type="submit">保存</button>
           </div>
           <div class="runtime-grid">
+            <div class="section-title wide">群级全局策略</div>
+            <div class="global-policy-toolbar wide">
+              <label><span>当前策略</span><select id="runtime-policy-select" aria-label="当前全局策略"></select></label>
+              <div class="header-actions">
+                <button class="button secondary small-button" id="runtime-policy-add" type="button">新增策略</button>
+                <button class="button secondary small-button" id="runtime-policy-delete" type="button">删除策略</button>
+                <button class="button small-button" id="runtime-policy-save" type="button">保存策略</button>
+              </div>
+            </div>
+            <label><span>策略名称</span><input id="runtime-policy-name" maxlength="80" required></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-policy-enabled" type="checkbox"><span>启用当前策略</span></label>
+            <fieldset class="global-group-scope wide runtime-policy-scope">
+              <legend>覆盖群</legend>
+              <label class="checkbox"><input id="runtime-policy-all-groups" type="checkbox"><span>全部已绑定群（包含以后新增的群）</span></label>
+              <div class="group-choice-grid" id="runtime-policy-groups"></div>
+            </fieldset>
+            <p class="config-note wide">策略按列表顺序匹配；同一群命中第一套启用策略。每套策略可独立设置入群关键词、黑白名单、AI 主备模型、图片 OCR、回复和冷却。运行轮询间隔、B站登录账号等平台级参数仍保持单份。</p>
             <div class="section-title wide">入群审核</div>
             <label><span>审核轮询间隔（秒）</span><input id="runtime-review-interval" type="number" min="15" max="600" required></label>
             <label class="checkbox runtime-toggle"><input id="runtime-settings-command" type="checkbox"><span>启用群内审核设置命令</span></label>
@@ -186,6 +191,8 @@
             <label class="wide"><span>全局消息撤回关键词</span><textarea id="runtime-message-reject-keywords" rows="4" placeholder="每行一个关键词"></textarea></label>
             <label class="wide"><span>全局文字关键词撤回回复</span><textarea id="runtime-message-reject-reply" maxlength="1000" rows="2"></textarea></label>
             <label class="checkbox runtime-toggle"><input id="runtime-message-reject-at" type="checkbox"><span>全局文字关键词撤回时艾特成员</span></label>
+            <label><span>关键词回复单群冷却（秒）</span><input id="runtime-policy-keyword-cooldown" type="number" min="0" max="3600" required><small>同一群在冷却期内不重复触发；0 表示关闭。</small></label>
+            <label><span>关键词回复自动撤回（秒）</span><input id="runtime-policy-keyword-recall" type="number" min="0" max="120" required><small>0 表示不撤回。</small></label>
             <div class="section-title wide">全局成员名单</div>
             <label class="wide"><span>全局消息审核黑名单</span><textarea id="runtime-member-blacklist" rows="4" placeholder="成员 OpenID、Union OpenID 或已绑定的 B站 UID，每行一个"></textarea><small>黑名单优先于白名单；命中后所有群立即撤回消息。管理员豁免仍有效。</small></label>
             <label class="wide"><span>全局消息审核白名单</span><textarea id="runtime-member-whitelist" rows="4" placeholder="成员 OpenID、Union OpenID 或已绑定的 B站 UID，每行一个"></textarea><small>命中后跳过消息审核，但仍可触发关键词回复。</small></label>

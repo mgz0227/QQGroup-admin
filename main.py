@@ -126,6 +126,7 @@ GLOBAL_IMAGE_OCR_PROVIDER_KEY = "global_image_ocr_provider_id"
 GLOBAL_IMAGE_OCR_TIMEOUT_KEY = "global_image_ocr_timeout_seconds"
 GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY = "global_image_ocr_max_images"
 GLOBAL_AI_MIGRATED_KEY = "global_ai_review_migrated"
+GLOBAL_POLICIES_KEY = "global_policy_profiles"
 MAX_AI_FALLBACK_PROVIDERS = 3
 AI_REVIEW_TOTAL_TIMEOUT_SECONDS = 20
 AI_REVIEW_DEFAULT_BLOCK_THRESHOLD = 95
@@ -174,6 +175,39 @@ SETTINGS_ACTIONS = {
 }
 STATE_KEY = "qqgroup_admin_state_v1"
 VIOLATION_REVIEW_STATUSES = frozenset({"pending", "confirmed", "false_positive"})
+
+GLOBAL_POLICY_DEFAULTS = {
+    "settings_command_enabled": True,
+    "settings_panel_auto_recall": True,
+    "mute_success_message": "已设置禁言，至 {expire_at}。",
+    "global_reject_keywords": "",
+    "global_message_reject_keywords": "",
+    "global_message_reject_reply": "消息命中全局禁止关键词，已撤回。",
+    "global_message_reject_at_member": True,
+    "global_member_blacklist": "",
+    "global_member_whitelist": "",
+    "global_blacklist_reply": "成员命中群聊黑名单，消息已撤回。",
+    "global_blacklist_at_member": True,
+    GLOBAL_AI_ENABLED_KEY: False,
+    GLOBAL_AI_PROVIDER_KEY: "",
+    GLOBAL_AI_FALLBACKS_KEY: [],
+    GLOBAL_AI_CONFIRM_PROVIDER_KEY: "",
+    GLOBAL_AI_TIMEOUT_KEY: AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
+    GLOBAL_AI_IMAGES_KEY: False,
+    GLOBAL_AI_BLOCK_THRESHOLD_KEY: AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
+    GLOBAL_AI_ACTION_KEY: "record_only",
+    "global_ai_reject_reply": "消息未通过 AI 内容审核，已撤回。",
+    "global_ai_reject_at_member": True,
+    GLOBAL_IMAGE_KEYWORDS_KEY: "",
+    "global_image_reject_reply": "图片文字命中全局禁止关键词，已撤回。",
+    "global_image_reject_at_member": True,
+    GLOBAL_IMAGE_OCR_ENABLED_KEY: False,
+    GLOBAL_IMAGE_OCR_PROVIDER_KEY: "",
+    GLOBAL_IMAGE_OCR_TIMEOUT_KEY: IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS,
+    GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY: IMAGE_OCR_DEFAULT_MAX_IMAGES,
+    "keyword_reply_cooldown_seconds": 0,
+    "keyword_reply_recall_seconds": 0,
+}
 
 
 def normalize_provider_ids(
@@ -1657,9 +1691,72 @@ class QQGroupAdmin(Star):
         self.config.save_config()
         return entry
 
+    @staticmethod
+    def _policy_group_openids(policy: dict[str, Any]) -> list[str]:
+        value = policy.get("group_openids", [])
+        if isinstance(value, str):
+            value = re.split(r"[\s,，;；]+", value.strip())
+        if not isinstance(value, list):
+            return []
+        return list(
+            dict.fromkeys(str(item or "").strip() for item in value if str(item or "").strip())
+        )
+
+    def _configured_global_policies(self) -> list[dict[str, Any]]:
+        value = self.config.get(GLOBAL_POLICIES_KEY)
+        if not isinstance(value, list):
+            return []
+        return [item for item in value if isinstance(item, dict)]
+
+    def _legacy_global_policy(self) -> dict[str, Any]:
+        policy = {
+            "name": "默认全局策略",
+            "enabled": True,
+            "group_openids": [],
+        }
+        for key, default in GLOBAL_POLICY_DEFAULTS.items():
+            value = self.config.get(key, default)
+            policy[key] = list(value) if isinstance(value, list) else value
+        return policy
+
+    def _global_policy_for_group(self, group_openid: str) -> dict[str, Any]:
+        policies = self._configured_global_policies()
+        if not policies:
+            return self._legacy_global_policy()
+        for policy in policies:
+            if not bool(policy.get("enabled", True)):
+                continue
+            groups = self._policy_group_openids(policy)
+            if not groups or group_openid in groups:
+                return policy
+        return {}
+
+    def _set_global_policy_value_for_group(
+        self, group_openid: str, key: str, value: Any
+    ) -> None:
+        policies = self._configured_global_policies()
+        if not policies:
+            self.config[key] = value
+            return
+        for policy in policies:
+            if not bool(policy.get("enabled", True)):
+                continue
+            groups = self._policy_group_openids(policy)
+            if not groups or group_openid in groups:
+                policy[key] = value
+                return
+        raise ValueError("当前群未匹配任何全局策略，请先在 WebUI 选择覆盖群")
+
+    @staticmethod
+    def _policy_value(policy: dict[str, Any], key: str) -> Any:
+        default = GLOBAL_POLICY_DEFAULTS[key]
+        value = policy.get(key, default)
+        return list(value) if isinstance(value, list) else value
+
     def _condition_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         if entry is None:
             return {"enabled": False}
+        policy = self._global_policy_for_group(str(entry.get("group_openid") or ""))
         logic = str(entry.get("condition_logic") or "all")
         fallback = str(entry.get("fallback_action") or "pending")
         if logic not in CONDITION_LOGICS:
@@ -1673,7 +1770,7 @@ class QQGroupAdmin(Star):
             "uid_exists_auto_approve": uid_check_enabled
             and bool(entry.get("uid_exists_auto_approve", False)),
             "global_reject_keywords": parse_keywords(
-                str(self.config.get("global_reject_keywords") or "")
+                str(self._policy_value(policy, "global_reject_keywords") or "")
             ),
             "approve_keywords": parse_keywords(
                 str(entry.get("approve_keywords") or "")
@@ -1707,6 +1804,7 @@ class QQGroupAdmin(Star):
 
     def _moderation_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         entry = entry or {}
+        policy = self._global_policy_for_group(str(entry.get("group_openid") or ""))
         def configured_text(source: dict[str, Any], key: str, default: str) -> str:
             value = source.get(key, default)
             return default if value is None else str(value)
@@ -1721,20 +1819,20 @@ class QQGroupAdmin(Star):
             "enabled": bool(entry.get("moderation_enabled", False)),
             "exempt_admins": bool(entry.get("moderation_exempt_admins", True)),
             "global_member_blacklist": parse_member_list(
-                self.config.get("global_member_blacklist", "")
+                self._policy_value(policy, "global_member_blacklist")
             ),
             "global_member_whitelist": parse_member_list(
-                self.config.get("global_member_whitelist", "")
+                self._policy_value(policy, "global_member_whitelist")
             ),
             "global_blacklist_reply": str(
                 configured_text(
-                    self.config,
+                    policy,
                     "global_blacklist_reply",
                     "成员命中群聊黑名单，消息已撤回。",
                 )
             ),
             "global_blacklist_at": bool(
-                self.config.get("global_blacklist_at_member", True)
+                self._policy_value(policy, "global_blacklist_at_member")
             ),
             "member_blacklist": parse_member_list(entry.get("member_blacklist", "")),
             "member_whitelist": parse_member_list(entry.get("member_whitelist", "")),
@@ -1747,17 +1845,17 @@ class QQGroupAdmin(Star):
             ),
             "blacklist_at": bool(entry.get("blacklist_at_member", True)),
             "global_keywords": parse_keywords(
-                str(self.config.get("global_message_reject_keywords") or "")
+                str(self._policy_value(policy, "global_message_reject_keywords") or "")
             ),
             "global_keyword_reply": str(
                 configured_text(
-                    self.config,
+                    policy,
                     "global_message_reject_reply",
                     "消息命中全局禁止关键词，已撤回。",
                 )
             ),
             "global_keyword_at": bool(
-                self.config.get("global_message_reject_at_member", True)
+                self._policy_value(policy, "global_message_reject_at_member")
             ),
             "keywords": parse_keywords(str(entry.get("message_reject_keywords") or "")),
             "keyword_reply": str(
@@ -1768,55 +1866,57 @@ class QQGroupAdmin(Star):
                 )
             ),
             "keyword_at": bool(entry.get("message_reject_at_member", True)),
-            "ai_enabled": bool(self.config.get(GLOBAL_AI_ENABLED_KEY, False)),
+            "ai_enabled": bool(self._policy_value(policy, GLOBAL_AI_ENABLED_KEY)),
             "ai_provider_id": str(
-                self.config.get(GLOBAL_AI_PROVIDER_KEY) or ""
+                self._policy_value(policy, GLOBAL_AI_PROVIDER_KEY) or ""
             ).strip(),
             "ai_fallback_provider_ids": normalize_provider_ids(
-                self.config.get(GLOBAL_AI_FALLBACKS_KEY)
+                self._policy_value(policy, GLOBAL_AI_FALLBACKS_KEY)
             ),
             "ai_confirm_provider_id": str(
-                self.config.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
+                self._policy_value(policy, GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
             ).strip(),
             "ai_timeout": self._bounded_int(
-                self.config.get(GLOBAL_AI_TIMEOUT_KEY),
+                self._policy_value(policy, GLOBAL_AI_TIMEOUT_KEY),
                 AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
                 5,
                 120,
             ),
-            "ai_images_enabled": bool(self.config.get(GLOBAL_AI_IMAGES_KEY, False)),
+            "ai_images_enabled": bool(
+                self._policy_value(policy, GLOBAL_AI_IMAGES_KEY)
+            ),
             "ai_block_threshold": self._bounded_int(
-                self.config.get(GLOBAL_AI_BLOCK_THRESHOLD_KEY),
+                self._policy_value(policy, GLOBAL_AI_BLOCK_THRESHOLD_KEY),
                 AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
                 50,
                 100,
             ),
             "ai_action": (
-                str(self.config.get(GLOBAL_AI_ACTION_KEY) or "record_only")
-                if str(self.config.get(GLOBAL_AI_ACTION_KEY) or "record_only")
+                str(self._policy_value(policy, GLOBAL_AI_ACTION_KEY) or "record_only")
+                if str(self._policy_value(policy, GLOBAL_AI_ACTION_KEY) or "record_only")
                 in AI_REVIEW_ACTIONS
                 else "record_only"
             ),
             "ai_reply": str(
                 configured_text(
-                    self.config,
+                    policy,
                     "global_ai_reject_reply",
                     "消息未通过 AI 内容审核，已撤回。",
                 )
             ),
-            "ai_at": bool(self.config.get("global_ai_reject_at_member", True)),
+            "ai_at": bool(self._policy_value(policy, "global_ai_reject_at_member")),
             "global_image_keywords": parse_keywords(
-                str(self.config.get(GLOBAL_IMAGE_KEYWORDS_KEY) or "")
+                str(self._policy_value(policy, GLOBAL_IMAGE_KEYWORDS_KEY) or "")
             ),
             "global_image_reply": str(
                 configured_text(
-                    self.config,
+                    policy,
                     "global_image_reject_reply",
                     "图片文字命中全局禁止关键词，已撤回。",
                 )
             ),
             "global_image_at": bool(
-                self.config.get("global_image_reject_at_member", True)
+                self._policy_value(policy, "global_image_reject_at_member")
             ),
             "image_keyword_enabled": bool(
                 entry.get("image_keyword_review_enabled", False)
@@ -1833,22 +1933,34 @@ class QQGroupAdmin(Star):
             ),
             "image_keyword_at": bool(entry.get("image_reject_at_member", True)),
             "image_ocr_enabled": bool(
-                self.config.get(GLOBAL_IMAGE_OCR_ENABLED_KEY, False)
+                self._policy_value(policy, GLOBAL_IMAGE_OCR_ENABLED_KEY)
             ),
             "image_ocr_provider_id": str(
-                self.config.get(GLOBAL_IMAGE_OCR_PROVIDER_KEY) or ""
+                self._policy_value(policy, GLOBAL_IMAGE_OCR_PROVIDER_KEY) or ""
             ).strip(),
             "image_ocr_timeout": self._bounded_int(
-                self.config.get(GLOBAL_IMAGE_OCR_TIMEOUT_KEY),
+                self._policy_value(policy, GLOBAL_IMAGE_OCR_TIMEOUT_KEY),
                 IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS,
                 2,
                 30,
             ),
             "image_ocr_max_images": self._bounded_int(
-                self.config.get(GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY),
+                self._policy_value(policy, GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY),
                 IMAGE_OCR_DEFAULT_MAX_IMAGES,
                 1,
                 3,
+            ),
+            "keyword_reply_cooldown_seconds": self._bounded_int(
+                self._policy_value(policy, "keyword_reply_cooldown_seconds"),
+                0,
+                0,
+                3_600,
+            ),
+            "keyword_reply_recall_seconds": self._bounded_int(
+                self._policy_value(policy, "keyword_reply_recall_seconds"),
+                0,
+                0,
+                120,
             ),
             "image_enabled": bool(entry.get("image_spam_enabled", False)),
             "image_count": self._bounded_int(entry.get("image_spam_count"), 5, 2, 20),
@@ -3326,8 +3438,9 @@ class QQGroupAdmin(Star):
         )
         if reply is None:
             return False
+        policy = self._global_policy_for_group(group_openid)
         cooldown = self._bounded_int(
-            self.config.get("keyword_reply_cooldown_seconds"), 0, 0, 3_600
+            self._policy_value(policy, "keyword_reply_cooldown_seconds"), 0, 0, 3_600
         )
         reservation = time.monotonic() + cooldown
         if cooldown:
@@ -3358,7 +3471,7 @@ class QQGroupAdmin(Star):
         else:
             self._keyword_reply_ready_at.pop(group_openid, None)
         recall = self._bounded_int(
-            self.config.get("keyword_reply_recall_seconds"), 0, 0, 120
+            self._policy_value(policy, "keyword_reply_recall_seconds"), 0, 0, 120
         )
         sent_id = str(
             sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
@@ -3425,6 +3538,7 @@ class QQGroupAdmin(Star):
             )
 
         entry = self._group_config(group_openid)
+        policy = self._global_policy_for_group(group_openid)
         settings = self._moderation_settings(entry)
         local_review_enabled = settings["enabled"]
         global_ai_enabled = bool(
@@ -3941,11 +4055,12 @@ class QQGroupAdmin(Star):
     @qq_group_command("审核设置")
     async def review_settings(self, event: AstrMessageEvent):
         """发送仅 QQ 群主或管理员可操作的审核设置按钮。"""
-        if not bool(self.config.get("settings_command_enabled", True)):
+        _, group_openid, _ = self._context(event)
+        policy = self._global_policy_for_group(group_openid)
+        if not bool(self._policy_value(policy, "settings_command_enabled")):
             if hasattr(event, "stop_event"):
                 event.stop_event()
             return
-        _, group_openid, _ = self._context(event)
         client = self._client(event)
         info = await QQGroupAPI(client).get_group_info(group_openid)
         group_name = str(info.get("group_name") or "").strip()
@@ -3959,7 +4074,9 @@ class QQGroupAdmin(Star):
         )
 
         text, rows = self._settings_home_payload(group_openid, token, group_name)
-        auto_recall = bool(self.config.get("settings_panel_auto_recall", True))
+        auto_recall = bool(
+            self._policy_value(policy, "settings_panel_auto_recall")
+        )
         recall_hint = (
             f"{SETTINGS_MESSAGE_TTL} 秒后自动撤回。"
             if auto_recall
@@ -4096,7 +4213,10 @@ class QQGroupAdmin(Star):
         sent_id = str(
             sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
         )
-        if sent_id and bool(self.config.get("settings_panel_auto_recall", True)):
+        policy = self._global_policy_for_group(group_openid)
+        if sent_id and bool(
+            self._policy_value(policy, "settings_panel_auto_recall")
+        ):
             self._schedule_settings_recall(client, group_openid, sent_id)
 
     async def _send_settings_home(
@@ -4218,20 +4338,18 @@ class QQGroupAdmin(Star):
             return str(keywords or "未命名规则").strip()[:24]
 
         entry = self._group_config(group_openid)
+        policy = self._global_policy_for_group(group_openid)
         group_rules = active_rules((entry or {}).get("keyword_replies"))
         global_rules = active_rules(self.config.get("global_keyword_replies"))
         names = "、".join(rule_label(rule) for rule in group_rules[:3]) or "无"
         cooldown = self._bounded_int(
-            self.config.get("keyword_reply_cooldown_seconds"), 0, 0, 86_400
+            self._policy_value(policy, "keyword_reply_cooldown_seconds"), 0, 0, 86_400
         )
         recall = self._bounded_int(
-            self.config.get(
-                "keyword_reply_recall_seconds",
-                self.config.get("keyword_reply_auto_recall_seconds"),
-            ),
+            self._policy_value(policy, "keyword_reply_recall_seconds"),
             0,
             0,
-            3_600,
+            120,
         )
         rows = [
             {
@@ -4383,7 +4501,10 @@ class QQGroupAdmin(Star):
         sent_id = str(
             sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
         )
-        if sent_id and bool(self.config.get("settings_panel_auto_recall", True)):
+        policy = self._global_policy_for_group(group_openid)
+        if sent_id and bool(
+            self._policy_value(policy, "settings_panel_auto_recall")
+        ):
             self._schedule_settings_recall(client, group_openid, sent_id)
 
     def _schedule_settings_recall(
@@ -4628,11 +4749,10 @@ class QQGroupAdmin(Star):
         duration: str,
         expire_at: str,
     ) -> Any | None:
+        _, group_openid, _ = self._context(event)
+        policy = self._global_policy_for_group(group_openid)
         template = str(
-            self.config.get(
-                "mute_success_message",
-                "已设置禁言，至 {expire_at}。",
-            )
+            self._policy_value(policy, "mute_success_message")
             or "已设置禁言，至 {expire_at}。"
         )
         legacy_at = bool(self.config.get("mute_reply_at_member", False))
@@ -4651,7 +4771,6 @@ class QQGroupAdmin(Star):
         if not template.strip():
             return None
 
-        _, group_openid, _ = self._context(event)
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
         if hasattr(event, "stop_event"):
             event.stop_event()
@@ -4993,7 +5112,9 @@ class QQGroupAdmin(Star):
             self.config.save_config()
             return
         if action in {"ai_on", "ai_off"}:
-            self.config[GLOBAL_AI_ENABLED_KEY] = action == "ai_on"
+            self._set_global_policy_value_for_group(
+                group_openid, GLOBAL_AI_ENABLED_KEY, action == "ai_on"
+            )
             self.config.save_config()
             return
         if action in {"uid", "conditional"}:
@@ -5203,14 +5324,85 @@ class QQGroupAdmin(Star):
         settings: dict[str, Any],
     ) -> dict[str, Any]:
         self.config["global_keyword_replies"] = list(settings["rules"])
-        self.config["keyword_reply_cooldown_seconds"] = int(
-            settings["keyword_reply_cooldown_seconds"]
-        )
-        self.config["keyword_reply_recall_seconds"] = int(
-            settings["keyword_reply_recall_seconds"]
-        )
+        if "keyword_reply_cooldown_seconds" in settings:
+            self.config["keyword_reply_cooldown_seconds"] = int(
+                settings["keyword_reply_cooldown_seconds"]
+            )
+        if "keyword_reply_recall_seconds" in settings:
+            self.config["keyword_reply_recall_seconds"] = int(
+                settings["keyword_reply_recall_seconds"]
+            )
         self.config.save_config()
         return await self.web_global_keyword_replies()
+
+    def _global_policy_profiles_for_web(self) -> list[dict[str, Any]]:
+        configured = self._configured_global_policies()
+        if not configured:
+            configured = [self._legacy_global_policy()]
+        profiles = []
+        for index, raw in enumerate(configured, 1):
+            profile = {
+                "name": "默认全局策略",
+                "enabled": True,
+                "group_openids": [],
+                **{
+                    key: (list(value) if isinstance(value, list) else value)
+                    for key, value in GLOBAL_POLICY_DEFAULTS.items()
+                },
+            }
+            profile.update(
+                {
+                    key: (list(value) if isinstance(value, list) else value)
+                    for key, value in raw.items()
+                    if key in GLOBAL_POLICY_DEFAULTS
+                }
+            )
+            profile["profile_id"] = str(
+                raw.get("profile_id") or ("default" if index == 1 else f"profile-{index}")
+            ).strip()[:64]
+            profile["name"] = str(raw.get("name") or f"全局策略 {index}").strip()[:80]
+            profile["enabled"] = bool(raw.get("enabled", True))
+            profile["group_openids"] = self._policy_group_openids(raw)
+            profiles.append(profile)
+        return profiles
+
+    async def web_global_policies(self) -> dict[str, Any]:
+        groups = await self.web_groups()
+        return {
+            "groups": [
+                {
+                    "group_name": group["group_name"],
+                    "group_openid": group["group_openid"],
+                }
+                for group in groups
+                if group.get("bound")
+            ],
+            "profiles": self._global_policy_profiles_for_web(),
+        }
+
+    async def web_save_global_policies(
+        self, settings: dict[str, Any]
+    ) -> dict[str, Any]:
+        profiles = []
+        for index, raw in enumerate(settings.get("profiles", []), 1):
+            profile = {
+                "__template_key": "global_policy",
+                "profile_id": str(raw.get("profile_id") or f"profile-{index}").strip(),
+                "name": str(raw.get("name") or f"全局策略 {index}").strip(),
+                "enabled": bool(raw.get("enabled", True)),
+                "group_openids": list(raw.get("group_openids") or []),
+            }
+            for key in GLOBAL_POLICY_DEFAULTS:
+                value = raw.get(key, GLOBAL_POLICY_DEFAULTS[key])
+                profile[key] = list(value) if isinstance(value, list) else value
+            profiles.append(profile)
+        self.config[GLOBAL_POLICIES_KEY] = profiles
+        # Keep the first profile mirrored to legacy keys for older cached pages.
+        if profiles:
+            for key in GLOBAL_POLICY_DEFAULTS:
+                self.config[key] = profiles[0].get(key, GLOBAL_POLICY_DEFAULTS[key])
+        self.config.save_config()
+        return await self.web_global_policies()
 
     async def web_runtime_settings(self) -> dict[str, Any]:
         cookie = str(self.config.get("bilibili_cookie") or "")
@@ -5360,6 +5552,15 @@ class QQGroupAdmin(Star):
             ),
             "bilibili_logged_in": "SESSDATA=" in cookie and "bili_jct=" in cookie,
             "providers": providers,
+            "global_policies": self._global_policy_profiles_for_web(),
+            "global_policy_groups": [
+                {
+                    "group_name": group["group_name"],
+                    "group_openid": group["group_openid"],
+                }
+                for group in await self.web_groups()
+                if group.get("bound")
+            ],
         }
 
     async def web_save_runtime_settings(

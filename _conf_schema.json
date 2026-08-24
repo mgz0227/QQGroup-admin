@@ -1,4 +1,200 @@
 {
+  "global_policy_profiles": {
+    "type": "template_list",
+    "description": "群级全局策略档案",
+    "hint": "由插件 WebUI 管理。按列表顺序匹配；群 OpenID 为空表示覆盖全部已绑定群。旧版顶层全局字段会迁移为默认档案。",
+    "default": [],
+    "invisible": true,
+    "templates": {
+      "global_policy": {
+        "name": "全局策略",
+        "display_item": "name",
+        "hide_hint_in_list": true,
+        "items": {
+          "profile_id": {
+            "type": "string",
+            "description": "策略 ID",
+            "default": "",
+            "invisible": true
+          },
+          "name": {
+            "type": "string",
+            "description": "策略名称",
+            "default": "默认全局策略"
+          },
+          "enabled": {
+            "type": "bool",
+            "description": "启用",
+            "default": true
+          },
+          "group_openids": {
+            "type": "text",
+            "description": "覆盖群 OpenID",
+            "hint": "由 WebUI 选择群；留空表示全部已绑定群。",
+            "default": ""
+          },
+          "settings_command_enabled": {
+            "type": "bool",
+            "description": "启用审核设置命令",
+            "default": true
+          },
+          "settings_panel_auto_recall": {
+            "type": "bool",
+            "description": "设置面板自动撤回",
+            "default": true
+          },
+          "mute_success_message": {
+            "type": "string",
+            "description": "禁言成功回复",
+            "default": "已设置禁言，至 {expire_at}。"
+          },
+          "global_reject_keywords": {
+            "type": "text",
+            "description": "全局入群拒绝关键词",
+            "default": ""
+          },
+          "global_message_reject_keywords": {
+            "type": "text",
+            "description": "全局消息撤回关键词",
+            "default": ""
+          },
+          "global_message_reject_reply": {
+            "type": "string",
+            "description": "全局文字关键词撤回回复",
+            "default": "消息命中全局禁止关键词，已撤回。"
+          },
+          "global_message_reject_at_member": {
+            "type": "bool",
+            "description": "全局文字关键词撤回时艾特",
+            "default": true
+          },
+          "global_member_blacklist": {
+            "type": "text",
+            "description": "全局成员黑名单",
+            "default": ""
+          },
+          "global_member_whitelist": {
+            "type": "text",
+            "description": "全局成员白名单",
+            "default": ""
+          },
+          "global_blacklist_reply": {
+            "type": "string",
+            "description": "全局黑名单撤回回复",
+            "default": "成员命中群聊黑名单，消息已撤回。"
+          },
+          "global_blacklist_at_member": {
+            "type": "bool",
+            "description": "全局黑名单撤回时艾特",
+            "default": true
+          },
+          "global_ai_review_enabled": {
+            "type": "bool",
+            "description": "全局 AI 内容审核",
+            "default": false
+          },
+          "global_ai_review_provider_id": {
+            "type": "string",
+            "description": "AI 主模型提供商 ID",
+            "default": ""
+          },
+          "global_ai_review_fallback_provider_ids": {
+            "type": "list",
+            "description": "AI 回退模型提供商 ID",
+            "default": []
+          },
+          "global_ai_review_confirm_provider_id": {
+            "type": "string",
+            "description": "AI 二次确认模型提供商 ID",
+            "default": ""
+          },
+          "global_ai_review_timeout_seconds": {
+            "type": "int",
+            "description": "AI 审核总超时（秒）",
+            "default": 20,
+            "slider": {"min": 5, "max": 120, "step": 5}
+          },
+          "global_ai_review_images_enabled": {
+            "type": "bool",
+            "description": "将图片发送给 AI 审核",
+            "default": false
+          },
+          "global_ai_review_block_threshold": {
+            "type": "int",
+            "description": "AI 拦截置信度阈值",
+            "default": 95,
+            "slider": {"min": 50, "max": 100, "step": 5}
+          },
+          "global_ai_review_action": {
+            "type": "string",
+            "description": "AI 审核命中动作",
+            "default": "record_only",
+            "options": ["record_only", "recall"],
+            "labels": ["只记录，不撤回", "撤回消息"]
+          },
+          "global_ai_reject_reply": {
+            "type": "string",
+            "description": "AI 撤回回复",
+            "default": "消息未通过 AI 内容审核，已撤回。"
+          },
+          "global_ai_reject_at_member": {
+            "type": "bool",
+            "description": "AI 撤回时艾特",
+            "default": true
+          },
+          "global_image_reject_keywords": {
+            "type": "text",
+            "description": "全局图片文字撤回关键词",
+            "default": ""
+          },
+          "global_image_reject_reply": {
+            "type": "string",
+            "description": "全局图片关键词撤回回复",
+            "default": "图片文字命中全局禁止关键词，已撤回。"
+          },
+          "global_image_reject_at_member": {
+            "type": "bool",
+            "description": "全局图片关键词撤回时艾特",
+            "default": true
+          },
+          "global_image_ocr_enabled": {
+            "type": "bool",
+            "description": "启用图片文字审核",
+            "default": false
+          },
+          "global_image_ocr_provider_id": {
+            "type": "string",
+            "description": "图片 OCR 模型提供商 ID",
+            "default": ""
+          },
+          "global_image_ocr_timeout_seconds": {
+            "type": "int",
+            "description": "图片 OCR 超时（秒）",
+            "default": 4,
+            "slider": {"min": 2, "max": 30, "step": 1}
+          },
+          "global_image_ocr_max_images": {
+            "type": "int",
+            "description": "单条最多 OCR 图片数",
+            "default": 1,
+            "slider": {"min": 1, "max": 3, "step": 1}
+          },
+          "keyword_reply_cooldown_seconds": {
+            "type": "int",
+            "description": "关键词回复单群冷却（秒）",
+            "default": 0,
+            "slider": {"min": 0, "max": 3600, "step": 5}
+          },
+          "keyword_reply_recall_seconds": {
+            "type": "int",
+            "description": "关键词回复自动撤回（秒）",
+            "default": 0,
+            "slider": {"min": 0, "max": 120, "step": 5}
+          }
+        }
+      }
+    }
+  },
   "uid_review_interval_seconds": {
     "type": "int",
     "description": "条件审核轮询间隔（秒）",
@@ -14,19 +210,22 @@
     "type": "string",
     "description": "禁言成功回复",
     "hint": "支持 {at_user}、{duration}、{expire_at}、{member_openid}。{at_user} 可放在回复任意位置；不填写则不艾特。",
-    "default": "已设置禁言，至 {expire_at}。"
+    "default": "已设置禁言，至 {expire_at}。",
+    "invisible": true
   },
   "settings_panel_auto_recall": {
     "type": "bool",
     "description": "审核设置面板自动撤回",
     "hint": "开启后，/审核设置 发送的按钮面板会在 45 秒后自动撤回。",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "settings_command_enabled": {
     "type": "bool",
     "description": "启用审核设置命令",
     "hint": "关闭后群内 /审核设置 不会发送设置面板；可在此配置中重新开启。",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "mute_reply_at_member": {
     "type": "bool",
@@ -39,93 +238,108 @@
     "type": "text",
     "description": "全局拒绝关键词",
     "hint": "逗号、分号或换行分隔，最多 100 个。命中后立即拒绝，优先于群级规则、有效 UID 直通和其他条件。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_message_reject_keywords": {
     "type": "text",
     "description": "全局消息撤回关键词",
     "hint": "命中后撤回所有已开启消息审查群中的普通成员消息，优先于群级规则。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_message_reject_reply": {
     "type": "string",
     "description": "全局文字关键词撤回回复",
     "hint": "仅用于全局文字关键词命中；留空且关闭艾特时不发送提示。",
-    "default": "消息命中全局禁止关键词，已撤回。"
+    "default": "消息命中全局禁止关键词，已撤回。",
+    "invisible": true
   },
   "global_message_reject_at_member": {
     "type": "bool",
     "description": "全局文字关键词撤回时艾特成员",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "global_member_blacklist": {
     "type": "text",
     "description": "全局消息审核黑名单",
     "hint": "成员 OpenID、Union OpenID 或已绑定的 B站 UID；逗号、空格或换行分隔。命中后优先撤回。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_member_whitelist": {
     "type": "text",
     "description": "全局消息审核白名单",
     "hint": "成员 OpenID、Union OpenID 或已绑定的 B站 UID；命中后跳过消息审核。黑名单优先。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_blacklist_reply": {
     "type": "string",
     "description": "全局黑名单撤回回复",
     "hint": "支持 {at_user}；留空且关闭艾特时不发送提示。",
-    "default": "成员命中群聊黑名单，消息已撤回。"
+    "default": "成员命中群聊黑名单，消息已撤回。",
+    "invisible": true
   },
   "global_blacklist_at_member": {
     "type": "bool",
     "description": "全局黑名单撤回时艾特成员",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "global_ai_review_enabled": {
     "type": "bool",
     "description": "全局 AI 内容审核",
     "hint": "对所有已绑定群生效（管理员和白名单成员仍按免审规则处理）；关闭后不会调用 AI。主模型失败或返回无效结果时按顺序尝试回退模型。",
-    "default": false
+    "default": false,
+    "invisible": true
   },
   "global_ai_review_provider_id": {
     "type": "string",
     "description": "全局 AI 审核主模型",
     "hint": "填写 AstrBot 提供商 ID；留空时使用当前会话模型。",
     "_special": "select_provider",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_ai_review_fallback_provider_ids": {
     "type": "list",
     "description": "全局 AI 回退模型",
     "hint": "按顺序填写多个提供商 ID，每行一个；最多 3 个，不能与主模型重复。主模型失败或返回无效结果时才会依次调用。",
-    "default": []
+    "default": [],
+    "invisible": true
   },
   "global_ai_review_confirm_provider_id": {
     "type": "string",
     "description": "AI 二次确认模型",
     "hint": "可选；仅在初判 BLOCK 后独立复核。确认 ALLOW 时放行，确认失败时只记录、不撤回。不能与主模型或回退模型重复。",
     "_special": "select_provider",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_ai_review_timeout_seconds": {
     "type": "int",
     "description": "AI 审核总超时（秒）",
     "hint": "主模型、回退模型和二次确认共享此总时限；初判全部超时则放行，二次确认超时则只记录。",
     "default": 20,
-    "slider": {"min": 5, "max": 120, "step": 5}
+    "slider": {"min": 5, "max": 120, "step": 5},
+    "invisible": true
   },
   "global_ai_review_images_enabled": {
     "type": "bool",
     "description": "将图片发送给 AI 审核",
     "hint": "关闭时 AI 只审核文字，普通截图不会触发视觉模型。",
-    "default": false
+    "default": false,
+    "invisible": true
   },
   "global_ai_review_block_threshold": {
     "type": "int",
     "description": "AI 拦截置信度阈值",
     "hint": "仅当模型返回 BLOCK 且置信度达到此值时撤回；建议 95 以上以减少误伤。",
     "default": 95,
-    "slider": {"min": 50, "max": 100, "step": 5}
+    "slider": {"min": 50, "max": 100, "step": 5},
+    "invisible": true
   },
   "global_ai_review_action": {
     "type": "string",
@@ -133,58 +347,68 @@
     "hint": "建议先只记录观察误判；确认模型稳定后再改为撤回。",
     "default": "record_only",
     "options": ["record_only", "recall"],
-    "labels": ["只记录，不撤回", "撤回消息"]
+    "labels": ["只记录，不撤回", "撤回消息"],
+    "invisible": true
   },
   "global_ai_reject_reply": {
     "type": "string",
     "description": "AI 撤回回复",
-    "default": "消息未通过 AI 内容审核，已撤回。"
+    "default": "消息未通过 AI 内容审核，已撤回。",
+    "invisible": true
   },
   "global_ai_reject_at_member": {
     "type": "bool",
     "description": "AI 撤回时艾特成员",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "global_image_reject_keywords": {
     "type": "text",
     "description": "全局图片文字撤回关键词",
     "hint": "需要同时开启图片 OCR；命中图片中识别到的文字后撤回。",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_image_reject_reply": {
     "type": "string",
     "description": "全局图片关键词撤回回复",
-    "default": "图片文字命中全局禁止关键词，已撤回。"
+    "default": "图片文字命中全局禁止关键词，已撤回。",
+    "invisible": true
   },
   "global_image_reject_at_member": {
     "type": "bool",
     "description": "全局图片关键词撤回时艾特成员",
-    "default": true
+    "default": true,
+    "invisible": true
   },
   "global_image_ocr_enabled": {
     "type": "bool",
     "description": "启用图片文字审核",
     "hint": "默认关闭；开启后优先使用本地 OCR，配置模型后可用视觉模型补充。",
-    "default": false
+    "default": false,
+    "invisible": true
   },
   "global_image_ocr_provider_id": {
     "type": "string",
     "description": "图片 OCR 回退模型",
     "hint": "可选；只用于本地 OCR 未识别到文字时的图片转录。",
     "_special": "select_provider",
-    "default": ""
+    "default": "",
+    "invisible": true
   },
   "global_image_ocr_timeout_seconds": {
     "type": "int",
     "description": "图片 OCR 超时（秒）",
     "default": 4,
-    "slider": {"min": 2, "max": 30, "step": 1}
+    "slider": {"min": 2, "max": 30, "step": 1},
+    "invisible": true
   },
   "global_image_ocr_max_images": {
     "type": "int",
     "description": "单条最多 OCR 图片数",
     "default": 1,
-    "slider": {"min": 1, "max": 3, "step": 1}
+    "slider": {"min": 1, "max": 3, "step": 1},
+    "invisible": true
   },
   "global_ai_review_migrated": {
     "type": "bool",
@@ -259,14 +483,16 @@
     "description": "关键词回复单群冷却（秒）",
     "hint": "同一群触发回复后，在冷却期内不再触发其他关键词回复；0 表示不冷却。",
     "default": 0,
-    "slider": {"min": 0, "max": 3600, "step": 5}
+    "slider": {"min": 0, "max": 3600, "step": 5},
+    "invisible": true
   },
   "keyword_reply_recall_seconds": {
     "type": "int",
     "description": "关键词回复自动撤回（秒）",
     "hint": "0 表示不撤回；QQ 群消息只支持在发送后 120 秒内撤回。",
     "default": 0,
-    "slider": {"min": 0, "max": 120, "step": 5}
+    "slider": {"min": 0, "max": 120, "step": 5},
+    "invisible": true
   },
   "bilibili_cookie": {
     "type": "string",

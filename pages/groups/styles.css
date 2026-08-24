@@ -155,6 +155,9 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .runtime-grid label > span { display: block; margin-bottom: 7px; }
 .runtime-grid label small, .config-note { display: block; margin-top: 7px; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
 .runtime-grid select[multiple] { min-height: 112px; padding: 6px; }
+.global-policy-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid #dce2e8; border-radius: 6px; background: #fafbfc; }
+.global-policy-toolbar label { flex: 1; max-width: 520px; }
+.runtime-policy-scope { margin: 0; }
 .welcome-editor { padding: 16px; border: 1px solid #dce2e8; border-radius: 6px; background: #fafbfc; }
 .welcome-editor .rule-list-header { align-items: flex-start; }
 .welcome-editor .rule-list-header p { margin: 6px 0 0; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
@@ -225,6 +228,8 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .group-choice-grid { grid-template-columns: 1fr; }
   .runtime-grid { grid-template-columns: 1fr; padding: 18px; }
   .runtime-grid .wide { grid-column: auto; }
+  .global-policy-toolbar { align-items: stretch; flex-direction: column; }
+  .global-policy-toolbar label { max-width: none; }
   .identity-records { padding: 10px 16px 14px; }
   .sub-list-header { align-items: stretch; flex-direction: column; gap: 8px; }
   .identity-card summary { align-items: flex-start; flex-wrap: wrap; }
@@ -266,6 +271,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .global-keyword-row label, .global-group-scope legend, .global-keyword-defaults label { color: #c3ccd7; }
   .runtime-grid label { color: #c3ccd7; }
   .runtime-grid label small, .config-note { color: #9ca7b5; }
+  .global-policy-toolbar { border-color: #39424d; background: #1b2128; }
   .config-note { border-color: #39424d; background: #1b2128; }
   .bilibili-login, .bilibili-qr { border-color: #39424d; }
   .welcome-editor { border-color: #39424d; background: #1b2128; }

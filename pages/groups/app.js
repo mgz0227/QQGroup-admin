@@ -30,6 +30,8 @@
   var globalKeywordConfig = { groups: [], rules: [] };
   var welcomeConfig = { groups: [], rules: [] };
   var runtimeSettings = {};
+  var runtimePolicies = [];
+  var runtimePolicyIndex = 0;
   var bilibiliLoginKey = "";
   var bilibiliLoginTimer;
   var editingGroup;
@@ -668,17 +670,11 @@
     var button = element("save-global-keyword-replies");
     button.disabled = true;
     apiPost("global-keyword-replies/save", {
-      rules: rules,
-      keyword_reply_cooldown_seconds: Number(element("global-keyword-cooldown").value),
-      keyword_reply_recall_seconds: Number(element("global-keyword-recall").value)
+      rules: rules
     })
       .then(function (saved) {
         saved = Array.isArray(saved) ? { rules: saved } : (saved || {});
         globalKeywordConfig = Object.assign({}, globalKeywordConfig, saved);
-        element("global-keyword-cooldown").value =
-          Number(globalKeywordConfig.keyword_reply_cooldown_seconds || 0);
-        element("global-keyword-recall").value =
-          Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
         renderGlobalKeywordReplies(globalKeywordConfig.rules);
         toast("全局关键词回复已保存");
       })
@@ -884,67 +880,147 @@
 
   function fillRuntime(settings) {
     runtimeSettings = settings || {};
+    runtimePolicies = Array.isArray(runtimeSettings.global_policies)
+      ? runtimeSettings.global_policies
+      : [];
+    if (!runtimePolicies.length) {
+      var legacyKeys = [
+        "settings_command_enabled", "settings_panel_auto_recall", "mute_success_message",
+        "global_reject_keywords", "global_message_reject_keywords", "global_message_reject_reply",
+        "global_message_reject_at_member", "global_member_blacklist", "global_member_whitelist",
+        "global_blacklist_reply", "global_blacklist_at_member", "global_ai_review_enabled",
+        "global_ai_review_provider_id", "global_ai_review_fallback_provider_ids",
+        "global_ai_review_confirm_provider_id", "global_ai_review_timeout_seconds",
+        "global_ai_review_images_enabled", "global_ai_review_block_threshold", "global_ai_review_action",
+        "global_ai_reject_reply", "global_ai_reject_at_member", "global_image_reject_keywords",
+        "global_image_reject_reply", "global_image_reject_at_member", "global_image_ocr_enabled",
+        "global_image_ocr_provider_id", "global_image_ocr_timeout_seconds", "global_image_ocr_max_images",
+        "keyword_reply_cooldown_seconds", "keyword_reply_recall_seconds"
+      ];
+      var legacyPolicy = { name: "默认全局策略", profile_id: "default", enabled: true, group_openids: [] };
+      legacyKeys.forEach(function (key) {
+        if (Object.prototype.hasOwnProperty.call(runtimeSettings, key)) legacyPolicy[key] = runtimeSettings[key];
+      });
+      runtimePolicies = [legacyPolicy];
+    }
+    runtimePolicyIndex = Math.min(runtimePolicyIndex, runtimePolicies.length - 1);
+    fillRuntimePolicySelector();
+    fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
     element("runtime-review-interval").value = runtimeSettings.uid_review_interval_seconds || 60;
-    element("runtime-settings-command").checked = runtimeSettings.settings_command_enabled !== false;
-    element("runtime-panel-recall").checked = runtimeSettings.settings_panel_auto_recall !== false;
-    element("runtime-global-reject-keywords").value = runtimeSettings.global_reject_keywords || "";
-    element("runtime-message-reject-keywords").value = runtimeSettings.global_message_reject_keywords || "";
-    element("runtime-message-reject-reply").value = runtimeSettings.global_message_reject_reply || "";
-    element("runtime-message-reject-at").checked = runtimeSettings.global_message_reject_at_member === true;
-    element("runtime-member-blacklist").value = runtimeSettings.global_member_blacklist || "";
-    element("runtime-member-whitelist").value = runtimeSettings.global_member_whitelist || "";
-    element("runtime-blacklist-reply").value = runtimeSettings.global_blacklist_reply || "";
-    element("runtime-blacklist-at").checked = runtimeSettings.global_blacklist_at_member === true;
-    element("runtime-mute-message").value = runtimeSettings.mute_success_message || "";
-    element("runtime-ai-enabled").checked = runtimeSettings.global_ai_review_enabled === true;
-    element("runtime-ai-timeout").value = runtimeSettings.global_ai_review_timeout_seconds || 20;
-    element("runtime-ai-threshold").value = runtimeSettings.global_ai_review_block_threshold || 95;
-    element("runtime-ai-action").value = runtimeSettings.global_ai_review_action || "record_only";
-    element("runtime-ai-reject-reply").value = runtimeSettings.global_ai_reject_reply || "";
-    element("runtime-ai-reject-at").checked = runtimeSettings.global_ai_reject_at_member === true;
-    element("runtime-ai-images").checked = runtimeSettings.global_ai_review_images_enabled === true;
-    element("runtime-image-reject-keywords").value = runtimeSettings.global_image_reject_keywords || "";
-    element("runtime-image-reject-reply").value = runtimeSettings.global_image_reject_reply || "";
-    element("runtime-image-reject-at").checked = runtimeSettings.global_image_reject_at_member === true;
-    element("runtime-image-ocr-enabled").checked = runtimeSettings.global_image_ocr_enabled === true;
-    element("runtime-image-ocr-timeout").value = runtimeSettings.global_image_ocr_timeout_seconds || 4;
-    element("runtime-image-ocr-max-images").value = runtimeSettings.global_image_ocr_max_images || 1;
+    fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
     element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
     element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
     element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
+  }
+
+  function fillRuntimePolicyFields(policy) {
+    policy = policy || {};
+    element("runtime-settings-command").checked = policy.settings_command_enabled !== false;
+    element("runtime-panel-recall").checked = policy.settings_panel_auto_recall !== false;
+    element("runtime-global-reject-keywords").value = policy.global_reject_keywords || "";
+    element("runtime-policy-keyword-cooldown").value = Number(policy.keyword_reply_cooldown_seconds || 0);
+    element("runtime-policy-keyword-recall").value = Number(policy.keyword_reply_recall_seconds || 0);
+    element("runtime-message-reject-keywords").value = policy.global_message_reject_keywords || "";
+    element("runtime-message-reject-reply").value = policy.global_message_reject_reply || "";
+    element("runtime-message-reject-at").checked = policy.global_message_reject_at_member === true;
+    element("runtime-member-blacklist").value = policy.global_member_blacklist || "";
+    element("runtime-member-whitelist").value = policy.global_member_whitelist || "";
+    element("runtime-blacklist-reply").value = policy.global_blacklist_reply || "";
+    element("runtime-blacklist-at").checked = policy.global_blacklist_at_member === true;
+    element("runtime-mute-message").value = policy.mute_success_message || "";
+    element("runtime-ai-enabled").checked = policy.global_ai_review_enabled === true;
+    element("runtime-ai-timeout").value = policy.global_ai_review_timeout_seconds || 20;
+    element("runtime-ai-threshold").value = policy.global_ai_review_block_threshold || 95;
+    element("runtime-ai-action").value = policy.global_ai_review_action || "record_only";
+    element("runtime-ai-reject-reply").value = policy.global_ai_reject_reply || "";
+    element("runtime-ai-reject-at").checked = policy.global_ai_reject_at_member === true;
+    element("runtime-ai-images").checked = policy.global_ai_review_images_enabled === true;
     fillProviderSelect(
       "runtime-ai-provider",
       "使用当前会话模型",
-      runtimeSettings.global_ai_review_provider_id || ""
+      policy.global_ai_review_provider_id || ""
     );
     fillProviderMultiSelect(
       "runtime-ai-fallback-providers",
-      runtimeSettings.global_ai_review_fallback_provider_ids || []
+      policy.global_ai_review_fallback_provider_ids || []
     );
     fillProviderSelect(
       "runtime-ai-confirm-provider",
       "不进行二次确认",
-      runtimeSettings.global_ai_review_confirm_provider_id || ""
+      policy.global_ai_review_confirm_provider_id || ""
     );
+    element("runtime-image-reject-keywords").value = policy.global_image_reject_keywords || "";
+    element("runtime-image-reject-reply").value = policy.global_image_reject_reply || "";
+    element("runtime-image-reject-at").checked = policy.global_image_reject_at_member === true;
+    element("runtime-image-ocr-enabled").checked = policy.global_image_ocr_enabled === true;
     fillProviderSelect(
       "runtime-image-ocr-provider",
       "不使用视觉 OCR 模型",
-      runtimeSettings.global_image_ocr_provider_id || ""
+      policy.global_image_ocr_provider_id || ""
     );
+    element("runtime-image-ocr-timeout").value = policy.global_image_ocr_timeout_seconds || 4;
+    element("runtime-image-ocr-max-images").value = policy.global_image_ocr_max_images || 1;
     element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-confirm-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-image-ocr-provider").disabled = !element("runtime-image-ocr-enabled").checked;
   }
 
-  function saveRuntime(event) {
-    event.preventDefault();
-    var button = element("save-runtime");
-    var settings = {
-      uid_review_interval_seconds: Number(element("runtime-review-interval").value),
+  function fillRuntimePolicySelector() {
+    var select = element("runtime-policy-select");
+    select.replaceChildren();
+    runtimePolicies.forEach(function (policy, index) {
+      var option = document.createElement("option");
+      option.value = String(index);
+      option.textContent = (policy.name || "未命名策略") + (policy.enabled === false ? "（停用）" : "");
+      select.appendChild(option);
+    });
+    select.value = String(runtimePolicyIndex);
+  }
+
+  function fillRuntimePolicy(policy) {
+    policy = policy || {};
+    element("runtime-policy-name").value = policy.name || "";
+    element("runtime-policy-enabled").checked = policy.enabled !== false;
+    var selectedIds = new Set(Array.isArray(policy.group_openids) ? policy.group_openids : []);
+    var all = element("runtime-policy-all-groups");
+    all.checked = selectedIds.size === 0;
+    var list = element("runtime-policy-groups");
+    list.replaceChildren();
+    var policyGroups = Array.isArray(runtimeSettings.global_policy_groups)
+      ? runtimeSettings.global_policy_groups
+      : [];
+    policyGroups.forEach(function (group) {
+      var label = document.createElement("label");
+      label.className = "checkbox group-choice";
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.value = group.group_openid;
+      checkbox.checked = selectedIds.has(group.group_openid);
+      checkbox.disabled = all.checked;
+      var text = document.createElement("span");
+      text.textContent = group.group_name || group.group_openid;
+      text.title = group.group_openid;
+      label.append(checkbox, text);
+      list.appendChild(label);
+    });
+    all.onchange = function () {
+      list.querySelectorAll("input").forEach(function (input) { input.disabled = all.checked; });
+    };
+  }
+
+  function readRuntimePolicy() {
+    var all = element("runtime-policy-all-groups").checked;
+    return Object.assign({}, runtimePolicies[runtimePolicyIndex], {
+      name: element("runtime-policy-name").value.trim(),
+      enabled: element("runtime-policy-enabled").checked,
+      group_openids: all ? [] : Array.from(element("runtime-policy-groups").querySelectorAll("input:checked")).map(function (input) { return input.value; }),
       settings_command_enabled: element("runtime-settings-command").checked,
       settings_panel_auto_recall: element("runtime-panel-recall").checked,
+      mute_success_message: element("runtime-mute-message").value,
       global_reject_keywords: element("runtime-global-reject-keywords").value,
+      keyword_reply_cooldown_seconds: Number(element("runtime-policy-keyword-cooldown").value),
+      keyword_reply_recall_seconds: Number(element("runtime-policy-keyword-recall").value),
       global_message_reject_keywords: element("runtime-message-reject-keywords").value,
       global_message_reject_reply: element("runtime-message-reject-reply").value,
       global_message_reject_at_member: element("runtime-message-reject-at").checked,
@@ -952,7 +1028,6 @@
       global_member_whitelist: element("runtime-member-whitelist").value,
       global_blacklist_reply: element("runtime-blacklist-reply").value,
       global_blacklist_at_member: element("runtime-blacklist-at").checked,
-      mute_success_message: element("runtime-mute-message").value,
       global_ai_review_enabled: element("runtime-ai-enabled").checked,
       global_ai_review_provider_id: element("runtime-ai-provider").value,
       global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
@@ -969,15 +1044,83 @@
       global_image_ocr_enabled: element("runtime-image-ocr-enabled").checked,
       global_image_ocr_provider_id: element("runtime-image-ocr-provider").value,
       global_image_ocr_timeout_seconds: Number(element("runtime-image-ocr-timeout").value),
-      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value),
+      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value)
+    });
+  }
+
+  function saveRuntimePolicies() {
+    var current = readRuntimePolicy();
+    if (!current.name) { toast("策略名称不能为空", true); return; }
+    runtimePolicies[runtimePolicyIndex] = current;
+    var button = element("runtime-policy-save");
+    button.disabled = true;
+    apiPost("global-policies/save", { profiles: runtimePolicies })
+      .then(function (saved) {
+        runtimePolicies = (saved && Array.isArray(saved.profiles)) ? saved.profiles : runtimePolicies;
+        fillRuntimePolicySelector();
+        fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
+        fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+        toast("全局群策略已保存");
+      })
+      .catch(function (error) { toast("保存策略失败：" + error.message, true); })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function addRuntimePolicy() {
+    if (runtimePolicies.length >= 50) {
+      toast("最多配置 50 套全局策略", true);
+      return;
+    }
+    var source = runtimePolicies[runtimePolicyIndex] || {};
+    runtimePolicies.push(Object.assign({}, source, {
+      profile_id: "profile-" + Date.now(),
+      name: "新全局策略",
+      enabled: true,
+      group_openids: []
+    }));
+    runtimePolicyIndex = runtimePolicies.length - 1;
+    fillRuntimePolicySelector();
+    fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
+    fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+  }
+
+  function deleteRuntimePolicy() {
+    if (runtimePolicies.length <= 1) {
+      toast("至少保留一套全局策略", true);
+      return;
+    }
+    runtimePolicies.splice(runtimePolicyIndex, 1);
+    runtimePolicyIndex = Math.min(runtimePolicyIndex, runtimePolicies.length - 1);
+    fillRuntimePolicySelector();
+    fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
+    fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+  }
+
+  function saveRuntime(event) {
+    event.preventDefault();
+    var button = element("save-runtime");
+    var settings = {
+      uid_review_interval_seconds: Number(element("runtime-review-interval").value),
       bilibili_live_interval_seconds: Number(element("runtime-live-interval").value),
       bilibili_dynamic_interval_seconds: Number(element("runtime-dynamic-interval").value)
     };
+    var current;
+    try {
+      current = readRuntimePolicy();
+      if (!current.name) throw new Error("策略名称不能为空");
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
+    runtimePolicies[runtimePolicyIndex] = current;
     button.disabled = true;
     apiPost("runtime/save", settings)
       .then(function (saved) {
-        fillRuntime(saved);
-        toast("全局运行配置已保存");
+        return apiPost("global-policies/save", { profiles: runtimePolicies }).then(function (policySaved) {
+          var merged = Object.assign({}, saved || {}, { global_policies: policySaved && policySaved.profiles });
+          fillRuntime(merged);
+          toast("全局运行配置已保存");
+        });
       })
       .catch(function (error) { toast("保存失败：" + error.message, true); })
       .finally(function () { button.disabled = false; });
@@ -1145,10 +1288,6 @@
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
         globalKeywordConfig = result[2] || { groups: [], rules: [] };
-        element("global-keyword-cooldown").value =
-          Number(globalKeywordConfig.keyword_reply_cooldown_seconds || 0);
-        element("global-keyword-recall").value =
-          Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
         fillRuntime(result[3]);
         welcomeConfig = result[4] || { groups: groups, rules: [] };
         groups.forEach(function (group) {
@@ -1588,6 +1727,14 @@
   element("add-welcome-rule").addEventListener("click", function () { addWelcomeRule(); });
   element("save-welcome-rules").addEventListener("click", saveWelcomeRules);
   element("runtime-form").addEventListener("submit", saveRuntime);
+  element("runtime-policy-select").addEventListener("change", function (event) {
+    runtimePolicyIndex = Math.max(0, Math.min(runtimePolicies.length - 1, Number(event.target.value) || 0));
+    fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
+    fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+  });
+  element("runtime-policy-add").addEventListener("click", addRuntimePolicy);
+  element("runtime-policy-delete").addEventListener("click", deleteRuntimePolicy);
+  element("runtime-policy-save").addEventListener("click", saveRuntimePolicies);
   element("runtime-ai-enabled").addEventListener("change", function (event) {
     element("runtime-ai-provider").disabled = !event.target.checked;
     element("runtime-ai-fallback-providers").disabled = !event.target.checked;

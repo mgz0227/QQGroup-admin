@@ -1102,6 +1102,58 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("global_image_reject_reply", runtime)
         self.assertNotIn("global_ai_reject_reply", runtime)
 
+    def test_global_policy_profiles_are_scoped_and_ordered(self):
+        plugin, _ = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "general",
+                "name": "普通群",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_message_reject_keywords": "广告",
+                "keyword_reply_cooldown_seconds": 12,
+            },
+            {
+                "profile_id": "fallback",
+                "name": "兜底群",
+                "enabled": True,
+                "group_openids": [],
+                "global_message_reject_keywords": "默认",
+            },
+        ]
+        entry = plugin.config["auto_review_groups"][0]
+        first = plugin._moderation_settings(entry)
+        self.assertEqual(first["global_keywords"], ["广告"])
+        self.assertEqual(first["keyword_reply_cooldown_seconds"], 12)
+        entry["group_openid"] = "group-2"
+        second = plugin._moderation_settings(entry)
+        self.assertEqual(second["global_keywords"], ["默认"])
+
+    def test_global_policy_web_validation_rejects_duplicate_or_unknown_scope(self):
+        profile = {
+            "profile_id": "p1",
+            "name": "测试策略",
+            "enabled": True,
+            "group_openids": ["group-1"],
+            "global_ai_review_fallback_provider_ids": ["fallback-1", "fallback-2"],
+        }
+        profiles = module.GroupAdminWeb._global_policy_profiles(
+            [profile], {"group-1"}
+        )
+        self.assertEqual(profiles[0]["group_openids"], ["group-1"])
+        self.assertEqual(
+            profiles[0]["global_ai_review_fallback_provider_ids"],
+            ["fallback-1", "fallback-2"],
+        )
+        with self.assertRaisesRegex(ValueError, "未绑定群"):
+            module.GroupAdminWeb._global_policy_profiles(
+                [{**profile, "group_openids": ["unknown"]}], {"group-1"}
+            )
+        with self.assertRaisesRegex(ValueError, "策略 ID 重复"):
+            module.GroupAdminWeb._global_policy_profiles(
+                [profile, {**profile, "name": "第二套"}], {"group-1"}
+            )
+
     def test_uid_review_waits_for_native_strategy_sync(self):
         plugin, _ = self.plugin()
         entry = plugin.config["auto_review_groups"][0]

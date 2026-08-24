@@ -23,6 +23,39 @@ WELCOME_RULE_LIMIT = 100
 WELCOME_MESSAGE_LIMIT = 4000
 MAX_AI_FALLBACK_PROVIDERS = 3
 MAX_MEMBER_LIST_ITEMS = 10_000
+GLOBAL_POLICY_LIMIT = 50
+GLOBAL_POLICY_FIELDS = (
+    "settings_command_enabled",
+    "settings_panel_auto_recall",
+    "mute_success_message",
+    "global_reject_keywords",
+    "global_message_reject_keywords",
+    "global_message_reject_reply",
+    "global_message_reject_at_member",
+    "global_member_blacklist",
+    "global_member_whitelist",
+    "global_blacklist_reply",
+    "global_blacklist_at_member",
+    "global_ai_review_enabled",
+    "global_ai_review_provider_id",
+    "global_ai_review_fallback_provider_ids",
+    "global_ai_review_confirm_provider_id",
+    "global_ai_review_timeout_seconds",
+    "global_ai_review_images_enabled",
+    "global_ai_review_block_threshold",
+    "global_ai_review_action",
+    "global_ai_reject_reply",
+    "global_ai_reject_at_member",
+    "global_image_reject_keywords",
+    "global_image_reject_reply",
+    "global_image_reject_at_member",
+    "global_image_ocr_enabled",
+    "global_image_ocr_provider_id",
+    "global_image_ocr_timeout_seconds",
+    "global_image_ocr_max_images",
+    "keyword_reply_cooldown_seconds",
+    "keyword_reply_recall_seconds",
+)
 VIOLATION_REVIEW_LABELS = {
     "pending": "待复核",
     "confirmed": "确认违规",
@@ -426,6 +459,67 @@ class GroupAdminWeb:
         return replies
 
     @classmethod
+    def _global_policy_profiles(
+        cls,
+        value: Any,
+        allowed_group_openids: set[str],
+    ) -> list[dict[str, Any]]:
+        if not isinstance(value, list):
+            raise TypeError("全局群策略必须是列表")
+        if len(value) > GLOBAL_POLICY_LIMIT:
+            raise ValueError(f"最多配置 {GLOBAL_POLICY_LIMIT} 套全局群策略")
+        profiles = []
+        profile_ids: set[str] = set()
+        for index, item in enumerate(value, 1):
+            if not isinstance(item, dict):
+                raise TypeError(f"第 {index} 套全局群策略格式错误")
+            name = cls._text(
+                item.get("name"), f"第 {index} 套策略名称", 80, required=True
+            )
+            profile_id = cls._text(
+                item.get("profile_id", f"profile-{index}"),
+                f"第 {index} 套策略 ID",
+                64,
+            )
+            if not re.fullmatch(r"[A-Za-z0-9._:-]+", profile_id):
+                raise ValueError(f"第 {index} 套策略 ID 格式无效")
+            if profile_id in profile_ids:
+                raise ValueError(f"第 {index} 套策略 ID 重复")
+            profile_ids.add(profile_id)
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise TypeError(f"第 {index} 套策略启用状态必须是布尔值")
+            raw_groups = item.get("group_openids", [])
+            if not isinstance(raw_groups, list):
+                raise TypeError(f"第 {index} 套策略覆盖群必须是列表")
+            group_openids = [
+                cls._validated_group({"group_openid": group_openid})
+                for group_openid in raw_groups
+            ]
+            if len(group_openids) > BATCH_GROUP_LIMIT:
+                raise ValueError(
+                    f"第 {index} 套策略最多覆盖 {BATCH_GROUP_LIMIT} 个群"
+                )
+            if len(set(group_openids)) != len(group_openids):
+                raise ValueError(f"第 {index} 套策略覆盖群不能重复")
+            unknown = set(group_openids) - allowed_group_openids
+            if unknown:
+                raise ValueError(f"第 {index} 套策略包含未绑定群：{min(unknown)}")
+            validated = cls._runtime_settings(item)
+            profile = {
+                "__template_key": "global_policy",
+                "profile_id": profile_id,
+                "name": name,
+                "enabled": enabled,
+                "group_openids": group_openids,
+            }
+            profile.update(
+                {key: validated[key] for key in GLOBAL_POLICY_FIELDS if key in validated}
+            )
+            profiles.append(profile)
+        return profiles
+
+    @classmethod
     def _runtime_settings(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
@@ -494,6 +588,22 @@ class GroupAdminWeb:
                 "global_blacklist_at_member",
                 True,
                 "全局黑名单撤回艾特",
+            ),
+            "keyword_reply_cooldown_seconds": cls._int(
+                payload,
+                "keyword_reply_cooldown_seconds",
+                0,
+                0,
+                3_600,
+                "关键词回复单群冷却",
+            ),
+            "keyword_reply_recall_seconds": cls._int(
+                payload,
+                "keyword_reply_recall_seconds",
+                0,
+                0,
+                120,
+                "关键词回复自动撤回",
             ),
             "global_image_reject_keywords": "\n".join(
                 parse_keywords(
@@ -1048,23 +1158,25 @@ class GroupAdminWeb:
             "rules": self._global_keyword_replies(
                 payload.get("rules"), bound_group_openids
             ),
-            "keyword_reply_cooldown_seconds": self._int(
+        }
+        if "keyword_reply_cooldown_seconds" in payload:
+            settings["keyword_reply_cooldown_seconds"] = self._int(
                 payload,
                 "keyword_reply_cooldown_seconds",
                 0,
                 0,
                 3_600,
                 "关键词回复单群冷却",
-            ),
-            "keyword_reply_recall_seconds": self._int(
+            )
+        if "keyword_reply_recall_seconds" in payload:
+            settings["keyword_reply_recall_seconds"] = self._int(
                 payload,
                 "keyword_reply_recall_seconds",
                 0,
                 0,
                 120,
                 "关键词回复自动撤回",
-            ),
-        }
+            )
         return self._response(
             await self.plugin.web_save_global_keyword_replies(settings),
             message="全局关键词回复已保存",
@@ -1117,6 +1229,28 @@ class GroupAdminWeb:
                 self._runtime_settings(await self._payload())
             ),
             message="全局运行配置已保存",
+        )
+
+    async def page_global_policies(self) -> Any:
+        return self._response(await self.plugin.web_global_policies())
+
+    async def page_global_policies_save(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        bound_group_openids = {
+            str(group["group_openid"])
+            for group in await self._groups()
+            if group.get("bound")
+        }
+        profiles = self._global_policy_profiles(
+            payload.get("profiles"), bound_group_openids
+        )
+        if not profiles:
+            raise ValueError("至少保留一套全局群策略")
+        return self._response(
+            await self.plugin.web_save_global_policies({"profiles": profiles}),
+            message="全局群策略已保存",
         )
 
     async def page_bilibili_login_start(self) -> Any:
@@ -1380,6 +1514,18 @@ class GroupAdminWeb:
             ),
             ("/runtime", self.page_runtime, ["GET"], "查询全局运行配置"),
             ("/runtime/save", self.page_runtime_save, ["POST"], "保存全局运行配置"),
+            (
+                "/global-policies",
+                self.page_global_policies,
+                ["GET"],
+                "查询全局群策略",
+            ),
+            (
+                "/global-policies/save",
+                self.page_global_policies_save,
+                ["POST"],
+                "保存全局群策略",
+            ),
             (
                 "/bilibili-login/start",
                 self.page_bilibili_login_start,
