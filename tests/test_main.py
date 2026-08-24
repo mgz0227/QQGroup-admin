@@ -1794,6 +1794,28 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(plugin._violation_records[-1]["action"], "record_only")
         self.assertEqual(plugin._violation_records[-1]["ai_provider"], "provider-1")
 
+    async def test_ai_record_only_still_sends_keyword_reply(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_action="record_only",
+        )
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            moderation_enabled=False,
+            keyword_replies=[{"keyword": "帮助", "reply": "群帮助"}],
+        )
+        event = FakeEvent(client, "需要帮助")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        with patch.object(plugin, "_ai_blocks_message", AsyncMock(return_value=True)):
+            await plugin.audit_group_message(event)
+
+        api.recall_group_message.assert_not_awaited()
+        self.assertEqual(client.api.messages[-1]["content"], "群帮助")
+        self.assertEqual(plugin._violation_records[-1]["action"], "record_only")
+
     async def test_group_keyword_reply_precedes_global_and_stops_llm(self):
         plugin, client = self.plugin()
         plugin.config["global_keyword_replies"] = [
@@ -2494,6 +2516,96 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin.context.llm_generate.assert_not_awaited()
 
+    async def test_ai_image_review_skips_signed_gif_attachment(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "")
+        gif_url = "https://example.test/signed-media?id=1"
+        event.message_obj.raw_message.raw_data = {
+            "author": {"member_openid": "admin-1"},
+            "attachments": [{"content_type": "image/gif", "url": gif_url}],
+        }
+        plugin.context.llm_generate = AsyncMock()
+
+        self.assertFalse(
+            await plugin._ai_blocks_message(
+                event,
+                "",
+                [gif_url],
+                "primary",
+                image_review_enabled=True,
+            )
+        )
+        plugin.context.llm_generate.assert_not_awaited()
+
+    async def test_global_ai_skips_qq_gif_placeholders_at_event_entry(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary",
+            global_ai_review_images_enabled=True,
+            global_ai_review_action="recall",
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        gif_url = "https://example.test/signed-media?id=1"
+        event = FakeEvent(client, "[表情:[龙年快乐]] [图片]")
+        event.message_obj.raw_message.raw_data = {
+            "author": {"member_openid": "admin-1"},
+            "attachments": [{"content_type": "image/gif", "url": gif_url}],
+        }
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant",
+                completion_text="BLOCK confidence=99 reason=误判",
+            )
+        )
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertFalse(event.stopped)
+        plugin.context.llm_generate.assert_not_awaited()
+        api.recall_group_message.assert_not_awaited()
+
+    async def test_global_ai_runs_for_bound_group_without_local_review(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary",
+            global_ai_review_action="recall",
+            global_ai_reject_reply="",
+            global_ai_reject_at_member=False,
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant",
+                completion_text="BLOCK confidence=99 reason=明确诈骗引流",
+            )
+        )
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+        event = FakeEvent(client, "明确诈骗引流")
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        plugin.context.llm_generate.assert_awaited_once()
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+
+    async def test_global_ai_does_not_run_for_unbound_group(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"] = []
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary",
+        )
+        plugin.context.llm_generate = AsyncMock()
+
+        await plugin.audit_group_message(FakeEvent(client, "普通消息"))
+
+        plugin.context.llm_generate.assert_not_awaited()
+
     def test_global_ai_config_migrates_once_and_ignores_group_overrides(self):
         client = FakeClient()
         platform = SimpleNamespace(get_client=lambda: client)
@@ -2685,6 +2797,27 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(
             module.QQGroupAdmin._ai_decision("BLOCK confidence=80 reason=uncertain", 95)
+        )
+        self.assertFalse(
+            module.QQGroupAdmin._ai_decision(
+                "ALLOW confidence=99 reason=用户讨论了 BLOCK 这个单词",
+                95,
+            )
+        )
+        self.assertIsNone(
+            module.QQGroupAdmin._ai_decision(
+                "分析如下：内容正常\nBLOCK confidence=99 reason=不要采用",
+                95,
+            )
+        )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision("拦截。置信度=99 原因=明确违规", 95)
+        )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision("拒绝；分数=99 理由=明确违规", 95)
+        )
+        self.assertFalse(
+            module.QQGroupAdmin._ai_decision("允许。置信度=99 原因=正常", 95)
         )
 
     async def test_runtime_ai_save_checks_existing_fallbacks_when_provider_only_changes(self):

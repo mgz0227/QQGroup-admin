@@ -5,10 +5,30 @@ import binascii
 import re
 from io import BytesIO
 from typing import Any
+from urllib.parse import parse_qsl, urlsplit
 from urllib.request import Request, urlopen
 
 MAX_IMAGE_BYTES = 2 * 1024 * 1024
 MAX_IMAGE_PIXELS = 4_000_000
+
+
+def is_remote_gif_ref(value: str) -> bool:
+    """Identify remote GIF references without downloading media."""
+
+    original = str(value or "").strip()
+    if not original.lower().startswith(("http://", "https://")):
+        return False
+    parsed = urlsplit(original)
+    if parsed.path.lower().endswith(".gif"):
+        return True
+    return any(
+        (key.lower() in {"filename", "file", "format", "type"})
+        and (
+            item.lower() in {"gif", "image/gif"}
+            or item.lower().endswith(".gif")
+        )
+        for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+    )
 
 
 def normalize_vision_image_ref(value: str) -> str:
@@ -20,6 +40,8 @@ def normalize_vision_image_ref(value: str) -> str:
     candidate = original[7:] if original.lower().startswith("base64:data:") else original
     payload = ""
     lowered = candidate.lower()
+    if is_remote_gif_ref(candidate):
+        return ""
     if lowered.startswith("data:image/gif;base64,"):
         payload = candidate.split(",", 1)[1]
     elif candidate.startswith("base64://"):

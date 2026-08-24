@@ -5,7 +5,11 @@ from types import SimpleNamespace
 
 from PIL import Image
 
-from image_ocr import embedded_image_text, normalize_vision_image_ref
+from image_ocr import (
+    embedded_image_text,
+    is_remote_gif_ref,
+    normalize_vision_image_ref,
+)
 
 
 class ImageOCRTest(unittest.TestCase):
@@ -21,6 +25,18 @@ class ImageOCRTest(unittest.TestCase):
         self.assertTrue(converted.startswith("data:image/png;base64,"))
         with Image.open(BytesIO(base64.b64decode(converted.split(",", 1)[1]))) as image:
             self.assertEqual(image.format, "PNG")
+
+    def test_remote_gif_is_skipped_without_downloading(self):
+        url = "https://example.test/media/a.gif?token=secret"
+
+        self.assertTrue(is_remote_gif_ref(url))
+        self.assertEqual(normalize_vision_image_ref(url), "")
+        self.assertTrue(
+            is_remote_gif_ref(
+                "https://example.test/media?id=1&filename=sticker.gif"
+            )
+        )
+        self.assertFalse(is_remote_gif_ref("https://example.test/media/a.png"))
 
     def test_qq_face_label_is_exposed_as_image_text(self):
         event = SimpleNamespace(

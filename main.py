@@ -32,6 +32,7 @@ from .bilibili import (
 from .bilibili_card import build_bilibili_card, render_bilibili_card
 from .image_ocr import (
     embedded_image_text,
+    is_remote_gif_ref,
     normalize_vision_image_ref,
     ocr_image_url,
 )
@@ -2693,6 +2694,51 @@ class QQGroupAdmin(Star):
             has_text = bool(text.strip())
         return total, 0 if has_text else total
 
+    @staticmethod
+    def _event_marks_gif(event: AstrMessageEvent, url: str) -> bool:
+        """Use QQ attachment metadata when a signed URL hides its file type."""
+
+        target = str(url or "").strip()
+        if target.startswith("//"):
+            target = "https:" + target
+        for attachment in QQGroupAdmin._raw_data(event).get("attachments") or []:
+            if not isinstance(attachment, dict):
+                continue
+            candidate = str(attachment.get("url") or "").strip()
+            if candidate.startswith("//"):
+                candidate = "https:" + candidate
+            if candidate != target:
+                continue
+            content_type = str(attachment.get("content_type") or "").lower()
+            filename = str(attachment.get("filename") or "").lower()
+            return content_type.split(";", 1)[0].strip() == "image/gif" or filename.endswith(
+                ".gif"
+            )
+        return False
+
+    @staticmethod
+    def _ai_message_text(event: AstrMessageEvent, text: str) -> str:
+        """Keep real text while dropping QQ media placeholders from AI review."""
+
+        components = list(getattr(event.message_obj, "message", None) or [])
+        if components:
+            return "\n".join(
+                str(getattr(component, "text", "") or "").strip()
+                for component in components
+                if type(component).__name__ == "Plain"
+                and str(getattr(component, "text", "") or "").strip()
+            )[:4000]
+        cleaned = re.sub(
+            r"\[(?:表情|Face):\[?[^\]\r\n]+\]?\]",
+            " ",
+            str(text or ""),
+            flags=re.IGNORECASE,
+        )
+        cleaned = re.sub(
+            r"\[(?:图片|Image)\]", " ", cleaned, flags=re.IGNORECASE
+        )
+        return " ".join(cleaned.split())[:4000]
+
     async def _image_ocr_text(
         self,
         event: AstrMessageEvent,
@@ -2722,6 +2768,9 @@ class QQGroupAdmin(Star):
         vision_urls = []
         if provider_id and urls:
             for url in urls:
+                if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
+                    self.logger.debug("跳过不兼容视觉模型的 GIF 图片")
+                    continue
                 normalized = await asyncio.to_thread(normalize_vision_image_ref, url)
                 if normalized:
                     vision_urls.append(normalized)
@@ -2749,46 +2798,65 @@ class QQGroupAdmin(Star):
         return "\n".join(dict.fromkeys(value for value in values if value))[:8000]
 
     @staticmethod
+    def _ai_decision_details(value: str) -> tuple[str, int | None, str]:
+        """Parse a decision only when it is the model's leading token."""
+
+        text = str(value or "").strip()
+        text = re.sub(
+            r"^```(?:JSON)?\s*|\s*```$",
+            "",
+            text,
+            flags=re.IGNORECASE,
+        ).strip()
+        decision = ""
+        leading = re.match(r"^(ALLOW|BLOCK)\b", text, re.IGNORECASE)
+        if leading:
+            decision = leading.group(1).upper()
+        else:
+            chinese = re.match(
+                r"^(允许|通过|拦截|拒绝)(?=\s|[:：,，。；;.!！?？]|$)", text
+            )
+            if chinese:
+                decision = (
+                    "ALLOW" if chinese.group(1) in {"允许", "通过"} else "BLOCK"
+                )
+        confidence_match = (
+            re.search(
+                r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})",
+                text,
+                re.IGNORECASE,
+            )
+            if decision
+            else None
+        )
+        confidence = None
+        if confidence_match:
+            try:
+                confidence = min(100, int(confidence_match.group(1)))
+            except ValueError:
+                confidence = None
+        reason_match = (
+            re.search(
+                r"(?:REASON|理由|原因)\s*[:=：]\s*(.+)",
+                text,
+                re.IGNORECASE,
+            )
+            if decision
+            else None
+        )
+        reason = reason_match.group(1).strip() if reason_match else ""
+        return decision, confidence, reason[:200]
+
+    @staticmethod
     def _ai_decision(value: str, threshold: int) -> bool | None:
         """Return block/allow; ambiguous model output fails open."""
 
-        text = str(value or "").strip().upper()
-        text = re.sub(r"^```(?:JSON)?\s*|\s*```$", "", text).strip()
-        first = re.search(r"\b(ALLOW|BLOCK)\b", text)
-        if first and first.group(1) == "ALLOW":
+        decision, confidence, _reason = QQGroupAdmin._ai_decision_details(value)
+        if decision == "ALLOW":
             return False
-        if first and first.group(1) == "BLOCK":
-            pass
-        elif re.search(r"^(允许|通过)\b", text):
-            return False
-        elif not re.search(r"^(拦截|拒绝)\b", text):
-            return None
-        match = re.search(
-            r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})", text
-        )
-        if not match:
-            return None
-        try:
-            confidence = int(match.group(1))
-        except ValueError:
+        if decision != "BLOCK" or confidence is None:
             return None
         return confidence >= max(50, min(100, int(threshold)))
-
-    @staticmethod
-    def _ai_decision_details(value: str) -> tuple[str, int | None, str]:
-        text = str(value or "").strip()
-        decision = re.search(r"\b(ALLOW|BLOCK)\b", text, re.IGNORECASE)
-        confidence = re.search(
-            r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})",
-            text,
-            re.IGNORECASE,
-        )
-        reason = re.search(r"(?:REASON|理由|原因)\s*[:=：]\s*(.+)", text, re.IGNORECASE)
-        return (
-            decision.group(1).upper() if decision else "",
-            min(100, int(confidence.group(1))) if confidence else None,
-            (reason.group(1).strip() if reason else "")[:200],
-        )
 
     @staticmethod
     def _safe_ai_error(value: Any) -> str:
@@ -2819,15 +2887,19 @@ class QQGroupAdmin(Star):
         confirm_provider_id: str = "",
         result: dict[str, Any] | None = None,
     ) -> bool:
+        review_text = self._ai_message_text(event, text)
         vision_urls = []
         if image_review_enabled:
             for url in dict.fromkeys(image_urls):
+                if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
+                    self.logger.debug("跳过不兼容视觉模型的 GIF 图片")
+                    continue
                 normalized = await asyncio.to_thread(normalize_vision_image_ref, url)
                 if normalized:
                     vision_urls.append(normalized)
                 else:
                     self.logger.debug("跳过无法安全转换的 GIF 图片")
-        if not text and not vision_urls:
+        if not review_text and not vision_urls:
             return False
         prompt = (
             "审核以下 QQ 群消息。只有在明确的色情、暴力威胁、违法交易、诈骗引流、"
@@ -2835,7 +2907,7 @@ class QQGroupAdmin(Star):
             "玩笑、游戏术语、角色名、单个词和游戏/动漫截图中的文字必须放行。"
             "请只输出一行：ALLOW confidence=0-100 reason=... 或 "
             "BLOCK confidence=0-100 reason=...。\n消息："
-            + (text[:4000] if text else "[仅图片]")
+            + (review_text if review_text else "[仅图片]")
         )
         providers = []
         if provider_id:
@@ -3297,6 +3369,10 @@ class QQGroupAdmin(Star):
 
         entry = self._group_config(group_openid)
         settings = self._moderation_settings(entry)
+        local_review_enabled = settings["enabled"]
+        global_ai_enabled = bool(
+            entry and entry.get("platform_id") and settings["ai_enabled"]
+        )
         admin_exempt = settings["exempt_admins"] and role in GROUP_ADMIN_ROLES
         global_blacklist_match = self._member_list_matches(
             event,
@@ -3379,13 +3455,20 @@ class QQGroupAdmin(Star):
             if not failed:
                 self._moderation.remember(delivery_key, True)
             return
-        if not settings["enabled"] or admin_exempt or member_whitelisted:
+        if (
+            (not local_review_enabled and not global_ai_enabled)
+            or admin_exempt
+            or member_whitelisted
+        ):
             self._moderation.break_repeat(group_openid)
             if settings["image_enabled"]:
                 self._moderation.break_image_chain(group_openid, member_openid)
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
+        if not local_review_enabled:
+            self._moderation.break_repeat(group_openid)
+            self._moderation.break_image_chain(group_openid, member_openid)
 
         images = self._image_urls(event)
         image_count, pure_image_count = self._image_like_counts(event, text, images)
@@ -3396,17 +3479,19 @@ class QQGroupAdmin(Star):
         ai_record_only = False
         recall_ids: list[str] = []
         ocr_text = ""
-        if settings["image_enabled"] and image_count == 0:
+        if local_review_enabled and settings["image_enabled"] and image_count == 0:
             self._moderation.break_image_chain(group_openid, member_openid)
-        if matched_keyword(text, settings["global_keywords"]):
+        if local_review_enabled and matched_keyword(
+            text, settings["global_keywords"]
+        ):
             reason = "消息命中全局禁止关键词，已撤回。"
             warn_text = settings["global_keyword_reply"]
             warn_at_member = settings["global_keyword_at"]
-        elif matched_keyword(text, settings["keywords"]):
+        elif local_review_enabled and matched_keyword(text, settings["keywords"]):
             reason = "消息命中本群禁止关键词，已撤回。"
             warn_text = settings["keyword_reply"]
             warn_at_member = settings["keyword_at"]
-        elif settings["image_ocr_enabled"] and image_count and (
+        elif local_review_enabled and settings["image_ocr_enabled"] and image_count and (
             settings["global_image_keywords"]
             or (settings["image_keyword_enabled"] and settings["image_keywords"])
         ):
@@ -3435,7 +3520,7 @@ class QQGroupAdmin(Star):
                 reason = "图片文字命中本群禁止关键词，已撤回。"
                 warn_text = settings["image_keyword_reply"]
                 warn_at_member = settings["image_keyword_at"]
-        if not reason and settings["image_enabled"]:
+        if not reason and local_review_enabled and settings["image_enabled"]:
             image_recall_ids = self._moderation.add_images(
                 group_openid,
                 member_openid,
@@ -3463,13 +3548,18 @@ class QQGroupAdmin(Star):
             if group_recall_ids or image_recall_ids:
                 warn_text = settings["image_spam_reply"]
                 warn_at_member = settings["image_spam_at"]
-        if reason and not recall_ids and settings["image_enabled"]:
+        if (
+            reason
+            and not recall_ids
+            and local_review_enabled
+            and settings["image_enabled"]
+        ):
             self._moderation.break_image_chain(group_openid, member_openid)
 
         repeat_members: list[str] = []
         if reason:
             self._moderation.break_repeat(group_openid)
-        elif settings["repeat_enabled"]:
+        elif local_review_enabled and settings["repeat_enabled"]:
             signature = "" if pure_image_count else normalize_message(text)
             repeat_members = self._moderation.add_repeat(
                 group_openid,
@@ -3489,7 +3579,7 @@ class QQGroupAdmin(Star):
             self._moderation.break_repeat(group_openid)
         if (
             not reason
-            and settings["ai_enabled"]
+            and global_ai_enabled
             and await self._ai_blocks_message(
                 event,
                 text,
@@ -3579,6 +3669,7 @@ class QQGroupAdmin(Star):
             },
         )
         if ai_record_only:
+            await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
         try:

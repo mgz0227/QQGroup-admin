@@ -186,6 +186,7 @@
 
             <div class="section-title wide">全局 AI 内容审核</div>
             <label class="checkbox runtime-toggle"><input id="runtime-ai-enabled" type="checkbox"><span>启用全局 AI 内容审核</span></label>
+            <p class="config-note wide">对所有已绑定群生效；管理员和白名单成员仍按免审规则处理。</p>
             <label><span>主模型</span><select id="runtime-ai-provider"></select></label>
             <label class="wide"><span>回退模型（可多选，按顺序尝试）</span><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，主模型不能重复选择。</small></label>
             <label><span>二次确认模型（可选）</span><select id="runtime-ai-confirm-provider"></select><small>仅在初判 BLOCK 后调用；确认失败时只记录。</small></label>
@@ -342,7 +343,7 @@
             <p>仅在当前群生效，按列表顺序匹配。</p>
             <div class="keyword-reply-list" id="keyword-replies"></div>
           </div>
-          <p class="wide config-note">AI 内容审核为全局配置，请在“运行配置 → 全局 AI 内容审核”中统一设置。</p>
+          <p class="wide config-note">AI 内容审核为全局配置，对全部已绑定群生效，不受此处消息审查开关影响。</p>
           <label class="checkbox">
             <input id="image-spam-enabled" type="checkbox">
             <span>连续发图检测</span>

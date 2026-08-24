@@ -84,7 +84,7 @@
   "global_ai_review_enabled": {
     "type": "bool",
     "description": "全局 AI 内容审核",
-    "hint": "对所有已开启群消息审查的群生效；关闭后不会调用 AI。主模型失败或返回无效结果时按顺序尝试回退模型。",
+    "hint": "对所有已绑定群生效（管理员和白名单成员仍按免审规则处理）；关闭后不会调用 AI。主模型失败或返回无效结果时按顺序尝试回退模型。",
     "default": false
   },
   "global_ai_review_provider_id": {
