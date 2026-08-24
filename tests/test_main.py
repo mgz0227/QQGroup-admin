@@ -3111,17 +3111,34 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         token_data = next(iter(plugin._verification_tokens.values()))
-        self.assertIn("直接发送结果数字", client.api.messages[-1]["content"])
+        self.assertEqual(client.api.messages[-1]["content"], "3 + 4 = ?")
         self.assertTrue(
             await plugin._consume_verification_answer(
                 client,
                 "group-1",
                 "member-1",
-                f"验证 {token_data[3]}",
+                str(token_data[3]),
             )
         )
         self.assertNotIn("group-1:member-1", plugin._suspicious_members)
         self.assertEqual(plugin._verification_tokens, {})
+
+    async def test_verification_rejects_prefixed_answer(self):
+        plugin, client = self.plugin()
+        plugin._suspicious_members["group-1:member-1"] = {
+            "group_openid": "group-1",
+            "member_openid": "member-1",
+        }
+        with patch.object(module.secrets, "randbelow", side_effect=[1, 2]):
+            await plugin._send_verification_challenge(
+                client, "group-1", "member-1"
+            )
+        answer = next(iter(plugin._verification_tokens.values()))[3]
+        self.assertFalse(
+            await plugin._consume_verification_answer(
+                client, "group-1", "member-1", f"答案:{answer}"
+            )
+        )
 
 
 if __name__ == "__main__":

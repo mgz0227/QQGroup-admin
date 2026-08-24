@@ -1101,11 +1101,7 @@ class QQGroupAdmin(Star):
             await self._send_group_markdown(
                 client,
                 group_openid,
-                (
-                    f"# 真人验证\n{self._mention(member_openid)} 请计算 "
-                    f"**{left} + {right}**，也可直接发送数字；"
-                    "验证通过前发送的消息会被撤回。"
-                ),
+                f"# {left} + {right} = ?",
                 message_id=message_id,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
             )
@@ -1116,8 +1112,7 @@ class QQGroupAdmin(Star):
                 await self._send_group_text(
                     client,
                     group_openid,
-                    f"真人验证：请计算 {left} + {right}，直接发送结果数字。"
-                    "验证通过前发送的消息会被撤回。",
+                    f"{left} + {right} = ?",
                     message_id=message_id,
                 )
             except Exception:  # noqa: BLE001 - plain fallback can also fail
@@ -1132,10 +1127,8 @@ class QQGroupAdmin(Star):
         member_openid: str,
         text: str,
     ) -> bool:
-        match = re.fullmatch(
-            r"\s*(?:答案\s*[:：]?|验证\s*)?(\d{1,6})\s*",
-            str(text or ""),
-        )
+        # 只接受纯数字，避免把普通带前缀文本误当作验证答案。
+        match = re.fullmatch(r"\s*(\d{1,6})\s*", str(text or ""))
         if not match:
             return False
         self._cleanup_tokens()
