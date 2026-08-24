@@ -1103,7 +1103,7 @@ class QQGroupAdmin(Star):
                 group_openid,
                 (
                     f"# 真人验证\n{self._mention(member_openid)} 请计算 "
-                    f"**{left} + {right}**，也可直接发送答案数字；"
+                    f"**{left} + {right}**，也可直接发送数字；"
                     "验证通过前发送的消息会被撤回。"
                 ),
                 message_id=message_id,
