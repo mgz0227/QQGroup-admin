@@ -38,6 +38,7 @@ from .qq_api import (
     QQAPIError,
     QQGroupAPI,
     future_rfc3339,
+    infer_group_file_type,
     parse_duration,
     parse_openids,
     parse_qq_number_text,
@@ -92,6 +93,12 @@ COMMAND_PANEL = {
             "type": "command",
             "name": "/机器人状态",
             "desc": "检查机器人群内权限",
+            "only_admin": True,
+        },
+        {
+            "type": "command",
+            "name": "/上传群文件",
+            "desc": "发送公开 URL 文件到当前群",
             "only_admin": True,
         },
     ],
@@ -264,6 +271,7 @@ def split_message(text: str, limit: int = 3000) -> list[str]:
 class QQGroupAdmin(Star):
     HELP = """QQ 群聊管理命令
 /群信息
+/上传群文件 <URL> [文件名]
 /机器人状态
 /申请列表 [游标]
 /审核设置
@@ -3284,6 +3292,25 @@ class QQGroupAdmin(Star):
                 ]
             )
         )
+
+    @qq_admin_command("上传群文件")
+    async def upload_group_file(
+        self,
+        event: AstrMessageEvent,
+        url: str,
+        file_name: str = "",
+    ):
+        """Send a public URL as a QQ official rich-media group message."""
+
+        _, group_openid, _ = self._context(event)
+        await self._api(event).upload_group_file(
+            group_openid,
+            url,
+            file_name=file_name,
+        )
+        labels = {1: "图片", 2: "视频", 3: "语音", 4: "文件"}
+        kind = labels[infer_group_file_type(url, file_name)]
+        yield event.plain_result(f"群{kind}已发送。")
 
     @qq_admin_command("同步指令面板")
     async def sync_command_panel(self, event: AstrMessageEvent):

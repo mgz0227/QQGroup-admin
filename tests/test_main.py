@@ -502,6 +502,30 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertEqual(client.api.messages, [])
 
+    async def test_upload_group_file_uses_public_url_and_reports_type(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client)
+        api = SimpleNamespace(
+            upload_group_file=AsyncMock(return_value={"id": "message-2"})
+        )
+        plugin._api = lambda _event: api
+
+        results = [
+            result
+            async for result in plugin.upload_group_file(
+                event,
+                "https://cdn.example.test/demo.mp4?sig=abc",
+                "demo.mp4",
+            )
+        ]
+
+        self.assertEqual(results, ["群视频已发送。"])
+        api.upload_group_file.assert_awaited_once_with(
+            "group-1",
+            "https://cdn.example.test/demo.mp4?sig=abc",
+            file_name="demo.mp4",
+        )
+
     async def test_sync_command_panel_creates_then_updates_managed_panel(self):
         plugin, client = self.plugin()
         event = FakeEvent(client)

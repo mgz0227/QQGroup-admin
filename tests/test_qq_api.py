@@ -4,11 +4,13 @@ from qq_api import (
     QQAPIError,
     QQGroupAPI,
     future_rfc3339,
+    infer_group_file_type,
     parse_duration,
     parse_group_ids,
     parse_qq_number_text,
     parse_qq_numbers,
     select_group_strategy,
+    validate_file_url,
     validate_rfc3339,
     whitelist_diff,
 )
@@ -156,6 +158,46 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
             "https://api.bot.qq.com/v2/groups/group%2Fopenid/messages/message%2Fid",
         )
         self.assertNotIn("json", kwargs)
+
+    async def test_upload_group_file_uses_official_url_upload_route(self):
+        client = FakeClient(FakeResponse(200, {"id": "message-1"}))
+
+        result = await QQGroupAPI(client).upload_group_file(
+            "group/openid",
+            "https://cdn.example.test/preview.png?token=abc",
+            file_name="预览.png",
+        )
+
+        self.assertEqual(result["id"], "message-1")
+        method, url, kwargs = client.http._session.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url,
+            "https://api.bot.qq.com/v2/groups/group%2Fopenid/files",
+        )
+        self.assertEqual(
+            kwargs["json"],
+            {
+                "file_type": 1,
+                "url": "https://cdn.example.test/preview.png?token=abc",
+                "srv_send_msg": True,
+                "file_name": "预览.png",
+            },
+        )
+
+    def test_group_file_url_and_type_validation(self):
+        self.assertEqual(infer_group_file_type("https://x.test/a.mp4"), 2)
+        self.assertEqual(infer_group_file_type("https://x.test/a.bin", "voice.silk"), 3)
+        self.assertEqual(infer_group_file_type("https://x.test/a.bin"), 4)
+        self.assertEqual(
+            validate_file_url("https://x.test/file?a=1"),
+            "https://x.test/file?a=1",
+        )
+        for value in ("", "ftp://x.test/a", "https:///missing-host"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                validate_file_url(value)
+        with self.assertRaises(ValueError):
+            validate_file_url("https://user:pass@x.test/a")
 
     async def test_group_command_panel_routes(self):
         client = FakeClient(FakeResponse(200, {}))

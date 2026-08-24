@@ -1,6 +1,6 @@
 # QQ 群聊管理
 
-面向 AstrBot `qq_official` / `qq_official_webhook` 适配器的 QQ 官方群聊管理插件。插件复用 AstrBot 已认证的 QQ 客户端，覆盖 QQ 官方当前提供的 12 个群管理 HTTP 接口，并支持 QQ 原生群指令面板；不读取、保存或输出机器人凭据。
+面向 AstrBot `qq_official` / `qq_official_webhook` 适配器的 QQ 官方群聊管理插件。插件复用 AstrBot 已认证的 QQ 客户端，覆盖 QQ 官方当前提供的群管理与群聊富媒体接口，并支持 QQ 原生群指令面板；不读取、保存或输出机器人凭据。
 
 ## 要求
 
@@ -27,6 +27,7 @@ https://github.com/mgz0227/QQGroup-admin
 
 ```text
 /群信息
+/上传群文件 https://example.com/demo.png [文件名]
 /申请列表
 /审核设置
 /同步指令面板
@@ -49,6 +50,7 @@ https://github.com/mgz0227/QQGroup-admin
 | --- | --- |
 | `/群帮助` | 显示命令帮助 |
 | `/群信息` | 查询群信息，并显示当前群和自己的 OpenID |
+| `/上传群文件 <URL> [文件名]` | 通过 QQ 官方富媒体接口发送公开 URL 文件；按扩展名识别图片、视频、语音或普通文件 |
 | `/机器人状态` | 查询机器人群角色和消息接收状态 |
 | `/申请列表 [游标]` | 每页查询 5 条待审申请，并显示同意/拒绝按钮 |
 | `/审核设置` | 显示审核模式、UID、条件组合、兜底动作和应用按钮；默认 45 秒后自动撤回 |
@@ -67,7 +69,7 @@ https://github.com/mgz0227/QQGroup-admin
 | `/自动审核同步 确认` | 将当前群的 WebUI 配置同步到 QQ 官方 |
 | `/自动审核关闭 确认` | 删除当前群策略及其白名单 |
 
-`/同步指令面板` 只管理带有本插件专属备注的全局群面板，不覆盖其他面板。面板包含 `/审核设置`、`/申请列表`、`/禁言状态` 和 `/机器人状态`，4 项都只允许群主或管理员点击；点击后仍需发送已填入输入框的命令。重复执行会更新原面板。
+`/同步指令面板` 只管理带有本插件专属备注的全局群面板，不覆盖其他面板。面板包含 `/审核设置`、`/申请列表`、`/禁言状态`、`/机器人状态` 和 `/上传群文件`，5 项都只允许群主或管理员点击；点击后仍需发送已填入输入框的命令。重复执行会更新原面板。
 
 ## 多群管理页面
 
@@ -159,7 +161,7 @@ AstrBot `4.27.3` 尚未公开按钮组件和互动事件插件接口，本插件
 
 ## 能力边界
 
-QQ 当前没有开放成员列表、踢人、管理员设置、修改群资料、查询或解除群黑名单、写入全员或定时禁言规则等接口。本插件不会使用非官方协议补齐；`/全体禁言` 与 `/全体解禁` 只查询并报告该能力边界。
+QQ 当前没有开放成员列表、踢人、管理员设置、修改群资料、查询或解除群黑名单、写入全员或定时禁言规则、群文件列表/删除等接口。本插件不会使用非官方协议补齐；`/全体禁言` 与 `/全体解禁` 只查询并报告该能力边界。群文件目前只支持通过 QQ 官方富媒体接口发送可公开访问的 URL，不读取本地路径，也不伪造文件列表或删除功能。
 
 QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转发到插件事件总线。QQ 号码白名单使用官方持久化策略；需要读取验证文字的 UID 模式则以 30 QPM 限额内的错峰轮询实现。
 
@@ -170,6 +172,7 @@ QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转�
 - [QQ 机器人群聊管理接口](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_info.get.html)
 - [QQ 入群自动审批策略](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_join_approval_strategy.post.html)
 - [QQ 群消息与按钮](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_messages.post.html)
+- [QQ 群聊富媒体上传](https://bot.q.qq.com/wiki/develop/api-v2/autogen/api/v2_groups_group_openid_files.post.html)
 - [QQ 文本交互与艾特格式](https://bot.q.qq.com/wiki/develop/api-v2/server-inter/message/trans/text-chain.html)
 - [QQ 互动事件](https://bot.q.qq.com/wiki/develop/api-v2/autogen/event/interaction_create.html)
 - [Bilibili API Collect：用户名片信息](https://github.com/Goooler/bilibili-API-collect/blob/trunk/docs/user/info.md#用户名片信息)
@@ -179,7 +182,7 @@ QQ 文档列出的入群申请事件尚未由 AstrBot `4.27.3` QQ 适配器转�
 - [AstrBot 插件开发指南](https://docs.astrbot.app/dev/star/plugin-new.html)
 - [AstrBot 插件配置指南](https://docs.astrbot.app/dev/star/guides/plugin-config.html)
 
-同类插件调研参考了 [GroupGuardian](https://github.com/zcj-ui/astrbot_plugin_group_guardian) 的违规记录与限长反刷屏队列、[astrbot_plugin_ai_review](https://github.com/Ni-ShuWu/astrbot_plugin_ai_review) 的主备模型策略、[astrbot_plugin_anti_spam](https://github.com/Je1ghtxyuN/astrbot_plugin_anti_spam) 的冷却窗口和 [astrbot_plugin_keywords_reply](https://github.com/Foolllll-J/astrbot_plugin_keywords_reply) 的规则回复设计；依赖 OneBot 私有接口的全体禁言、群文件等能力没有移植到 QQ 官方适配器。
+同类插件调研参考了 [GroupGuardian](https://github.com/zcj-ui/astrbot_plugin_group_guardian) 的违规记录与限长反刷屏队列、[astrbot_plugin_ai_review](https://github.com/Ni-ShuWu/astrbot_plugin_ai_review) 的主备模型策略、[astrbot_plugin_anti_spam](https://github.com/Je1ghtxyuN/astrbot_plugin_anti_spam) 的冷却窗口和 [astrbot_plugin_keywords_reply](https://github.com/Foolllll-J/astrbot_plugin_keywords_reply) 的规则回复设计；依赖 OneBot 私有接口的全体禁言、群文件列表/删除等能力没有移植到 QQ 官方适配器，官方已开放的 URL 富媒体发送则使用 QQ OpenAPI 实现。
 
 ## 测试
 

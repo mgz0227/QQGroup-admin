@@ -4,7 +4,7 @@ import json
 import re
 from datetime import datetime, timedelta, timezone
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 API_BASE = "https://api.bot.qq.com"
 MAX_MUTE_DURATION = timedelta(days=30)
@@ -20,6 +20,15 @@ ERROR_HINTS = {
     11265: "机器人已被封禁",
     11282: "机器人不是群管理员，或入群时未获得管理员授权",
     12002: "QQ API 拒绝了请求参数",
+    850026: "QQ 无法下载文件 URL，请确认地址可公开访问",
+    850031: "文件超过 QQ 官方大小限制",
+    40093002: "已超过 QQ 官方今日文件容量上限",
+}
+
+GROUP_FILE_SUFFIXES = {
+    1: {".png", ".jpg", ".jpeg"},
+    2: {".mp4"},
+    3: {".silk"},
 }
 
 
@@ -140,6 +149,28 @@ def validate_choice(value: str, choices: set[str], *, label: str) -> str:
     return value
 
 
+def validate_file_url(value: str) -> str:
+    url = str(value or "").strip()
+    if not url or len(url) > 2048 or any(ord(char) < 32 for char in url):
+        raise ValueError("文件 URL 不能为空且最多 2048 个字符")
+    parsed = urlsplit(url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise ValueError("文件 URL 必须是 http 或 https 地址")
+    if parsed.username or parsed.password:
+        raise ValueError("文件 URL 不允许携带账号或密码")
+    return url
+
+
+def infer_group_file_type(url: str, file_name: str = "") -> int:
+    source = file_name.strip() or urlsplit(url).path
+    suffix = source.rsplit(".", 1)[-1].lower() if "." in source else ""
+    suffix = f".{suffix}"
+    for file_type, suffixes in GROUP_FILE_SUFFIXES.items():
+        if suffix in suffixes:
+            return file_type
+    return 4
+
+
 def select_group_strategy(
     strategies: list[Any],
     group_openid: str,
@@ -256,6 +287,39 @@ class QQGroupAPI:
     async def get_group_info(self, group_openid: str) -> dict[str, Any]:
         group = self._id(group_openid, "群 OpenID")
         return await self._request("GET", f"/v2/groups/{group}/info")
+
+    async def upload_group_file(
+        self,
+        group_openid: str,
+        url: str,
+        *,
+        file_name: str = "",
+        file_type: int | None = None,
+    ) -> dict[str, Any]:
+        """Upload a public URL and send it as a QQ group rich-media message."""
+
+        group = self._id(group_openid, "群 OpenID")
+        validated_url = validate_file_url(url)
+        name = str(file_name or "").strip()
+        if len(name) > 255 or any(ord(char) < 32 for char in name):
+            raise ValueError("文件名最多 255 个字符且不能包含控制字符")
+        if file_type is None:
+            file_type = infer_group_file_type(validated_url, name)
+        if file_type not in {1, 2, 3, 4}:
+            raise ValueError("文件类型只能是 1（图片）、2（视频）、3（语音）或 4（文件）")
+        body: dict[str, Any] = {
+            "file_type": file_type,
+            "url": validated_url,
+            "srv_send_msg": True,
+        }
+        if name:
+            body["file_name"] = name
+        data = await self._request(
+            "POST",
+            f"/v2/groups/{group}/files",
+            body=body,
+        )
+        return data if isinstance(data, dict) else {}
 
     async def recall_group_message(
         self,
