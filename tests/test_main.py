@@ -1823,6 +1823,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "title": "新动态",
             "text": "正文",
             "url": "https://www.bilibili.com/opus/dynamic-1",
+            "cover": "https://i0.hdslb.com/bfs/archive/cover.jpg",
         }
         with (
             patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
@@ -1855,10 +1856,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
         push_text = push.await_args.args[1]
-        self.assertIn("# B站动态", push_text)
+        self.assertIn("## 🔔 B站动态", push_text)
         self.assertIn("**UP** · 图文", push_text)
-        self.assertIn("正文", push_text)
-        self.assertIn("[查看原动态](https://www.bilibili.com/opus/dynamic-1)", push_text)
+        self.assertIn(
+            "![封面 #300px #169px](https://i0.hdslb.com/bfs/archive/cover.jpg)",
+            push_text,
+        )
+        self.assertIn("**发布了新动态**", push_text)
+        self.assertIn("> 正文", push_text)
+        self.assertIn("[查看动态 ↗](https://www.bilibili.com/opus/dynamic-1)", push_text)
         self.assertNotIn("\n-\n", push_text)
 
     async def test_bilibili_live_push_uses_named_room_link(self):
@@ -1887,6 +1893,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "room_id": "123",
             "uname": "UP",
             "title": "新标题",
+            "user_cover": "https://i0.hdslb.com/bfs/live/cover.jpg",
         }
         with (
             patch.object(module, "fetch_live_statuses", return_value={"188144093": current}),
@@ -1894,9 +1901,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await plugin._poll_bilibili_live(subscriptions))
         text = push.await_args.args[1]
-        self.assertIn("# B站直播", text)
-        self.assertIn("**UP** · 已开播", text)
-        self.assertIn("[进入直播间](https://live.bilibili.com/123)", text)
+        self.assertIn("## 🔴 正在直播", text)
+        self.assertIn("**UP** · 直播中", text)
+        self.assertIn(
+            "![封面 #300px #169px](https://i0.hdslb.com/bfs/live/cover.jpg)",
+            text,
+        )
+        self.assertIn("**新标题**", text)
+        self.assertIn("[进入直播间 ↗](https://live.bilibili.com/123)", text)
         self.assertEqual(
             plugin._bilibili_state["live"]["188144093"]["live_status"],
             1,

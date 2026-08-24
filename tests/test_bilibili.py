@@ -48,6 +48,7 @@ class BilibiliTest(unittest.TestCase):
                                 "major": {
                                     "archive": {
                                         "title": "新视频",
+                                        "cover": "//i0.hdslb.com/bfs/archive/cover.jpg",
                                         "jump_url": "//www.bilibili.com/video/BV1xx",
                                     }
                                 },
@@ -70,6 +71,7 @@ class BilibiliTest(unittest.TestCase):
                     "title": "新视频",
                     "text": "新动态",
                     "url": "https://www.bilibili.com/opus/123",
+                    "cover": "https://i0.hdslb.com/bfs/archive/cover.jpg",
                 }
             ],
         )

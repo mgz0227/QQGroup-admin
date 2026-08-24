@@ -1596,11 +1596,27 @@ class QQGroupAdmin(Star):
         }.get(str(value or "").upper(), "动态")
 
     @staticmethod
+    def _bilibili_markdown_image(value: Any) -> str:
+        url = str(value or "").strip()
+        if url.startswith("//"):
+            url = "https:" + url
+        if not url.startswith(("https://", "http://")) or any(
+            char.isspace() or char in "()" for char in url
+        ):
+            return ""
+        return f"![封面 #300px #169px]({url})"
+
+    @staticmethod
     def _markdown_fallback_text(value: str) -> str:
+        text = re.sub(
+            r"!\[[^\]]*\]\(https?://[^)]+\)\s*",
+            "",
+            str(value or ""),
+        )
         text = re.sub(
             r"\[([^\]]+)\]\((https?://[^)]+)\)",
             r"\1：\2",
-            str(value or ""),
+            text,
         )
         text = re.sub(r"(?m)^(?:#{1,6}\s+|>\s*)", "", text)
         return text.replace("**", "").replace("\\", "").strip()
@@ -2002,16 +2018,30 @@ class QQGroupAdmin(Star):
                         current.get("title") or "未设置标题", 300
                     )
                     room_id = str(current.get("room_id") or "").strip()
+                    cover = self._bilibili_markdown_image(
+                        current.get("user_cover")
+                        or current.get("keyframe")
+                        or current.get("cover")
+                    )
                     if transition == "start":
-                        text = (
-                            f"# B站直播\n\n**{name}** · 已开播\n\n"
-                            f"> {title}\n\n"
-                            f"[进入直播间](https://live.bilibili.com/{room_id})"
+                        sections = ["## 🔴 正在直播", f"**{name}** · 直播中"]
+                        if cover:
+                            sections.append(cover)
+                        sections.extend(
+                            [
+                                f"**{title}**",
+                                f"[进入直播间 ↗](https://live.bilibili.com/{room_id})",
+                            ]
                         )
+                        text = "\n\n".join(sections)
                     else:
-                        text = (
-                            f"# B站直播\n\n**{name}** · 已下播\n\n"
-                            f"> {title}\n\n本场直播已结束。"
+                        text = "\n\n".join(
+                            [
+                                "## ⚪ 直播结束",
+                                f"**{name}**",
+                                f"**{title}**",
+                                "本场直播已结束。",
+                            ]
                         )
                     delivered = await self._push_bilibili_message(
                         subscriptions.get(uid, []), text, "live"
@@ -2095,14 +2125,16 @@ class QQGroupAdmin(Star):
                 meta = f"**{name}** · {kind}"
                 if pub_ts:
                     meta += time.strftime(" · %m-%d %H:%M", time.localtime(pub_ts))
-                sections = ["# B站动态", meta]
-                if title:
-                    sections.append(f"> {title}")
-                if summary:
-                    sections.append(summary)
                 if not title and not summary:
-                    sections.append("发布了新内容，点击查看详情。")
-                sections.append(f"[查看原动态]({item['url']})")
+                    title = "发布了新动态"
+                    summary = "暂无文字说明，点击下方查看完整动态。"
+                cover = self._bilibili_markdown_image(item.get("cover"))
+                sections = ["## 🔔 B站动态", meta]
+                if cover:
+                    sections.append(cover)
+                sections.append(f"**{title or '发布了新动态'}**")
+                sections.append(f"> {summary or '暂无文字说明，点击下方查看完整动态。'}")
+                sections.append(f"[查看动态 ↗]({item['url']})")
                 text = "\n\n".join(sections)
                 if not await self._push_bilibili_message(targets, text, "dynamic"):
                     break

@@ -270,6 +270,38 @@ def fetch_space_dynamics(
     return _get_json(url, cookie=cookie, timeout=timeout)
 
 
+def _media_url(value: Any) -> str:
+    url = str(value or "").strip()
+    if url.startswith("//"):
+        url = "https:" + url
+    parsed = urlsplit(url)
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not parsed.netloc
+        or any(char in url for char in "\r\n()")
+    ):
+        return ""
+    return url
+
+
+def _first_cover(card: dict[str, Any]) -> str:
+    for key in ("cover", "pic", "image", "image_url"):
+        cover = _media_url(card.get(key))
+        if cover:
+            return cover
+    for key in ("pics", "covers", "images", "items"):
+        values = card.get(key)
+        if not isinstance(values, list):
+            continue
+        for value in values:
+            if isinstance(value, dict):
+                value = value.get("url") or value.get("src") or value.get("img_src")
+            cover = _media_url(value)
+            if cover:
+                return cover
+    return ""
+
+
 def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
     result: list[dict[str, Any]] = []
     items = _data(payload).get("items")
@@ -340,6 +372,7 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
                 "title": title,
                 "text": text,
                 "url": url,
+                "cover": _first_cover(card),
             }
         )
     return result
