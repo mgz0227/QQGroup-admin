@@ -1886,16 +1886,26 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "![封面 #300px #169px](https://i0.hdslb.com/bfs/archive/cover.jpg)",
             push_text,
         )
-        self.assertIn("> 正文", push_text)
-        self.assertIn("[查看原动态](https://www.bilibili.com/opus/dynamic-1)", push_text)
+        self.assertIn("正文", push_text)
+        self.assertNotIn("> 正文", push_text)
+        self.assertIn(
+            "[查看原动态 ↗](https://www.bilibili.com/opus/dynamic-1)",
+            push_text,
+        )
         self.assertNotIn("\n-\n", push_text)
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
-        plugin.html_render = AsyncMock(return_value=b"\x89PNG\r\ncard")
         send_card = AsyncMock(return_value=SimpleNamespace(id="card-1"))
-        with patch.object(plugin, "_send_group_card", send_card):
+        with (
+            patch.object(
+                module,
+                "render_bilibili_card",
+                return_value=b"\x89PNG\r\ncard",
+            ),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
             delivered = await plugin._push_bilibili_message(
                 [
                     {
@@ -1920,7 +1930,6 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             send_card.await_args.kwargs["link"],
             "https://www.bilibili.com/opus/1",
         )
-        plugin.html_render.assert_awaited_once()
         self.assertEqual(client.api.messages, [])
 
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
@@ -1932,9 +1941,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         temp_path.close()
         plugin.html_render = AsyncMock(return_value=temp_path.name)
 
-        rendered = await plugin._render_bilibili_card(
-            {"author": "UP", "kind": "图文"}
-        )
+        with patch.object(
+            module,
+            "render_bilibili_card",
+            side_effect=RuntimeError("local unavailable"),
+        ):
+            rendered = await plugin._render_bilibili_card(
+                {"author": "UP", "kind": "图文"}
+            )
 
         self.assertTrue(rendered.startswith(b"\x89PNG"))
         self.assertFalse(__import__("os").path.exists(temp_path.name))
@@ -2051,7 +2065,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             text,
             "# B站动态\n\n**UP** · 图文 · 01-01 08:01\n\n"
-            "[查看原动态](https://www.bilibili.com/opus/dynamic-empty)",
+            "**发布了一条图文动态**\n\n"
+            "[查看原动态 ↗](https://www.bilibili.com/opus/dynamic-empty)",
         )
 
     async def test_bilibili_failure_does_not_skip_later_hard_reject(self):
@@ -2414,6 +2429,37 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["ai_confirm_reason"], "模型调用失败")
         self.assertNotIn("sk-confirm-secret", str(record))
 
+    async def test_ai_provider_failures_do_not_persist_or_log_credentials(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                RuntimeError("Authorization: Bearer sk-primary-secret"),
+                RuntimeError(
+                    "api_key=sk-fallback-secret url=https://api.example.test/v1"
+                ),
+            ]
+        )
+        result = {}
+
+        with self.assertLogs(plugin.logger, level="DEBUG") as captured:
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "待审核"),
+                "待审核",
+                [],
+                "primary",
+                ["fallback"],
+                result=result,
+            )
+
+        evidence = str(result) + "\n" + "\n".join(captured.output)
+        self.assertFalse(blocked)
+        self.assertEqual(result["decision"], "ERROR")
+        self.assertIn("<redacted>", evidence)
+        self.assertIn("<url>", evidence)
+        self.assertNotIn("sk-primary-secret", evidence)
+        self.assertNotIn("sk-fallback-secret", evidence)
+        self.assertNotIn("api.example.test", evidence)
+
     async def test_ai_confirmation_provider_cannot_be_initial_candidate(self):
         plugin, client = self.plugin()
         plugin.context.llm_generate = AsyncMock(
@@ -2732,6 +2778,59 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "分页参数"):
             await plugin.web_identity_page("bindings", "", 1, 100)
 
+    async def test_identity_bindings_use_numeric_uid_order(self):
+        plugin, _ = self.plugin()
+        plugin._uid_bindings = {
+            uid: {"uid": uid, "groups": []} for uid in ("10", "2", "invalid")
+        }
+
+        page = await plugin.web_identity_page("bindings", "", 1, 10)
+
+        self.assertEqual(
+            [item["uid"] for item in page["items"]], ["2", "10", "invalid"]
+        )
+
+    async def test_identity_page_ignores_malformed_timestamps(self):
+        plugin, _ = self.plugin()
+        plugin._violation_records = [
+            {"created_at": "not-a-time", "content": "old"},
+            {"created_at": 2, "content": "new"},
+        ]
+
+        page = await plugin.web_identity_page("violations", "", 1, 10)
+
+        self.assertEqual([item["content"] for item in page["items"]], ["new", "old"])
+
+    def test_identity_view_loads_on_demand_and_has_responsive_header(self):
+        script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
+        styles = (ROOT / "pages/groups/styles.css").read_text(encoding="utf-8")
+
+        self.assertIn(
+            'name === "identities" && element("identities-view").hidden', script
+        )
+        self.assertIn(
+            'if (!element("identities-view").hidden) loadIdentities(refreshIdentities);',
+            script,
+        )
+        self.assertIn(
+            "if (identityLoadPromise && !force) return identityLoadPromise;", script
+        )
+        self.assertIn(
+            "if (identitiesLoaded && !force) return Promise.resolve();", script
+        )
+        self.assertIn("if (requestId !== loadGeneration) return;", script)
+        self.assertIn("loadIdentities(true)", script)
+        self.assertIn(".sub-list-header { display: flex;", styles)
+        self.assertIn(
+            ".sub-list-header { align-items: stretch; flex-direction: column;",
+            styles,
+        )
+        self.assertIn(".identity-list > .list-header { flex-wrap: wrap; }", styles)
+        self.assertIn(
+            ".identity-list .identity-tools .search { flex: 1 1 240px;",
+            styles,
+        )
+
     async def test_identity_routes_read_validated_query_parameters(self):
         class Query(dict):
             def get(self, key, default=None, type=None):
@@ -2756,6 +2855,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(web_module.request, "query", query, create=True),
             self.assertRaisesRegex(ValueError, "必须是整数"),
+        ):
+            await web.page_identities()
+
+        with (
+            patch.object(web_module.request, "query", Query(), create=True),
+            self.assertRaisesRegex(ValueError, "不能为空"),
         ):
             await web.page_identities()
 

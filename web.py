@@ -1057,10 +1057,12 @@ class GroupAdminWeb:
         )
 
     async def page_identities(self) -> Any:
-        kind = request.query.get("kind", "")
-        if not kind:
-            return self._response(await self.plugin.web_identities())
-        kind = self._text(kind, "身份记录类型", 20, required=True)
+        kind = self._text(
+            request.query.get("kind", ""),
+            "身份记录类型",
+            20,
+            required=True,
+        )
         if kind not in {"bindings", "suspicious", "violations"}:
             raise ValueError("身份记录类型无效")
         query = self._text(

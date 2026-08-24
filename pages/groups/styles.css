@@ -43,9 +43,12 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-sp
 .identity-list { margin-top: 24px; }
 .identity-list .list-header p { margin: 6px 0 0; color: #697386; font-size: 13px; }
 .identity-tools { display: flex; align-items: center; gap: 10px; }
+.identity-list > .list-header { flex-wrap: wrap; }
+.identity-list .identity-tools { flex: 1 1 420px; min-width: 0; }
+.identity-list .identity-tools .search { flex: 1 1 240px; min-width: 0; width: auto; }
 .page-size { display: flex; align-items: center; gap: 7px; color: #697386; font-size: 13px; white-space: nowrap; }
 .page-size select { width: auto; min-width: 88px; }
-.sub-list-header { padding: 20px 24px 8px; border-top: 1px solid #e5e9ee; }
+.sub-list-header { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; padding: 20px 24px 8px; border-top: 1px solid #e5e9ee; }
 .sub-list-header h3 { margin: 0; font-size: 16px; }
 .sub-list-header p { margin-top: 5px; color: #697386; font-size: 13px; font-weight: 400; }
 .identity-section + .identity-section { border-top: 1px solid #e5e9ee; }
@@ -218,6 +221,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .runtime-grid { grid-template-columns: 1fr; padding: 18px; }
   .runtime-grid .wide { grid-column: auto; }
   .identity-records { padding: 10px 16px 14px; }
+  .sub-list-header { align-items: stretch; flex-direction: column; gap: 8px; }
   .identity-card summary { align-items: flex-start; flex-wrap: wrap; }
   .identity-card-meta { flex-basis: calc(100% - 30px); margin-left: 30px; white-space: normal; }
   .identity-card-body { grid-template-columns: 1fr; padding: 14px; }

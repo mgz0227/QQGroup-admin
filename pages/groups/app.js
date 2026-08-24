@@ -12,7 +12,11 @@
   };
   var identityPages = { bindings: 1, suspicious: 1, violations: 1 };
   var identityRequests = { bindings: 0, suspicious: 0, violations: 0 };
+  var identitiesLoaded = false;
+  var identityLoadPromise;
   var identitySearchTimer;
+  var loadGeneration = 0;
+  var hasLoaded = false;
   var storedIdentityPageSize;
   try {
     storedIdentityPageSize = Number(window.localStorage.getItem("qqgroup-admin-identity-page-size"));
@@ -397,6 +401,7 @@
   }
 
   function setView(name) {
+    var enteringIdentities = name === "identities" && element("identities-view").hidden;
     ["groups", "global-keywords", "runtime", "identities"].forEach(function (view) {
       var active = view === name;
       if (!active && view === "global-keywords") closeKeywordRules(element(view + "-view"));
@@ -405,6 +410,7 @@
       element(view + "-tab").setAttribute("aria-selected", String(active));
       element(view + "-tab").tabIndex = active ? 0 : -1;
     });
+    if (enteringIdentities) loadIdentities();
   }
 
   function constrainKeywordLogic(mode, logic) {
@@ -872,12 +878,22 @@
     });
   }
 
-  function loadIdentities() {
-    return Promise.all([
+  function loadIdentities(force) {
+    if (identityLoadPromise && !force) return identityLoadPromise;
+    if (identitiesLoaded && !force) return Promise.resolve();
+    var request = Promise.all([
       loadIdentityKind("bindings"),
       loadIdentityKind("suspicious"),
       loadIdentityKind("violations")
     ]);
+    var wrapped = request.then(function (result) {
+      identitiesLoaded = true;
+      return result;
+    }).finally(function () {
+      if (identityLoadPromise === wrapped) identityLoadPromise = undefined;
+    });
+    identityLoadPromise = wrapped;
+    return wrapped;
   }
 
   function exportViolations() {
@@ -907,11 +923,15 @@
   }
 
   function load() {
+    var requestId = ++loadGeneration;
     element("group-rows").innerHTML = '<tr><td class="empty" colspan="6">正在加载...</td></tr>';
     element("batch-toolbar").hidden = true;
     element("select-visible").disabled = true;
     Promise.all([apiGet("overview"), apiGet("list"), apiGet("global-keyword-replies"), apiGet("runtime")])
       .then(function (result) {
+        if (requestId !== loadGeneration) return;
+        var refreshIdentities = hasLoaded;
+        hasLoaded = true;
         fillOverview(result[0]);
         groups = Array.isArray(result[1]) ? result[1] : [];
         globalKeywordConfig = result[2] || { groups: [], rules: [] };
@@ -934,10 +954,11 @@
           if (!groups.some(function (group) { return group.group_openid === id; })) selected.delete(id);
         });
         render();
-        loadIdentities();
+        if (!element("identities-view").hidden) loadIdentities(refreshIdentities);
         renderGlobalKeywordReplies(globalKeywordConfig.rules);
       })
       .catch(function (error) {
+        if (requestId !== loadGeneration) return;
         element("group-rows").innerHTML = '<tr><td class="empty error" colspan="6"></td></tr>';
         element("group-rows").querySelector("td").textContent = "加载失败：" + error.message;
         toast("加载失败：" + error.message, true);
@@ -1307,7 +1328,7 @@
     Object.keys(identityRequests).forEach(function (kind) { identityRequests[kind] += 1; });
     identitySearchTimer = setTimeout(function () {
       identityPages = { bindings: 1, suspicious: 1, violations: 1 };
-      loadIdentities();
+      if (!element("identities-view").hidden) loadIdentities(true);
     }, 250);
   });
   element("identity-page-size").addEventListener("change", function (event) {
@@ -1320,7 +1341,7 @@
       // Storage can be unavailable in hardened embedded browsers.
     }
     identityPages = { bindings: 1, suspicious: 1, violations: 1 };
-    loadIdentities();
+    if (!element("identities-view").hidden) loadIdentities(true);
   });
   element("select-visible").addEventListener("change", function (event) {
     var limitReached = false;

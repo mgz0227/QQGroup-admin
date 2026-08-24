@@ -29,7 +29,7 @@ from .bilibili import (
     poll_qr_login,
     start_qr_login,
 )
-from .bilibili_card import build_bilibili_card
+from .bilibili_card import build_bilibili_card, render_bilibili_card
 from .image_ocr import (
     embedded_image_text,
     normalize_vision_image_ref,
@@ -2024,6 +2024,16 @@ class QQGroupAdmin(Star):
         return success
 
     async def _render_bilibili_card(self, card_data: dict[str, Any]) -> bytes:
+        try:
+            image = await asyncio.wait_for(
+                asyncio.to_thread(render_bilibili_card, card_data),
+                timeout=12,
+            )
+            if image.startswith(b"\x89PNG") and len(image) <= 8 * 1024 * 1024:
+                return image
+        except Exception as exc:  # noqa: BLE001 - HTML remains a compatibility fallback
+            self.logger.debug("B 站本地图片卡片不可用，尝试 AstrBot T2I：%s", exc)
+
         renderer = getattr(self, "html_render", None)
         if not callable(renderer):
             raise TypeError("AstrBot HTML 渲染不可用")
@@ -2037,9 +2047,6 @@ class QQGroupAdmin(Star):
                     "type": "png",
                     "omit_background": True,
                     "scale": "css",
-                    "viewport_width": 720,
-                    "viewport_height": 400,
-                    "device_scale_factor_level": "normal",
                     "timeout": 8_000,
                 },
             ),
@@ -2256,8 +2263,10 @@ class QQGroupAdmin(Star):
                 if title:
                     sections.append(f"**{title}**")
                 if summary:
-                    sections.append(f"> {summary}")
-                sections.append(f"[查看原动态]({item['url']})")
+                    sections.append(summary)
+                if not cover and not title and not summary:
+                    sections.append(f"**发布了一条{kind}动态**")
+                sections.append(f"[查看原动态 ↗]({item['url']})")
                 text = "\n\n".join(sections)
                 card_data = {
                     "author": item.get("author") or f"UID {uid}",
@@ -2528,6 +2537,22 @@ class QQGroupAdmin(Star):
             (reason.group(1).strip() if reason else "")[:200],
         )
 
+    @staticmethod
+    def _safe_ai_error(value: Any) -> str:
+        """Keep provider failures useful without persisting credentials."""
+
+        text = str(value or "").strip()
+        text = re.sub(r"https?://\S+", "<url>", text)
+        text = re.sub(r"(?i)\bBearer\s+\S+", "Bearer <redacted>", text)
+        text = re.sub(
+            r"(?i)\b(api[_ -]?key|access[_ -]?token|refresh[_ -]?token|secret|token)"
+            r"\s*[:=]\s*\S+",
+            r"\1=<redacted>",
+            text,
+        )
+        text = re.sub(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b", "<redacted>", text)
+        return text[:120] or "模型调用失败"
+
     async def _ai_blocks_message(
         self,
         event: AstrMessageEvent,
@@ -2640,7 +2665,7 @@ class QQGroupAdmin(Star):
                     detail: str,
                     provider: str = confirm_provider,
                 ) -> bool:
-                    safe_detail = re.sub(r"https?://\S+", "<url>", detail)[:120]
+                    safe_detail = self._safe_ai_error(detail)
                     if result is not None:
                         result.update(
                             {
@@ -2728,13 +2753,14 @@ class QQGroupAdmin(Star):
                     detail = str(exc).strip() or type(exc).__name__
                 # Provider adapters may include request URLs or credentials in
                 # exception text. Keep the warning useful without echoing raw
-                # transport details; the full exception remains debug-only.
-                detail = re.sub(r"https?://\S+", "<url>", detail)[:120]
+                # transport details; records and logs must not retain secrets.
+                detail = self._safe_ai_error(detail)
                 errors.append(f"{current_provider_id}: {detail}")
                 self.logger.debug(
-                    "AI 群消息审核模型不可用：provider=%s error=%s",
+                    "AI 群消息审核模型不可用：provider=%s error_type=%s detail=%s",
                     current_provider_id,
-                    exc,
+                    type(exc).__name__,
+                    detail,
                 )
         if time.monotonic() >= self._ai_warning_at:
             detail = "; ".join(errors) or "没有可用模型"
@@ -5084,6 +5110,12 @@ class QQGroupAdmin(Star):
         kind: str,
         groups_by_id: dict[str, str],
     ) -> list[dict[str, Any]]:
+        def created_at(item: dict[str, Any]) -> int:
+            try:
+                return int(item.get("created_at") or 0)
+            except (TypeError, ValueError):
+                return 0
+
         if kind == "bindings":
             items = []
             for binding in self._uid_bindings.values():
@@ -5093,7 +5125,12 @@ class QQGroupAdmin(Star):
                     for group_id in item.get("groups") or []
                 ]
                 items.append(item)
-            items.sort(key=lambda item: str(item.get("uid") or ""))
+
+            def uid_key(item: dict[str, Any]) -> tuple[int, int | str]:
+                uid = str(item.get("uid") or "")
+                return (0, int(uid)) if uid.isdigit() else (1, uid)
+
+            items.sort(key=uid_key)
             return items
         if kind == "suspicious":
             return sorted(
@@ -5106,7 +5143,7 @@ class QQGroupAdmin(Star):
                     }
                     for item in self._suspicious_members.values()
                 ),
-                key=lambda item: int(item.get("created_at") or 0),
+                key=created_at,
                 reverse=True,
             )
         if kind == "violations":
@@ -5117,7 +5154,7 @@ class QQGroupAdmin(Star):
                     str(item.get("group_openid") or ""), ""
                 )
                 items.append(item)
-            items.sort(key=lambda item: int(item.get("created_at") or 0), reverse=True)
+            items.sort(key=created_at, reverse=True)
             return items
         raise ValueError("身份记录类型无效")
 
