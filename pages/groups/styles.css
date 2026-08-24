@@ -93,6 +93,7 @@ td { font-size: 14px; }
 .badge.green { background: #e5f5eb; color: #17663a; }
 .badge.blue { background: #e6f0f8; color: #155c91; }
 .badge.amber { background: #fff1d6; color: #8a5200; }
+.badge.red { background: #fde8e7; color: #b42318; }
 .badge.neutral { background: #edf0f3; color: #5d6674; }
 .text-button { min-height: 32px; padding: 4px 7px; border: 0; background: transparent; color: #344054; }
 .text-button:hover { color: #1769aa; }

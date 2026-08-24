@@ -121,6 +121,15 @@
             </div>
             <div class="row-actions">
               <span id="violation-count" class="record-count"></span>
+              <label class="page-size violation-status-filter">
+                <span>状态</span>
+                <select id="violation-status-filter" aria-label="违规复核状态">
+                  <option value="">全部</option>
+                  <option value="pending">待复核</option>
+                  <option value="confirmed">确认违规</option>
+                  <option value="false_positive">误判</option>
+                </select>
+              </label>
               <button class="button secondary small-button" id="violation-export-button" type="button" title="导出当前搜索结果">导出 CSV</button>
             </div>
           </div>

@@ -173,6 +173,7 @@ SETTINGS_ACTIONS = {
     "bili_live_off",
 }
 STATE_KEY = "qqgroup_admin_state_v1"
+VIOLATION_REVIEW_STATUSES = frozenset({"pending", "confirmed", "false_positive"})
 
 
 def normalize_provider_ids(
@@ -634,17 +635,64 @@ class QQGroupAdmin(Star):
         self._suspicious_members = valid_state_dict(value.get("suspicious_members"))
         records = value.get("violation_records")
         if isinstance(records, list):
-            self._violation_records = [
+            loaded_records = [
                 dict(item)
                 for item in records[-2_000:]
                 if isinstance(item, dict)
             ]
+            seen_ids: set[str] = set()
+            migrated = False
+            for record in loaded_records:
+                migrated = self._normalize_violation_record(record, seen_ids) or migrated
+            self._violation_records = loaded_records
+            if migrated:
+                self._violation_state_dirty = True
         bili = value.get("bilibili")
         if isinstance(bili, dict):
             self._bilibili_state = {
                 "live": valid_state_dict(bili.get("live")),
                 "dynamic": valid_state_dict(bili.get("dynamic")),
             }
+        if self._violation_state_dirty:
+            await self._save_state()
+
+    @staticmethod
+    def _normalize_violation_record(
+        record: dict[str, Any], seen_ids: set[str] | None = None
+    ) -> bool:
+        """Backfill stable review metadata while accepting older state files."""
+
+        changed = False
+        seen_ids = seen_ids if seen_ids is not None else set()
+        record_id = str(record.get("record_id") or "").strip()
+        if not record_id or len(record_id) > 64 or record_id in seen_ids:
+            record_id = secrets.token_urlsafe(12)
+            while record_id in seen_ids:
+                record_id = secrets.token_urlsafe(12)
+            record["record_id"] = record_id
+            changed = True
+        elif record.get("record_id") != record_id:
+            record["record_id"] = record_id
+            changed = True
+        seen_ids.add(record_id)
+        status = str(record.get("review_status") or "").strip()
+        if status not in VIOLATION_REVIEW_STATUSES:
+            status = "pending"
+            changed = True
+        if record.get("review_status") != status:
+            record["review_status"] = status
+            changed = True
+        reviewed_at = record.get("reviewed_at")
+        try:
+            reviewed_at = max(0, int(reviewed_at or 0))
+        except (TypeError, ValueError):
+            reviewed_at = 0
+        if status == "pending":
+            reviewed_at = 0
+        if record.get("reviewed_at") != reviewed_at:
+            record["reviewed_at"] = reviewed_at
+            changed = True
+        return changed
 
     async def _save_state(self) -> None:
         setter = getattr(self, "put_kv_data", None)
@@ -982,6 +1030,14 @@ class QQGroupAdmin(Star):
             binding["last_violation_content"] = content[:1_000]
         request = request or {}
         entry = self._group_config(group_openid)
+        existing_record_ids = {
+            str(record.get("record_id") or "")
+            for record in self._violation_records
+            if isinstance(record, dict)
+        }
+        record_id = secrets.token_urlsafe(12)
+        while record_id in existing_record_ids:
+            record_id = secrets.token_urlsafe(12)
         self._violation_records.append(
             {
                 "uid": uid,
@@ -1001,6 +1057,9 @@ class QQGroupAdmin(Star):
                 "group_openid": group_openid[:128],
                 "group_name": str((entry or {}).get("group_name") or "")[:160],
                 "created_at": now,
+                "record_id": record_id,
+                "review_status": "pending",
+                "reviewed_at": 0,
                 "reason": reason[:200],
                 "rule": reason[:200],
                 "content": content[:1_000],
@@ -5525,7 +5584,9 @@ class QQGroupAdmin(Star):
             )
         if kind == "violations":
             items = []
+            seen_ids: set[str] = set()
             for record in self._violation_records:
+                self._normalize_violation_record(record, seen_ids)
                 item = dict(record)
                 item["group_name"] = item.get("group_name") or groups_by_id.get(
                     str(item.get("group_openid") or ""), ""
@@ -5601,6 +5662,7 @@ class QQGroupAdmin(Star):
         query: str,
         page: int,
         page_size: int,
+        review_status: str = "",
     ) -> dict[str, Any]:
         if kind not in {"bindings", "suspicious", "violations"}:
             raise ValueError("身份记录类型无效")
@@ -5609,9 +5671,18 @@ class QQGroupAdmin(Star):
         query = str(query or "").strip()
         if len(query) > 256:
             raise ValueError("身份记录搜索词最多 256 个字符")
+        review_status = str(review_status or "").strip()
+        if review_status and (
+            kind != "violations" or review_status not in VIOLATION_REVIEW_STATUSES
+        ):
+            raise ValueError("违规复核状态无效")
         items = self._identity_items(kind, self._identity_groups_by_id())
         if query:
             items = [item for item in items if self._identity_matches(item, query)]
+        if review_status:
+            items = [
+                item for item in items if item.get("review_status") == review_status
+            ]
         total = len(items)
         total_pages = max(1, (total + page_size - 1) // page_size)
         page = min(page, total_pages)
@@ -5623,16 +5694,47 @@ class QQGroupAdmin(Star):
             "page_size": page_size,
             "total": total,
             "total_pages": total_pages,
+            "review_status": review_status,
         }
 
-    async def web_violation_export(self, query: str) -> list[dict[str, Any]]:
+    async def web_violation_export(
+        self, query: str, review_status: str = ""
+    ) -> list[dict[str, Any]]:
         query = str(query or "").strip()
         if len(query) > 256:
             raise ValueError("身份记录搜索词最多 256 个字符")
+        review_status = str(review_status or "").strip()
+        if review_status and review_status not in VIOLATION_REVIEW_STATUSES:
+            raise ValueError("违规复核状态无效")
         items = self._identity_items("violations", self._identity_groups_by_id())
         if query:
             items = [item for item in items if self._identity_matches(item, query)]
+        if review_status:
+            items = [
+                item for item in items if item.get("review_status") == review_status
+            ]
         return items
+
+    async def web_review_violation(
+        self, record_id: str, review_status: str
+    ) -> dict[str, Any]:
+        record_id = str(record_id or "").strip()
+        review_status = str(review_status or "").strip()
+        if not record_id or len(record_id) > 64:
+            raise ValueError("违规记录 ID 无效")
+        if review_status not in VIOLATION_REVIEW_STATUSES:
+            raise ValueError("违规复核状态无效")
+        seen_ids: set[str] = set()
+        for record in self._violation_records:
+            self._normalize_violation_record(record, seen_ids)
+            if record.get("record_id") != record_id:
+                continue
+            record["review_status"] = review_status
+            record["reviewed_at"] = int(time.time()) if review_status != "pending" else 0
+            self._violation_state_dirty = True
+            await self._save_state()
+            return dict(record)
+        raise LookupError("找不到该违规记录")
 
     async def web_delete_binding(self, uid: str) -> dict[str, str]:
         if self._uid_bindings.pop(uid, None) is None:

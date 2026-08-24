@@ -26,6 +26,7 @@
   var identityPageSize = [10, 20, 50].includes(storedIdentityPageSize)
     ? storedIdentityPageSize
     : 10;
+  var violationReviewStatus = "";
   var globalKeywordConfig = { groups: [], rules: [] };
   var welcomeConfig = { groups: [], rules: [] };
   var runtimeSettings = {};
@@ -87,6 +88,22 @@
     badge.className = "badge " + tone;
     badge.textContent = text;
     return badge;
+  }
+
+  function violationStatusLabel(status) {
+    return {
+      pending: "待复核",
+      confirmed: "确认违规",
+      false_positive: "误判"
+    }[status] || "待复核";
+  }
+
+  function violationStatusTone(status) {
+    return {
+      pending: "amber",
+      confirmed: "red",
+      false_positive: "blue"
+    }[status] || "neutral";
   }
 
   function actionButton(text, className, handler) {
@@ -358,8 +375,13 @@
       var summary = document.createElement("summary");
       summary.innerHTML = '<strong></strong><span class="identity-card-meta"></span>';
       summary.querySelector("strong").textContent = identityText(record.username || record.member_name || record.member_openid || record.uid || record.bilibili_uid);
-      summary.querySelector(".identity-card-meta").textContent =
-        recordGroupLabel(record) + " · " + identityText(record.reason || record.rule || "内容审查");
+      var summaryMeta = summary.querySelector(".identity-card-meta");
+      summaryMeta.textContent =
+        recordGroupLabel(record) + " · " + identityText(record.reason || record.rule || "内容审查") + " · ";
+      summaryMeta.appendChild(makeBadge(
+        violationStatusLabel(record.review_status),
+        violationStatusTone(record.review_status)
+      ));
       var body = document.createElement("div");
       body.className = "identity-card-body";
       recordField(body, "时间", timestamp(record.created_at || record.occurred_at || record.timestamp || record.at));
@@ -388,11 +410,51 @@
       }
       recordField(body, "消息内容", record.content || record.message || record.message_content || record.message_summary ||
         (record._summary ? "当前版本仅保存最近一次违规原因，暂无原始消息内容" : "暂无记录内容"));
+      recordField(body, "复核状态", violationStatusLabel(record.review_status));
+      if (Number(record.reviewed_at) > 0) {
+        recordField(body, "复核时间", timestamp(record.reviewed_at));
+      }
+      var actions = document.createElement("div");
+      actions.className = "row-actions identity-card-actions";
+      if (record.review_status !== "confirmed") {
+        actions.appendChild(actionButton("确认违规", "danger", function (event) {
+          event.preventDefault();
+          reviewViolation(record, "confirmed");
+        }));
+      }
+      if (record.review_status !== "false_positive") {
+        actions.appendChild(actionButton("标记误判", "primary", function (event) {
+          event.preventDefault();
+          reviewViolation(record, "false_positive");
+        }));
+      }
+      if (record.review_status !== "pending") {
+        actions.appendChild(actionButton("恢复待复核", "", function (event) {
+          event.preventDefault();
+          reviewViolation(record, "pending");
+        }));
+      }
+      body.appendChild(actions);
       list.appendChild(details);
       details.append(summary, body);
     });
     element("violation-count").textContent = state.total + " 条";
     renderPager("violation-pager", "violations", state.total, state.total_pages);
+  }
+
+  function reviewViolation(record, status) {
+    var label = violationStatusLabel(status);
+    confirmAction("更新复核状态", "确认将该记录标记为“" + label + "”？", function () {
+      apiPost("violation-review", {
+        record_id: record.record_id,
+        review_status: status
+      }).then(function () {
+        toast("已标记为" + label);
+        loadIdentityKind("violations");
+      }).catch(function (error) {
+        toast("更新复核状态失败：" + error.message, true);
+      });
+    });
   }
 
   function fillOverview(data) {
@@ -989,12 +1051,16 @@
     }[kind];
     var list = element(listId);
     list.innerHTML = '<p class="empty">正在加载...</p>';
-    return apiGet("identities", {
+    var params = {
       kind: kind,
       query: (element("identity-search").value || "").trim(),
       page: identityPages[kind],
       page_size: identityPageSize
-    }).then(function (result) {
+    };
+    if (kind === "violations" && violationReviewStatus) {
+      params.review_status = violationReviewStatus;
+    }
+    return apiGet("identities", params).then(function (result) {
       if (requestId !== identityRequests[kind]) return;
       result = result || {};
       var totalPages = Math.max(1, Number(result.total_pages) || 1);
@@ -1043,9 +1109,9 @@
   function exportViolations() {
     var button = element("violation-export-button");
     button.disabled = true;
-    apiGet("violations/export", {
-      query: (element("identity-search").value || "").trim()
-    }).then(function (result) {
+    var params = { query: (element("identity-search").value || "").trim() };
+    if (violationReviewStatus) params.review_status = violationReviewStatus;
+    apiGet("violations/export", params).then(function (result) {
       result = result || {};
       if (typeof result.content !== "string") throw new Error("导出服务未返回 CSV 内容");
       var url = window.URL.createObjectURL(
@@ -1469,6 +1535,7 @@
   });
   element("search-input").addEventListener("input", render);
   element("identity-page-size").value = String(identityPageSize);
+  element("violation-status-filter").value = violationReviewStatus;
   element("identity-search").addEventListener("input", function () {
     clearTimeout(identitySearchTimer);
     Object.keys(identityRequests).forEach(function (kind) { identityRequests[kind] += 1; });
@@ -1488,6 +1555,13 @@
     }
     identityPages = { bindings: 1, suspicious: 1, violations: 1 };
     if (!element("identities-view").hidden) loadIdentities(true);
+  });
+  element("violation-status-filter").addEventListener("change", function (event) {
+    violationReviewStatus = ["", "pending", "confirmed", "false_positive"].includes(event.target.value)
+      ? event.target.value
+      : "";
+    identityPages.violations = 1;
+    if (!element("identities-view").hidden) loadIdentityKind("violations");
   });
   element("select-visible").addEventListener("change", function (event) {
     var limitReached = false;

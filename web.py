@@ -23,6 +23,11 @@ WELCOME_RULE_LIMIT = 100
 WELCOME_MESSAGE_LIMIT = 4000
 MAX_AI_FALLBACK_PROVIDERS = 3
 MAX_MEMBER_LIST_ITEMS = 10_000
+VIOLATION_REVIEW_LABELS = {
+    "pending": "待复核",
+    "confirmed": "确认违规",
+    "false_positive": "误判",
+}
 BATCH_FIELDS = {
     "mode",
     "whitelist_qq_numbers",
@@ -1177,6 +1182,11 @@ class GroupAdminWeb:
             "身份记录搜索词",
             256,
         )
+        review_status = self._text(
+            request.query.get("review_status", ""),
+            "违规复核状态",
+            32,
+        )
         try:
             page = int(request.query.get("page", "1"))
             page_size = int(request.query.get("page_size", "10"))
@@ -1187,7 +1197,9 @@ class GroupAdminWeb:
         if page_size not in {10, 20, 50}:
             raise ValueError("每页条数只能是 10、20 或 50")
         return self._response(
-            await self.plugin.web_identity_page(kind, query, page, page_size)
+            await self.plugin.web_identity_page(
+                kind, query, page, page_size, review_status
+            )
         )
 
     async def page_violation_export(self) -> Any:
@@ -1196,7 +1208,12 @@ class GroupAdminWeb:
             "身份记录搜索词",
             256,
         )
-        records = await self.plugin.web_violation_export(query)
+        review_status = self._text(
+            request.query.get("review_status", ""),
+            "违规复核状态",
+            32,
+        )
+        records = await self.plugin.web_violation_export(query, review_status)
         output = StringIO(newline="")
         writer = csv.writer(output, lineterminator="\r\n")
         writer.writerow(
@@ -1219,6 +1236,8 @@ class GroupAdminWeb:
                 "确认判定",
                 "确认置信度",
                 "确认理由",
+                "复核状态",
+                "复核时间",
                 "消息 ID",
             )
         )
@@ -1254,6 +1273,11 @@ class GroupAdminWeb:
                     record.get("ai_confirm_decision"),
                     record.get("ai_confirm_confidence"),
                     record.get("ai_confirm_reason"),
+                    VIOLATION_REVIEW_LABELS.get(
+                        str(record.get("review_status") or ""),
+                        "待复核",
+                    ),
+                    record.get("reviewed_at"),
                     record.get("message_id"),
                 )
             )
@@ -1265,6 +1289,21 @@ class GroupAdminWeb:
                 "content": "\ufeff" + output.getvalue(),
                 "count": len(records),
             }
+        )
+
+    async def page_violation_review(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        record_id = self._text(
+            payload.get("record_id"), "违规记录 ID", 64, required=True
+        )
+        review_status = self._text(
+            payload.get("review_status"), "违规复核状态", 32, required=True
+        )
+        return self._response(
+            await self.plugin.web_review_violation(record_id, review_status),
+            message="违规记录复核状态已更新",
         )
 
     async def page_binding_delete(self) -> Any:
@@ -1364,6 +1403,12 @@ class GroupAdminWeb:
                 self.page_violation_export,
                 ["GET"],
                 "导出违规记录",
+            ),
+            (
+                "/violation-review",
+                self.page_violation_review,
+                ["POST"],
+                "更新违规记录复核状态",
             ),
             ("/binding-delete", self.page_binding_delete, ["POST"], "解除 UID 绑定"),
             (

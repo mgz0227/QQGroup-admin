@@ -2852,6 +2852,69 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["union_openid"], "union-1")
         self.assertEqual(record["group_openid"], "group-1")
         self.assertEqual(record["message_id"], "message-9")
+        self.assertTrue(record["record_id"])
+        self.assertEqual(record["review_status"], "pending")
+        self.assertEqual(record["reviewed_at"], 0)
+
+    async def test_violation_state_migrates_ids_and_review_statuses(self):
+        plugin, _ = self.plugin()
+        plugin._kv[module.STATE_KEY] = {
+            "violation_records": [
+                {"record_id": "duplicate", "content": "first"},
+                {"record_id": "duplicate", "content": "second"},
+                {"record_id": "", "review_status": "invalid", "reviewed_at": "bad", "content": "third"},
+            ]
+        }
+
+        await plugin._load_state()
+
+        records = plugin._violation_records
+        record_ids = [record["record_id"] for record in records]
+        self.assertEqual(len(record_ids), len(set(record_ids)))
+        self.assertEqual(
+            [record["review_status"] for record in records],
+            ["pending", "pending", "pending"],
+        )
+        self.assertEqual([record["reviewed_at"] for record in records], [0, 0, 0])
+        saved = plugin._kv[module.STATE_KEY]["violation_records"]
+        self.assertEqual([record["record_id"] for record in saved], record_ids)
+
+    async def test_violation_review_updates_by_stable_id_and_filters(self):
+        plugin, _ = self.plugin()
+        await plugin._record_uid_violation(
+            "",
+            "group-1",
+            "member-1",
+            "规则一",
+            content="内容一",
+        )
+        await plugin._record_uid_violation(
+            "",
+            "group-1",
+            "member-2",
+            "规则二",
+            content="内容二",
+        )
+        first_id = plugin._violation_records[0]["record_id"]
+        second_id = plugin._violation_records[1]["record_id"]
+
+        updated = await plugin.web_review_violation(first_id, "confirmed")
+        self.assertEqual(updated["record_id"], first_id)
+        self.assertEqual(updated["review_status"], "confirmed")
+        self.assertGreater(updated["reviewed_at"], 0)
+        confirmed = await plugin.web_identity_page(
+            "violations", "", 1, 10, "confirmed"
+        )
+        pending = await plugin.web_identity_page("violations", "", 1, 10, "pending")
+        self.assertEqual([item["record_id"] for item in confirmed["items"]], [first_id])
+        self.assertEqual([item["record_id"] for item in pending["items"]], [second_id])
+
+        reset = await plugin.web_review_violation(first_id, "pending")
+        self.assertEqual(reset["reviewed_at"], 0)
+        with self.assertRaisesRegex(ValueError, "复核状态无效"):
+            await plugin.web_review_violation(first_id, "unknown")
+        with self.assertRaises(LookupError):
+            await plugin.web_review_violation("missing-record", "confirmed")
 
     async def test_identity_records_are_filtered_and_paginated_server_side(self):
         plugin, _ = self.plugin()
@@ -2974,14 +3037,20 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         plugin.web_identity_page = AsyncMock(return_value={"items": [], "total": 0})
         web = module.GroupAdminWeb(plugin, plugin.context)
         web_module = sys.modules[module.GroupAdminWeb.__module__]
-        query = Query(kind="violations", query="测试群", page="2", page_size="20")
+        query = Query(
+            kind="violations",
+            query="测试群",
+            page="2",
+            page_size="20",
+            review_status="confirmed",
+        )
 
         with patch.object(web_module.request, "query", query, create=True):
             response = await web.page_identities()
 
         self.assertEqual(response["data"]["total"], 0)
         plugin.web_identity_page.assert_awaited_once_with(
-            "violations", "测试群", 2, 20
+            "violations", "测试群", 2, 20, "confirmed"
         )
 
         query["page"] = "abc"
@@ -3009,7 +3078,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         )
-        query = Query(query="违规")
+        query = Query(query="违规", review_status="false_positive")
         with patch.object(web_module.request, "query", query, create=True):
             export_response = await web.page_violation_export()
 
@@ -3021,7 +3090,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("确认模型", export_data["content"])
         self.assertIn("confirm", export_data["content"])
         self.assertIn("timeout", export_data["content"])
-        plugin.web_violation_export.assert_awaited_once_with("违规")
+        plugin.web_violation_export.assert_awaited_once_with("违规", "false_positive")
+
+        html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
+        script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
+        self.assertIn('id="violation-status-filter"', html)
+        self.assertIn('apiPost("violation-review"', script)
+        self.assertIn("review_status", script)
 
     async def test_recall_recent_messages_uses_received_message_cache(self):
         plugin, client = self.plugin()
