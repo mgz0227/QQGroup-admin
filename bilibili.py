@@ -389,9 +389,6 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             ),
             "",
         )
-        if not title:
-            title = text
-            text = ""
         basic = item.get("basic") if isinstance(item.get("basic"), dict) else {}
         url = str(basic.get("jump_url") or card.get("jump_url") or "").strip()
         if url.startswith("//"):

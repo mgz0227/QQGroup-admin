@@ -1856,15 +1856,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
         push_text = push.await_args.args[1]
-        self.assertIn("## 🔔 B站动态", push_text)
+        self.assertIn("# B站动态", push_text)
         self.assertIn("**UP** · 图文", push_text)
         self.assertIn(
             "![封面 #300px #169px](https://i0.hdslb.com/bfs/archive/cover.jpg)",
             push_text,
         )
-        self.assertIn("**发布了新动态**", push_text)
         self.assertIn("> 正文", push_text)
-        self.assertIn("[打开动态 ↗](https://www.bilibili.com/opus/dynamic-1)", push_text)
+        self.assertIn("[查看原动态](https://www.bilibili.com/opus/dynamic-1)", push_text)
         self.assertNotIn("\n-\n", push_text)
 
     async def test_bilibili_live_push_uses_named_room_link(self):
@@ -1912,6 +1911,50 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             plugin._bilibili_state["live"]["188144093"]["live_status"],
             1,
+        )
+
+    async def test_bilibili_empty_dynamic_card_has_no_placeholder_text(self):
+        plugin, _client = self.plugin()
+        plugin.config["bilibili_cookie"] = "cookie"
+        subscriptions = {
+            "188144093": [
+                {
+                    "group_openid": "group-1",
+                    "platform_id": "platform-1",
+                    "dynamic": True,
+                    "live": False,
+                }
+            ]
+        }
+        item = {
+            "id": "dynamic-empty",
+            "uid": "188144093",
+            "author": "UP",
+            "pub_ts": 100,
+            "type": "DYNAMIC_TYPE_DRAW",
+            "title": "-",
+            "text": "-",
+            "url": "https://www.bilibili.com/opus/dynamic-empty",
+            "cover": "",
+        }
+        plugin._bilibili_state["dynamic"]["188144093"] = {
+            "seen": [],
+            "max_pub_ts": 0,
+        }
+        push = AsyncMock(return_value=True)
+        with (
+            patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
+            patch.object(module, "fetch_space_dynamics", return_value={}),
+            patch.object(module, "parse_dynamic_items", return_value=[item]),
+            patch.object(plugin, "_push_bilibili_message", push),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
+
+        text = push.await_args.args[1]
+        self.assertEqual(
+            text,
+            "# B站动态\n\n**UP** · 图文 · 01-01 08:01\n\n"
+            "[查看原动态](https://www.bilibili.com/opus/dynamic-empty)",
         )
 
     async def test_bilibili_failure_does_not_skip_later_hard_reject(self):
