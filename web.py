@@ -19,6 +19,8 @@ PLUGIN_NAME = "astrbot_plugin_qqgroup_admin"
 BATCH_GROUP_LIMIT = 100
 BATCH_TEXT_BUDGET = 4_000_000
 KEYWORD_REPLY_LIMIT = 100
+WELCOME_RULE_LIMIT = 100
+WELCOME_MESSAGE_LIMIT = 4000
 MAX_AI_FALLBACK_PROVIDERS = 3
 MAX_MEMBER_LIST_ITEMS = 10_000
 BATCH_FIELDS = {
@@ -263,6 +265,73 @@ class GroupAdminWeb:
                 }
             )
         return replies
+
+    @classmethod
+    def _welcome_rules(
+        cls, value: Any, allowed_group_openids: set[str]
+    ) -> list[dict[str, Any]]:
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise TypeError("入群欢迎规则必须是列表")
+        if len(value) > WELCOME_RULE_LIMIT:
+            raise ValueError(f"最多配置 {WELCOME_RULE_LIMIT} 条入群欢迎规则")
+        rules: list[dict[str, Any]] = []
+        for index, item in enumerate(value, 1):
+            if not isinstance(item, dict):
+                raise TypeError(f"第 {index} 条入群欢迎规则格式错误")
+            name = cls._text(
+                item.get("name", ""), f"第 {index} 条规则名称", 80, required=True
+            )
+            message = cls._text(
+                item.get("message", item.get("content", "")),
+                f"第 {index} 条欢迎内容",
+                WELCOME_MESSAGE_LIMIT,
+                required=True,
+                multiline=True,
+            )
+            enabled = item.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise TypeError(f"第 {index} 条启用状态必须是布尔值")
+            at_member = item.get("at_member", "{at_user}" in message)
+            if not isinstance(at_member, bool):
+                raise TypeError(f"第 {index} 条艾特开关必须是布尔值")
+            group_values = item.get("group_openids", item.get("groups", []))
+            if isinstance(group_values, str):
+                group_values = re.split(r"[\s,，;；]+", group_values.strip())
+            if not isinstance(group_values, list):
+                raise TypeError(f"第 {index} 条覆盖群必须是列表")
+            group_openids = [
+                cls._validated_group({"group_openid": value})
+                for value in group_values
+                if str(value or "").strip()
+            ]
+            group_openids = list(dict.fromkeys(group_openids))
+            if len(group_openids) > BATCH_GROUP_LIMIT:
+                raise ValueError(f"第 {index} 条最多覆盖 {BATCH_GROUP_LIMIT} 个群")
+            unknown = set(group_openids) - allowed_group_openids
+            if unknown:
+                raise ValueError(f"第 {index} 条包含未绑定群：{min(unknown)}")
+            recall = cls._int(
+                item,
+                "auto_recall_seconds",
+                0,
+                0,
+                120,
+                f"第 {index} 条自动撤回秒数",
+            )
+            rules.append(
+                {
+                    "__template_key": "welcome_rule",
+                    "name": name,
+                    "message": message,
+                    "group_openids": group_openids,
+                    "enabled": enabled,
+                    "at_member": at_member,
+                    "auto_recall_seconds": recall,
+                }
+            )
+        return rules
 
     @classmethod
     def _global_keyword_replies(
@@ -996,6 +1065,44 @@ class GroupAdminWeb:
             message="全局关键词回复已保存",
         )
 
+    async def page_welcome_rules(self) -> Any:
+        groups = await self._groups()
+        settings = await self.plugin.web_welcome_rules()
+        if not isinstance(settings, dict):
+            raise TypeError("入群欢迎配置格式错误")
+        return self._response(
+            {
+                "groups": [
+                    {
+                        "group_name": group["group_name"],
+                        "group_openid": group["group_openid"],
+                    }
+                    for group in groups
+                    if group.get("bound")
+                ],
+                "rules": settings.get("rules", []),
+            }
+        )
+
+    async def page_welcome_rules_save(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        bound_group_openids = {
+            str(group["group_openid"])
+            for group in await self._groups()
+            if group.get("bound")
+        }
+        settings = {
+            "rules": self._welcome_rules(
+                payload.get("rules"), bound_group_openids
+            )
+        }
+        return self._response(
+            await self.plugin.web_save_welcome_rules(settings),
+            message="入群欢迎规则已保存",
+        )
+
     async def page_runtime(self) -> Any:
         return self._response(await self.plugin.web_runtime_settings())
 
@@ -1219,6 +1326,18 @@ class GroupAdminWeb:
                 self.page_global_keyword_replies_save,
                 ["POST"],
                 "保存全局关键词回复",
+            ),
+            (
+                "/welcome-rules",
+                self.page_welcome_rules,
+                ["GET"],
+                "查询入群欢迎规则",
+            ),
+            (
+                "/welcome-rules/save",
+                self.page_welcome_rules_save,
+                ["POST"],
+                "保存入群欢迎规则",
             ),
             ("/runtime", self.page_runtime, ["GET"], "查询全局运行配置"),
             ("/runtime/save", self.page_runtime_save, ["POST"], "保存全局运行配置"),

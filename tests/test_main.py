@@ -2970,6 +2970,159 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(config["mute_reply_at_member"])
         self.assertEqual(config.save_count, 1)
 
+    async def test_welcome_rules_filter_groups_render_variables_and_deduplicate(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0]["group_name"] = "测试群"
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "指定群欢迎",
+                "message": "{at_user} 欢迎 {username} 加入 {group_name}，UID={uid}",
+                "group_openids": ["group-1"],
+                "enabled": True,
+            },
+            {
+                "name": "其他群",
+                "message": "不应发送",
+                "group_openids": ["group-2"],
+                "enabled": True,
+            },
+        ]
+        plugin._uid_bindings["188144093"] = {
+            "members": {"group-1": "member-1"},
+            "groups": ["group-1"],
+        }
+
+        await plugin._send_welcome_messages(
+            client, "group-1", "member-1", username="新人"
+        )
+        await plugin._send_welcome_messages(
+            client, "group-1", "member-1", username="新人"
+        )
+
+        self.assertEqual(len(client.api.messages), 1)
+        message = client.api.messages[0]
+        self.assertEqual(message["msg_type"], 2)
+        self.assertIn("欢迎 新人 加入 测试群", message["markdown"]["content"])
+        self.assertIn("UID=188144093", message["markdown"]["content"])
+        self.assertIn('qqbot-at-user id="member-1"', message["markdown"]["content"])
+
+    async def test_button_approval_sends_welcome_with_request_context(self):
+        plugin, client = self.plugin()
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "审批欢迎",
+                "message": "欢迎 {username}",
+                "group_openids": ["group-1"],
+                "enabled": True,
+            }
+        ]
+        token = plugin._approval_token(
+            "group-1",
+            "member-1",
+            "request-1",
+            request={"username": "申请人"},
+        )
+        plugin._approve_request = AsyncMock()
+        interaction = SimpleNamespace(
+            id="interaction-welcome",
+            type=11,
+            chat_type=1,
+            group_openid="group-1",
+            group_member_openid="admin-1",
+            data=SimpleNamespace(
+                resolved=SimpleNamespace(button_data=f"qqga:{token}:approve")
+            ),
+        )
+
+        self.assertTrue(await plugin._handle_interaction(client, interaction))
+
+        self.assertIn("欢迎 申请人", client.api.messages[-1]["content"])
+
+    async def test_automatic_approval_sends_welcome(self):
+        plugin, client = self.plugin()
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "自动审批欢迎",
+                "message": "欢迎 {username}",
+                "group_openids": ["group-1"],
+                "enabled": True,
+            }
+        ]
+        plugin._approve_request = AsyncMock()
+        plugin._send_welcome_messages = AsyncMock()
+        settings = {
+            "global_reject_keywords": [],
+            "reject_keywords": [],
+            "uid_exists_auto_approve": True,
+            "condition_logic": "all",
+            "approve_keywords": [],
+            "uid_check_enabled": True,
+            "fallback_action": "pending",
+            "fallback_human_verify_enabled": False,
+        }
+        request = {
+            "username": "自动用户",
+            "member_openid": "member-1",
+            "join_request_id": "request-1",
+            "apply_source": "self_apply",
+            "verify_info": {"verify_message": "UID:188144093"},
+        }
+        api = SimpleNamespace(
+            list_join_requests=AsyncMock(
+                return_value={"list": [request], "next_cursor": ""}
+            )
+        )
+        with (
+            patch.object(module, "QQGroupAPI", return_value=api),
+            patch.object(module, "bilibili_uid_exists", AsyncMock(return_value=True)),
+        ):
+            await plugin._poll_uid_group(
+                client,
+                "platform-1",
+                "group-1",
+                settings,
+            )
+
+        plugin._approve_request.assert_awaited_once()
+        self.assertEqual(plugin._approve_request.await_args.kwargs["op"], "approve")
+        plugin._send_welcome_messages.assert_awaited_once()
+        self.assertEqual(
+            plugin._send_welcome_messages.await_args.kwargs["request"]["username"],
+            "自动用户",
+        )
+
+    async def test_verification_falls_back_to_text_and_accepts_numeric_answer(self):
+        plugin, client = self.plugin()
+        plugin._suspicious_members["group-1:member-1"] = {
+            "group_openid": "group-1",
+            "member_openid": "member-1",
+        }
+        original = client.api.post_group_message
+
+        async def reject_markdown(**kwargs):
+            if kwargs.get("msg_type") == 2 and kwargs.get("keyboard"):
+                raise RuntimeError("no keyboard permission")
+            return await original(**kwargs)
+
+        client.api.post_group_message = reject_markdown
+        with patch.object(module.secrets, "randbelow", side_effect=[1, 2]):
+            await plugin._send_verification_challenge(
+                client, "group-1", "member-1"
+            )
+
+        token_data = next(iter(plugin._verification_tokens.values()))
+        self.assertIn("直接发送结果数字", client.api.messages[-1]["content"])
+        self.assertTrue(
+            await plugin._consume_verification_answer(
+                client,
+                "group-1",
+                "member-1",
+                f"验证 {token_data[3]}",
+            )
+        )
+        self.assertNotIn("group-1:member-1", plugin._suspicious_members)
+        self.assertEqual(plugin._verification_tokens, {})
+
 
 if __name__ == "__main__":
     unittest.main()

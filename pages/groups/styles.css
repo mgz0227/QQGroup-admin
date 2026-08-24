@@ -115,10 +115,10 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .small-button { min-height: 34px; padding: 5px 11px; font-size: 13px; }
 .keyword-reply-list { display: grid; gap: 10px; }
 .keyword-reply-row { overflow: hidden; border: 1px solid #dce2e8; border-radius: 6px; background: #fafbfc; }
-.keyword-reply-body { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto auto; gap: 10px; padding: 14px; border-top: 1px solid #e1e6eb; }
-.keyword-reply-body .wide { grid-column: 1 / -1; }
-.keyword-reply-enabled { align-self: end; min-height: 40px; }
-.keyword-reply-remove { align-self: end; min-height: 40px; }
+.keyword-reply-body, .welcome-rule-body { display: grid; grid-template-columns: minmax(0, 1fr) 150px auto auto; gap: 10px; padding: 14px; border-top: 1px solid #e1e6eb; }
+.keyword-reply-body .wide, .welcome-rule-body .wide { grid-column: 1 / -1; }
+.keyword-reply-enabled, .welcome-rule-enabled, .welcome-rule-at { align-self: end; min-height: 40px; }
+.keyword-reply-remove, .welcome-rule-remove { align-self: end; min-height: 40px; }
 .keyword-rule-summary { display: flex; align-items: center; gap: 12px; min-height: 56px; padding: 11px 14px; cursor: pointer; list-style: none; user-select: none; }
 .keyword-rule-summary::-webkit-details-marker { display: none; }
 .keyword-rule-summary::before { content: ">"; flex: 0 0 auto; color: #657083; font-size: 18px; transform-origin: center; transition: transform .15s ease; }
@@ -154,6 +154,10 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .runtime-grid label > span { display: block; margin-bottom: 7px; }
 .runtime-grid label small, .config-note { display: block; margin-top: 7px; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
 .runtime-grid select[multiple] { min-height: 112px; padding: 6px; }
+.welcome-editor { padding: 16px; border: 1px solid #dce2e8; border-radius: 6px; background: #fafbfc; }
+.welcome-editor .rule-list-header { align-items: flex-start; }
+.welcome-editor .rule-list-header p { margin: 6px 0 0; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
+.welcome-editor .keyword-reply-list { padding: 14px 0 0; }
 .config-note { grid-column: 1 / -1; margin: 0; padding: 10px 12px; border: 1px solid #dce2e8; border-radius: 6px; background: #f7f9fb; }
 .runtime-grid .wide { grid-column: 1 / -1; }
 .runtime-toggle { align-self: end; min-height: 40px; }
@@ -206,8 +210,8 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .empty { display: grid; min-height: 120px; place-items: center; }
   .form-grid { grid-template-columns: 1fr; padding: 18px; }
   .form-grid .wide { grid-column: auto; }
-  .keyword-reply-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
-  .keyword-reply-body .wide { grid-column: 1 / -1; }
+  .keyword-reply-body, .welcome-rule-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .keyword-reply-body .wide, .welcome-rule-body .wide { grid-column: 1 / -1; }
   .keyword-rule-summary { align-items: flex-start; flex-wrap: wrap; gap: 8px; }
   .keyword-rule-summary-meta { flex-basis: calc(100% - 30px); justify-content: flex-start; margin-left: 30px; }
   .global-keywords-view, .runtime-view { margin: 22px 16px 0; }
@@ -254,7 +258,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .identity-card summary strong, .identity-field > span:not(.identity-field-label), .identity-field > code { color: #f4f6f8; }
   .identity-card-body { border-color: #39424d; }
   .identity-field-label, .identity-card-meta, .record-count, .sub-list-header p { color: #9ca7b5; }
-  .keyword-reply-body, .global-keyword-body { border-color: #39424d; }
+  .keyword-reply-body, .welcome-rule-body, .global-keyword-body { border-color: #39424d; }
   .keyword-rule-summary:hover { background: #252c35; }
   .keyword-rule-summary-name { color: #f4f6f8; }
   .group-choice { border-color: #46515e; background: #20262e; }
@@ -263,6 +267,8 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .runtime-grid label small, .config-note { color: #9ca7b5; }
   .config-note { border-color: #39424d; background: #1b2128; }
   .bilibili-login, .bilibili-qr { border-color: #39424d; }
+  .welcome-editor { border-color: #39424d; background: #1b2128; }
+  .welcome-editor .rule-list-header p { color: #9ca7b5; }
   .empty-rules { border-color: #46515e; }
   .batch-toolbar { background: #1b2128; color: #aeb8c4; }
   .batch-toolbar strong { color: #f4f6f8; }

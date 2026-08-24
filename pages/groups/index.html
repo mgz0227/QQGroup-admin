@@ -217,6 +217,21 @@
                 <span id="bilibili-qr-status" aria-live="polite">等待扫码</span>
               </div>
             </div>
+
+            <div class="section-title wide">入群欢迎</div>
+            <div class="welcome-editor wide">
+              <div class="rule-list-header">
+                <div>
+                  <strong>审批成功后发送欢迎消息</strong>
+                  <p>支持多条规则；覆盖群留空表示全部已绑定群。可用变量：{at_user}、{user}、{username}、{group_name}、{group_openid}、{member_openid}、{uid}。</p>
+                </div>
+                <div class="header-actions">
+                  <button class="button secondary small-button" id="add-welcome-rule" type="button">添加规则</button>
+                  <button class="button small-button" id="save-welcome-rules" type="button">保存欢迎规则</button>
+                </div>
+              </div>
+              <div class="keyword-reply-list" id="welcome-rules"><p class="empty-rules">尚未配置入群欢迎规则</p></div>
+            </div>
           </div>
         </form>
       </section>

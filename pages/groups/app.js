@@ -27,6 +27,7 @@
     ? storedIdentityPageSize
     : 10;
   var globalKeywordConfig = { groups: [], rules: [] };
+  var welcomeConfig = { groups: [], rules: [] };
   var runtimeSettings = {};
   var bilibiliLoginKey = "";
   var bilibiliLoginTimer;
@@ -434,7 +435,9 @@
 
     function updateSummary() {
       summaryName.textContent = name.value.trim() || "未命名规则";
-      summaryMatch.textContent = mode.value === "exact" ? "完全匹配" : "包含关键词";
+      summaryMatch.textContent = row.classList.contains("welcome-rule-row")
+        ? "入群欢迎"
+        : (mode.value === "exact" ? "完全匹配" : "包含关键词");
       summaryState.textContent = enabled.checked ? "已启用" : "已停用";
       summaryState.classList.toggle("disabled", !enabled.checked);
     }
@@ -616,6 +619,147 @@
           Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
         renderGlobalKeywordReplies(globalKeywordConfig.rules);
         toast("全局关键词回复已保存");
+      })
+      .catch(function (error) { toast("保存失败：" + error.message, true); })
+      .finally(function () { button.disabled = false; });
+  }
+
+  function addWelcomeRule(rule) {
+    var list = element("welcome-rules");
+    if (list.querySelectorAll(".welcome-rule-row").length >= 100) {
+      toast("最多配置 100 条入群欢迎规则", true);
+      return;
+    }
+    var empty = list.querySelector(".empty-rules");
+    if (empty) empty.remove();
+    var isNew = arguments.length === 0;
+    rule = rule || {};
+    var row = document.createElement("details");
+    row.className = "welcome-rule-row keyword-rule-row";
+    row.innerHTML =
+      '<summary class="keyword-rule-summary"><strong class="keyword-rule-summary-name"></strong><span class="keyword-rule-summary-meta"><span class="keyword-rule-summary-match"></span><span class="keyword-rule-summary-state"></span></span></summary>' +
+      '<div class="keyword-rule-body welcome-rule-body">' +
+      '<label><span>规则名称</span><input class="welcome-rule-name" maxlength="80" required></label>' +
+      '<label class="checkbox welcome-rule-enabled"><input type="checkbox"><span>启用</span></label>' +
+      '<label class="checkbox welcome-rule-at"><input type="checkbox"><span>欢迎时艾特成员</span></label>' +
+      '<label><span>欢迎消息自动撤回（秒）</span><input class="welcome-rule-recall" type="number" min="0" max="120" required></label>' +
+      '<button class="text-button danger welcome-rule-remove" type="button">删除</button>' +
+      '<label class="wide"><span>消息内容</span><textarea class="welcome-rule-message" maxlength="4000" rows="3" required placeholder="例如：欢迎 {at_user} 加入 {group_name}"></textarea></label>' +
+      '</div>';
+    row.querySelector(".welcome-rule-name").value = rule.name || "";
+    row.querySelector(".welcome-rule-message").value = rule.message || rule.content || "";
+    row.querySelector(".welcome-rule-enabled input").checked = rule.enabled !== false;
+    row.querySelector(".welcome-rule-at input").checked = rule.at_member === true || (!Object.prototype.hasOwnProperty.call(rule, "at_member") && String(rule.message || "").includes("{at_user}"));
+    row.querySelector(".welcome-rule-recall").value = Number(rule.auto_recall_seconds || rule.recall_seconds || 0);
+
+    var targetValues = Array.isArray(rule.group_openids)
+      ? rule.group_openids
+      : String(rule.group_openids || "").split(/[\s,，;；]+/).filter(Boolean);
+    var targets = new Set(targetValues.includes("*") ? [] : targetValues);
+    var scope = document.createElement("fieldset");
+    scope.className = "global-group-scope";
+    var legend = document.createElement("legend");
+    legend.textContent = "覆盖群";
+    var allLabel = document.createElement("label");
+    allLabel.className = "checkbox";
+    var allGroups = document.createElement("input");
+    allGroups.type = "checkbox";
+    allGroups.className = "welcome-rule-all-groups";
+    allGroups.checked = targets.size === 0;
+    var allText = document.createElement("span");
+    allText.textContent = "全部已绑定群（包含以后新增的群）";
+    allLabel.append(allGroups, allText);
+    scope.append(legend, allLabel);
+    var choices = document.createElement("div");
+    choices.className = "group-choice-grid";
+    var boundGroups = Array.isArray(welcomeConfig.groups) ? welcomeConfig.groups : [];
+    boundGroups.forEach(function (group) {
+      var label = document.createElement("label");
+      label.className = "checkbox group-choice";
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      checkbox.className = "welcome-rule-group";
+      checkbox.value = group.group_openid;
+      checkbox.checked = targets.has(group.group_openid);
+      checkbox.disabled = allGroups.checked;
+      var text = document.createElement("span");
+      text.textContent = group.group_name || "待获取群名称";
+      text.title = group.group_openid;
+      label.append(checkbox, text);
+      choices.appendChild(label);
+    });
+    if (boundGroups.length) scope.appendChild(choices);
+    else {
+      var noGroups = document.createElement("p");
+      noGroups.className = "scope-empty";
+      noGroups.textContent = "暂无已绑定群";
+      scope.appendChild(noGroups);
+    }
+    allGroups.addEventListener("change", function () {
+      choices.querySelectorAll("input").forEach(function (checkbox) {
+        checkbox.disabled = allGroups.checked;
+      });
+    });
+    row.querySelector(".welcome-rule-remove").addEventListener("click", function () {
+      row.remove();
+      if (!list.querySelector(".welcome-rule-row")) renderWelcomeRules([]);
+    });
+    row.querySelector(".welcome-rule-body").appendChild(scope);
+    list.appendChild(row);
+    bindKeywordRuleDisclosure(
+      row,
+      list,
+      row.querySelector(".welcome-rule-name"),
+      row.querySelector(".welcome-rule-recall"),
+      row.querySelector(".welcome-rule-enabled input"),
+      isNew
+    );
+  }
+
+  function renderWelcomeRules(rules) {
+    var list = element("welcome-rules");
+    list.replaceChildren();
+    if (!Array.isArray(rules) || !rules.length) {
+      var empty = document.createElement("p");
+      empty.className = "empty-rules";
+      empty.textContent = "尚未配置入群欢迎规则";
+      list.appendChild(empty);
+      return;
+    }
+    rules.forEach(addWelcomeRule);
+  }
+
+  function readWelcomeRules() {
+    return Array.from(element("welcome-rules").querySelectorAll(".welcome-rule-row")).map(function (row) {
+      var allGroups = row.querySelector(".welcome-rule-all-groups").checked;
+      var groupOpenids = Array.from(row.querySelectorAll(".welcome-rule-group:checked")).map(function (checkbox) { return checkbox.value; });
+      if (!allGroups && !groupOpenids.length) throw new Error("请选择至少一个覆盖群，或选择全部已绑定群");
+      return {
+        name: row.querySelector(".welcome-rule-name").value,
+        message: row.querySelector(".welcome-rule-message").value,
+        enabled: row.querySelector(".welcome-rule-enabled input").checked,
+        at_member: row.querySelector(".welcome-rule-at input").checked,
+        auto_recall_seconds: Number(row.querySelector(".welcome-rule-recall").value),
+        group_openids: allGroups ? [] : groupOpenids
+      };
+    });
+  }
+
+  function saveWelcomeRules() {
+    var rules;
+    try {
+      rules = readWelcomeRules();
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
+    var button = element("save-welcome-rules");
+    button.disabled = true;
+    apiPost("welcome-rules/save", { rules: rules })
+      .then(function (saved) {
+        welcomeConfig = saved || { groups: [], rules: [] };
+        renderWelcomeRules(welcomeConfig.rules);
+        toast("入群欢迎规则已保存");
       })
       .catch(function (error) { toast("保存失败：" + error.message, true); })
       .finally(function () { button.disabled = false; });
@@ -927,7 +1071,7 @@
     element("group-rows").innerHTML = '<tr><td class="empty" colspan="6">正在加载...</td></tr>';
     element("batch-toolbar").hidden = true;
     element("select-visible").disabled = true;
-    Promise.all([apiGet("overview"), apiGet("list"), apiGet("global-keyword-replies"), apiGet("runtime")])
+    Promise.all([apiGet("overview"), apiGet("list"), apiGet("global-keyword-replies"), apiGet("runtime"), apiGet("welcome-rules")])
       .then(function (result) {
         if (requestId !== loadGeneration) return;
         var refreshIdentities = hasLoaded;
@@ -940,6 +1084,7 @@
         element("global-keyword-recall").value =
           Number(globalKeywordConfig.keyword_reply_recall_seconds || 0);
         fillRuntime(result[3]);
+        welcomeConfig = result[4] || { groups: groups, rules: [] };
         groups.forEach(function (group) {
           if (group.mode === "uid") {
             group.mode = "conditional";
@@ -956,6 +1101,7 @@
         render();
         if (!element("identities-view").hidden) loadIdentities(refreshIdentities);
         renderGlobalKeywordReplies(globalKeywordConfig.rules);
+        renderWelcomeRules(welcomeConfig.rules);
       })
       .catch(function (error) {
         if (requestId !== loadGeneration) return;
@@ -1365,6 +1511,8 @@
   element("add-keyword-reply").addEventListener("click", function () { addKeywordReply(); });
   element("add-global-keyword-reply").addEventListener("click", function () { addGlobalKeywordReply(); });
   element("global-keyword-form").addEventListener("submit", saveGlobalKeywordReplies);
+  element("add-welcome-rule").addEventListener("click", function () { addWelcomeRule(); });
+  element("save-welcome-rules").addEventListener("click", saveWelcomeRules);
   element("runtime-form").addEventListener("submit", saveRuntime);
   element("runtime-ai-enabled").addEventListener("change", function (event) {
     element("runtime-ai-provider").disabled = !event.target.checked;

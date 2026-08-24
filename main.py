@@ -107,6 +107,10 @@ COMMAND_PANEL = {
     "remark": COMMAND_PANEL_REMARK,
 }
 GROUP_TEMPLATE_KEY = "qq_group"
+WELCOME_RULES_KEY = "welcome_rules"
+LEGACY_WELCOME_RULES_KEY = "group_welcome_rules"
+WELCOME_RULE_LIMIT = 100
+WELCOME_MESSAGE_LIMIT = 4000
 GLOBAL_AI_ENABLED_KEY = "global_ai_review_enabled"
 GLOBAL_AI_PROVIDER_KEY = "global_ai_review_provider_id"
 GLOBAL_AI_FALLBACKS_KEY = "global_ai_review_fallback_provider_ids"
@@ -200,6 +204,47 @@ def parse_member_list(value: Any, *, max_items: int = 10_000) -> list[str]:
     if any(len(item) > 128 for item in items):
         raise ValueError("成员 OpenID 最多 128 个字符")
     return items
+
+
+def normalize_welcome_rules(value: Any) -> list[dict[str, Any]]:
+    """Normalize global welcome rules without making malformed config fatal."""
+    if not isinstance(value, list):
+        return []
+    result: list[dict[str, Any]] = []
+    for index, raw in enumerate(value[:WELCOME_RULE_LIMIT], 1):
+        if not isinstance(raw, dict):
+            continue
+        message = str(
+            raw.get("message") or raw.get("content") or raw.get("text") or ""
+        ).strip()
+        if not message:
+            continue
+        message = message[:WELCOME_MESSAGE_LIMIT]
+        groups_value = raw.get("group_openids", raw.get("groups", []))
+        if isinstance(groups_value, (list, tuple, set)):
+            groups = [str(item).strip() for item in groups_value]
+        else:
+            groups = re.split(r"[\s,，;；]+", str(groups_value or ""))
+        groups = list(dict.fromkeys(item for item in groups if item))
+        groups = [item[:128] for item in groups[:10_000] if not any(ch.isspace() for ch in item)]
+        try:
+            recall = int(raw.get("auto_recall_seconds", raw.get("recall_seconds", 0)) or 0)
+        except (TypeError, ValueError):
+            recall = 0
+        recall = min(120, max(0, recall))
+        name = str(raw.get("name") or f"欢迎规则 {index}").strip()[:80]
+        result.append(
+            {
+                "__template_key": "welcome_rule",
+                "name": name or f"欢迎规则 {index}",
+                "message": message,
+                "group_openids": groups,
+                "enabled": raw.get("enabled", True) is not False,
+                "at_member": bool(raw.get("at_member", "{at_user}" in message)),
+                "auto_recall_seconds": recall,
+            }
+        )
+    return result
 
 
 class WakeCommandFilter(filter.CustomFilter):
@@ -302,6 +347,7 @@ class QQGroupAdmin(Star):
         self._last_recall_at = 0.0
         self._command_panel_lock = asyncio.Lock()
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
+        self._approval_contexts: dict[str, dict[str, Any]] = {}
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._verification_tokens: dict[str, tuple[float, str, str, int]] = {}
         self._keyword_reply_ready_at: dict[str, float] = {}
@@ -309,6 +355,7 @@ class QQGroupAdmin(Star):
         self._poll_cursors: dict[tuple[str, str], str] = {}
         self._permission_diagnostics: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
+        self._welcome_sent_at: dict[tuple[str, str, int], float] = {}
         self._bilibili_retry_at = 0.0
         self._bilibili_live_retry_at = 0.0
         self._bilibili_dynamic_retry_at: dict[str, float] = {}
@@ -332,6 +379,16 @@ class QQGroupAdmin(Star):
 
     def _migrate_config(self) -> None:
         changed = False
+        configured_welcome_rules = self.config.get(WELCOME_RULES_KEY)
+        if configured_welcome_rules is None:
+            configured_welcome_rules = self.config.get(LEGACY_WELCOME_RULES_KEY, [])
+        normalized_welcome_rules = normalize_welcome_rules(configured_welcome_rules)
+        if (
+            normalized_welcome_rules != configured_welcome_rules
+            or WELCOME_RULES_KEY not in self.config
+        ):
+            self.config[WELCOME_RULES_KEY] = normalized_welcome_rules
+            changed = True
         if bool(self.config.get("mute_reply_at_member", False)):
             template = str(
                 self.config.get(
@@ -550,6 +607,8 @@ class QQGroupAdmin(Star):
         self._recall_tasks.clear()
         self._bilibili_logins.clear()
         self._keyword_reply_ready_at.clear()
+        self._approval_contexts.clear()
+        self._welcome_sent_at.clear()
         if self._violation_state_dirty:
             try:
                 await self._save_state()
@@ -717,6 +776,124 @@ class QQGroupAdmin(Star):
                 fallback,
                 message_id=message_id,
             )
+
+    @staticmethod
+    def _welcome_rule_groups(rule: dict[str, Any]) -> list[str]:
+        value = rule.get("group_openids", rule.get("groups", []))
+        if isinstance(value, (list, tuple, set)):
+            return [str(item).strip() for item in value if str(item).strip()]
+        return [item for item in re.split(r"[\s,，;；]+", str(value or "")) if item]
+
+    def _welcome_rules_for_group(self, group_openid: str) -> list[tuple[int, dict[str, Any]]]:
+        rules = normalize_welcome_rules(self.config.get(WELCOME_RULES_KEY, []))
+        return [
+            (index, rule)
+            for index, rule in enumerate(rules)
+            if rule.get("enabled", True)
+            and (
+                not self._welcome_rule_groups(rule)
+                or group_openid in self._welcome_rule_groups(rule)
+            )
+        ]
+
+    @staticmethod
+    def _welcome_render(
+        template: str,
+        *,
+        group_name: str,
+        group_openid: str,
+        member_openid: str,
+        username: str,
+        uid: str,
+        at_member: bool,
+    ) -> str:
+        user = username or member_openid
+        values = {
+            "at_user": "{at_user}" if at_member else "",
+            "user": user,
+            "username": username or user,
+            "group_name": group_name or group_openid,
+            "group_openid": group_openid,
+            "member_openid": member_openid,
+            "uid": uid,
+        }
+        text = str(template or "")
+        for key, value in values.items():
+            if key != "at_user":
+                text = text.replace("{" + key + "}", str(value))
+        return text.replace("{at_user}", "{at_user}" if at_member else "").strip()
+
+    async def _send_welcome_messages(
+        self,
+        client: Any,
+        group_openid: str,
+        member_openid: str,
+        *,
+        username: str = "",
+        group_name: str = "",
+        request: dict[str, Any] | None = None,
+    ) -> None:
+        rules = self._welcome_rules_for_group(group_openid)
+        if not rules:
+            return
+        request = request or {}
+        entry = self._group_config(group_openid) or {}
+        group_name = str(group_name or entry.get("group_name") or group_openid)
+        username = str(username or request.get("username") or "").strip()
+        uid = str(request.get("uid") or "").strip() or self._uid_for_member(
+            group_openid, member_openid
+        )
+        now = time.monotonic()
+        for index, rule in rules:
+            sent_key = (group_openid, member_openid, index)
+            if now - self._welcome_sent_at.get(sent_key, 0.0) < 30:
+                continue
+            at_member = bool(
+                rule.get("at_member", "{at_user}" in str(rule.get("message") or ""))
+            )
+            text = self._welcome_render(
+                str(rule.get("message") or ""),
+                group_name=group_name,
+                group_openid=group_openid,
+                member_openid=member_openid,
+                username=username,
+                uid=uid,
+                at_member=at_member,
+            )
+            if not text:
+                continue
+            try:
+                sent = await self._send_group_notice(
+                    client,
+                    group_openid,
+                    text,
+                    member_openid=member_openid if at_member else "",
+                )
+                self._welcome_sent_at[sent_key] = time.monotonic()
+                try:
+                    recall = int(rule.get("auto_recall_seconds") or 0)
+                except (TypeError, ValueError):
+                    recall = 0
+                sent_id = str(
+                    sent.get("id")
+                    if isinstance(sent, dict)
+                    else getattr(sent, "id", "") or ""
+                )
+                if recall and sent_id:
+                    self._schedule_recall(
+                        client,
+                        group_openid,
+                        sent_id,
+                        min(120, max(0, recall)),
+                        "welcome",
+                    )
+            except Exception as exc:  # noqa: BLE001 - welcome must not affect approval
+                self.logger.warning(
+                    "发送入群欢迎消息失败：group=%s member=%s error=%s",
+                    group_openid,
+                    member_openid,
+                    exc,
+                )
 
     @staticmethod
     def _member_state_key(group_openid: str, member_openid: str) -> str:
@@ -926,15 +1103,61 @@ class QQGroupAdmin(Star):
                 group_openid,
                 (
                     f"# 真人验证\n{self._mention(member_openid)} 请计算 "
-                    f"**{left} + {right}**，验证通过前发送的消息会被撤回。"
+                    f"**{left} + {right}**，也可直接发送答案数字；"
+                    "验证通过前发送的消息会被撤回。"
                 ),
                 message_id=message_id,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
             )
-        except Exception:
-            self._verification_tokens.pop(token, None)
-            self._verification_tokens.update(previous)
-            raise
+        except Exception as exc:  # noqa: BLE001 - Markdown/keyboard boundary
+            # Keep the token when buttons are unavailable; plain text answers
+            # are handled by _consume_verification_answer.
+            try:
+                await self._send_group_text(
+                    client,
+                    group_openid,
+                    f"真人验证：请计算 {left} + {right}，直接发送结果数字。"
+                    "验证通过前发送的消息会被撤回。",
+                    message_id=message_id,
+                )
+            except Exception:  # noqa: BLE001 - plain fallback can also fail
+                self._verification_tokens.pop(token, None)
+                self._verification_tokens.update(previous)
+                raise exc
+
+    async def _consume_verification_answer(
+        self,
+        client: Any,
+        group_openid: str,
+        member_openid: str,
+        text: str,
+    ) -> bool:
+        match = re.fullmatch(
+            r"\s*(?:答案\s*[:：]?|验证\s*)?(\d{1,6})\s*",
+            str(text or ""),
+        )
+        if not match:
+            return False
+        self._cleanup_tokens()
+        token_data = next(
+            (
+                (token, data)
+                for token, data in self._verification_tokens.items()
+                if data[1:3] == (group_openid, member_openid)
+            ),
+            None,
+        )
+        if token_data is None or int(match.group(1)) != token_data[1][3]:
+            return False
+        self._verification_tokens.pop(token_data[0], None)
+        await self._clear_suspicious(group_openid, member_openid)
+        await self._send_group_notice(
+            client,
+            group_openid,
+            "真人验证已通过，可以正常发言。",
+            member_openid=member_openid,
+        )
+        return True
 
     def _qq_platforms(self) -> list[Any]:
         manager = getattr(self.context, "platform_manager", None)
@@ -987,6 +1210,11 @@ class QQGroupAdmin(Star):
             for token, data in self._approval_tokens.items()
             if data[0] > now
         }
+        self._approval_contexts = {
+            token: request
+            for token, request in self._approval_contexts.items()
+            if token in self._approval_tokens
+        }
         self._settings_tokens = {
             token: data
             for token, data in self._settings_tokens.items()
@@ -1003,6 +1231,8 @@ class QQGroupAdmin(Star):
         group_openid: str,
         member_openid: str,
         join_request_id: str,
+        *,
+        request: dict[str, Any] | None = None,
     ) -> str:
         self._cleanup_tokens()
         token = secrets.token_urlsafe(12)
@@ -1012,6 +1242,8 @@ class QQGroupAdmin(Star):
             member_openid,
             join_request_id,
         )
+        if request:
+            self._approval_contexts[token] = dict(request)
         return token
 
     def _settings_token(
@@ -1060,6 +1292,11 @@ class QQGroupAdmin(Star):
             token: data
             for token, data in self._approval_tokens.items()
             if data[1] != group_openid or data[3] != join_request_id
+        }
+        self._approval_contexts = {
+            token: request
+            for token, request in self._approval_contexts.items()
+            if token in self._approval_tokens
         }
 
     async def _approve_request(
@@ -1142,6 +1379,7 @@ class QQGroupAdmin(Star):
         try:
             if prefix == "qqga":
                 _, _, member_openid, join_request_id = token_data
+                approval_context = self._approval_contexts.get(parts[1])
                 entry = self._group_config(group_openid)
                 reason = str((entry or {}).get("button_reject_reason") or "管理员拒绝")
                 await self._approve_request(
@@ -1152,6 +1390,13 @@ class QQGroupAdmin(Star):
                     op=parts[2],
                     reject_reason=reason if parts[2] == "decline" else "",
                 )
+                if parts[2] == "approve":
+                    await self._send_welcome_messages(
+                        client,
+                        group_openid,
+                        member_openid,
+                        request=approval_context,
+                    )
             elif prefix == "qqgs":
                 panel = {
                     "home": self._send_settings_home,
@@ -1835,6 +2080,21 @@ class QQGroupAdmin(Star):
                 group_openid,
                 join_request_id,
             )
+            if op == "approve":
+                try:
+                    await self._send_welcome_messages(
+                        client,
+                        group_openid,
+                        member_openid,
+                        request={
+                            **request,
+                            "uid": verified_uid or self._uid_for_member(
+                                group_openid, member_openid
+                            ),
+                        },
+                    )
+                except Exception as exc:  # noqa: BLE001 - welcome is best effort
+                    self.logger.warning("自动审批后发送入群欢迎失败：%s", exc)
             if op == "approve" and verified_uid and approved_by_conditions:
                 try:
                     await self._bind_uid_identity(
@@ -3033,6 +3293,7 @@ class QQGroupAdmin(Star):
                 event.stop_event()
             return
         role = self._message_role(event)
+        text = str(event.get_message_str() or "").strip()
         if not bool(getattr(event, "is_at_or_wake_command", False)):
             self._moderation.record_message(
                 group_openid,
@@ -3093,6 +3354,16 @@ class QQGroupAdmin(Star):
             and not member_whitelisted
         ):
             self._moderation.break_repeat(group_openid)
+            if await self._consume_verification_answer(
+                self._client(event),
+                group_openid,
+                member_openid,
+                text,
+            ):
+                if hasattr(event, "stop_event"):
+                    event.stop_event()
+                self._moderation.remember(delivery_key, True)
+                return
             if hasattr(event, "stop_event"):
                 event.stop_event()
             try:
@@ -3115,7 +3386,6 @@ class QQGroupAdmin(Star):
             if not failed:
                 self._moderation.remember(delivery_key, True)
             return
-        text = str(event.get_message_str() or "").strip()
         if not settings["enabled"] or admin_exempt or member_whitelisted:
             self._moderation.break_repeat(group_openid)
             if settings["image_enabled"]:
@@ -4092,6 +4362,7 @@ class QQGroupAdmin(Star):
                 group_openid,
                 member_openid,
                 join_request_id,
+                request=item,
             )
             rows.append(
                 {
@@ -4722,6 +4993,28 @@ class QQGroupAdmin(Star):
             for entry in entries
             if isinstance(entry, dict) and str(entry.get("group_openid") or "").strip()
         ]
+
+    async def web_welcome_rules(self) -> dict[str, Any]:
+        """Return welcome rules together with the currently bound groups."""
+        groups = [group for group in await self.web_groups() if group.get("bound")]
+        return {
+            "rules": normalize_welcome_rules(self.config.get(WELCOME_RULES_KEY, [])),
+            "groups": groups,
+        }
+
+    async def web_save_welcome_rules(self, settings: dict[str, Any]) -> dict[str, Any]:
+        rules = normalize_welcome_rules(settings.get("rules", []))
+        allowed = {
+            str(group.get("group_openid") or "").strip()
+            for group in await self.web_groups()
+            if str(group.get("group_openid") or "").strip()
+        }
+        for rule in rules:
+            selected = [item for item in self._welcome_rule_groups(rule) if item in allowed]
+            rule["group_openids"] = list(dict.fromkeys(selected))
+        self.config[WELCOME_RULES_KEY] = rules
+        self.config.save_config()
+        return await self.web_welcome_rules()
 
     async def web_global_keyword_replies(self) -> dict[str, Any]:
         raw_rules = self.config.get("global_keyword_replies") or []
