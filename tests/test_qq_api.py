@@ -185,6 +185,30 @@ class QQGroupAPITest(unittest.IsolatedAsyncioTestCase):
             },
         )
 
+    async def test_upload_group_image_uses_official_file_data_contract(self):
+        client = FakeClient(FakeResponse(200, {"file_info": "media-info"}))
+
+        result = await QQGroupAPI(client).upload_group_image(
+            "group/openid",
+            b"\x89PNG\r\n",
+        )
+
+        self.assertEqual(result["file_info"], "media-info")
+        method, url, kwargs = client.http._session.calls[0]
+        self.assertEqual(method, "POST")
+        self.assertEqual(
+            url,
+            "https://api.bot.qq.com/v2/groups/group%2Fopenid/files",
+        )
+        self.assertEqual(
+            kwargs["json"],
+            {
+                "file_type": 1,
+                "file_data": "iVBORw0K",
+                "srv_send_msg": False,
+            },
+        )
+
     def test_group_file_url_and_type_validation(self):
         self.assertEqual(infer_group_file_type("https://x.test/a.mp4"), 2)
         self.assertEqual(infer_group_file_type("https://x.test/a.bin", "voice.silk"), 3)

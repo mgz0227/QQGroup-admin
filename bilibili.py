@@ -401,19 +401,21 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             pub_ts = int(author.get("pub_ts") or 0)
         except (TypeError, ValueError):
             pub_ts = 0
-        result.append(
-            {
-                "id": dynamic_id,
-                "type": str(item.get("type") or ""),
-                "uid": str(author.get("mid") or ""),
-                "author": str(author.get("name") or ""),
-                "pub_ts": pub_ts,
-                "title": title,
-                "text": text,
-                "url": url,
-                "cover": _first_cover(card),
-            }
-        )
+        parsed_item = {
+            "id": dynamic_id,
+            "type": str(item.get("type") or ""),
+            "uid": str(author.get("mid") or ""),
+            "author": str(author.get("name") or ""),
+            "pub_ts": pub_ts,
+            "title": title,
+            "text": text,
+            "url": url,
+            "cover": _first_cover(card),
+        }
+        avatar = _media_url(author.get("face"))
+        if avatar:
+            parsed_item["avatar"] = avatar
+        result.append(parsed_item)
     return result
 
 

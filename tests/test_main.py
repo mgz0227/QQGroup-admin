@@ -1890,6 +1890,79 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[查看原动态](https://www.bilibili.com/opus/dynamic-1)", push_text)
         self.assertNotIn("\n-\n", push_text)
 
+    async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        plugin.html_render = AsyncMock(return_value=b"\x89PNG\r\ncard")
+        send_card = AsyncMock(return_value=SimpleNamespace(id="card-1"))
+        with patch.object(plugin, "_send_group_card", send_card):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    }
+                ],
+                "# B站动态\n\n[查看原动态](https://www.bilibili.com/opus/1)",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "link": "https://www.bilibili.com/opus/1",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(send_card.await_args.args[1], "group-1")
+        self.assertEqual(
+            send_card.await_args.kwargs["link"],
+            "https://www.bilibili.com/opus/1",
+        )
+        plugin.html_render.assert_awaited_once()
+        self.assertEqual(client.api.messages, [])
+
+    async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
+        plugin, _client = self.plugin()
+        temp_path = __import__("tempfile").NamedTemporaryFile(
+            suffix=".png", delete=False
+        )
+        temp_path.write(b"\x89PNG\r\ncard")
+        temp_path.close()
+        plugin.html_render = AsyncMock(return_value=temp_path.name)
+
+        rendered = await plugin._render_bilibili_card(
+            {"author": "UP", "kind": "图文"}
+        )
+
+        self.assertTrue(rendered.startswith(b"\x89PNG"))
+        self.assertFalse(__import__("os").path.exists(temp_path.name))
+
+    async def test_bilibili_group_card_uploads_then_sends_media(self):
+        plugin, client = self.plugin()
+        upload = AsyncMock(
+            return_value={"file_uuid": "uuid-1", "file_info": "info-1", "ttl": 60}
+        )
+        with patch.object(module.QQGroupAPI, "upload_group_image", upload):
+            await plugin._send_group_card(
+                client,
+                "group-1",
+                b"\x89PNG\r\ncard",
+                link="https://www.bilibili.com/opus/1",
+            )
+
+        upload.assert_awaited_once_with("group-1", b"\x89PNG\r\ncard")
+        self.assertEqual(
+            client.api.messages[-1],
+            {
+                "group_openid": "group-1",
+                "msg_type": 7,
+                "media": {"file_info": "info-1"},
+                "content": "查看原动态：https://www.bilibili.com/opus/1",
+            },
+        )
+
     async def test_bilibili_live_push_uses_named_room_link(self):
         plugin, _client = self.plugin()
         subscriptions = {

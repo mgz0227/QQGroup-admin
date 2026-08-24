@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import base64
 import json
 import re
 from datetime import datetime, timedelta, timezone
@@ -320,6 +321,33 @@ class QQGroupAPI:
             body=body,
         )
         return data if isinstance(data, dict) else {}
+
+    async def upload_group_image(
+        self,
+        group_openid: str,
+        image_data: bytes,
+        *,
+        srv_send_msg: bool = False,
+    ) -> dict[str, Any]:
+        """Upload image bytes for an official QQ group media message."""
+
+        group = self._id(group_openid, "群 OpenID")
+        if not isinstance(image_data, bytes) or not image_data:
+            raise ValueError("图片数据不能为空")
+        if len(image_data) > 8 * 1024 * 1024:
+            raise ValueError("图片不能超过 8 MB")
+        data = await self._request(
+            "POST",
+            f"/v2/groups/{group}/files",
+            body={
+                "file_type": 1,
+                "file_data": base64.b64encode(image_data).decode("ascii"),
+                "srv_send_msg": bool(srv_send_msg),
+            },
+        )
+        if not isinstance(data, dict) or not data.get("file_info"):
+            raise QQAPIError(message="QQ 图片上传返回格式异常")
+        return data
 
     async def recall_group_message(
         self,

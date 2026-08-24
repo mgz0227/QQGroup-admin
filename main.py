@@ -8,6 +8,7 @@ import time
 from contextlib import suppress
 from functools import wraps
 from io import BytesIO
+from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import quoteattr
 
@@ -28,6 +29,7 @@ from .bilibili import (
     poll_qr_login,
     start_qr_login,
 )
+from .bilibili_card import build_bilibili_card
 from .image_ocr import (
     embedded_image_text,
     normalize_vision_image_ref,
@@ -1970,27 +1972,45 @@ class QQGroupAdmin(Star):
         targets: list[dict[str, Any]],
         text: str,
         kind: str,
+        *,
+        card_data: dict[str, Any] | None = None,
     ) -> bool:
         clients = self._platform_clients()
+        eligible_targets = [target for target in targets if target.get(kind)]
+        if not eligible_targets:
+            return True
         success = True
-        for target in targets:
-            if not target.get(kind):
-                continue
+        card_image: bytes | None = None
+        if card_data:
+            try:
+                card_image = await self._render_bilibili_card(card_data)
+            except Exception as exc:  # noqa: BLE001 - renderer is optional
+                self.logger.debug("B 站图片卡片不可用，降级 Markdown：%s", exc)
+        for target in eligible_targets:
             client = clients.get(str(target.get("platform_id") or ""))
             if client is None:
                 success = False
                 continue
+            group_openid = str(target["group_openid"])
             try:
-                await self._send_group_markdown(
-                    client,
-                    str(target["group_openid"]),
-                    text,
-                )
+                if card_image:
+                    try:
+                        await self._send_group_card(
+                            client,
+                            group_openid,
+                            card_image,
+                            link=str((card_data or {}).get("link") or ""),
+                        )
+                        continue
+                    except Exception as card_exc:  # noqa: BLE001 - optional card
+                        self.logger.debug("B 站图片卡片发送失败，降级 Markdown：%s", card_exc)
+                await self._send_group_markdown(client, group_openid, text)
+                continue
             except Exception as exc:  # noqa: BLE001 - proactive QQ boundary
                 try:
                     await self._send_group_text(
                         client,
-                        str(target["group_openid"]),
+                        group_openid,
                         self._markdown_fallback_text(text),
                     )
                 except Exception as fallback_exc:  # noqa: BLE001 - QQ boundary
@@ -2002,6 +2022,75 @@ class QQGroupAdmin(Star):
                         fallback_exc,
                     )
         return success
+
+    async def _render_bilibili_card(self, card_data: dict[str, Any]) -> bytes:
+        renderer = getattr(self, "html_render", None)
+        if not callable(renderer):
+            raise TypeError("AstrBot HTML 渲染不可用")
+        result = await asyncio.wait_for(
+            renderer(
+                tmpl=build_bilibili_card(**card_data),
+                data={},
+                return_url=False,
+                options={
+                    "full_page": True,
+                    "type": "png",
+                    "omit_background": True,
+                    "scale": "css",
+                    "viewport_width": 720,
+                    "viewport_height": 400,
+                    "device_scale_factor_level": "normal",
+                    "timeout": 8_000,
+                },
+            ),
+            timeout=10,
+        )
+        path: Path | None = None
+        try:
+            if isinstance(result, (bytes, bytearray)):
+                image = bytes(result)
+            elif isinstance(result, str):
+                path = Path(result)
+                if not path.is_file():
+                    raise RuntimeError("AstrBot HTML 渲染未返回图片文件")
+                image = path.read_bytes()
+            else:
+                raise TypeError("AstrBot HTML 渲染返回格式异常")
+        finally:
+            if path is not None:
+                with suppress(OSError):
+                    path.unlink()
+        if not image.startswith((b"\x89PNG", b"\xff\xd8\xff")) or len(
+            image
+        ) > 8 * 1024 * 1024:
+            raise RuntimeError("B 站图片卡片格式或大小异常")
+        return image
+
+    async def _send_group_card(
+        self,
+        client: Any,
+        group_openid: str,
+        image: bytes,
+        *,
+        link: str = "",
+    ) -> Any:
+        media = await QQGroupAPI(client).upload_group_image(
+            group_openid,
+            image,
+        )
+        payload: dict[str, Any] = {
+            "group_openid": group_openid,
+            "msg_type": 7,
+            "media": {"file_info": str(media["file_info"])},
+        }
+        # QQ media messages accept a plain caption; keeping the URL here
+        # preserves a usable action even though the rendered image itself is
+        # not interactive.
+        if link:
+            payload["content"] = f"查看原动态：{link}"
+        return await client.api.post_group_message(
+            **payload,
+        )
 
     async def _poll_bilibili_live(
         self,
@@ -2063,8 +2152,23 @@ class QQGroupAdmin(Star):
                             ]
                         )
                         text = "\n\n".join(sections)
+                    card_data = {
+                        "author": current.get("uname") or f"UID {uid}",
+                        "kind": "直播",
+                        "timestamp": current.get("live_time") or "",
+                        "title": current.get("title") or "未设置标题",
+                        "cover": current.get("user_cover")
+                        or current.get("keyframe")
+                        or current.get("cover"),
+                        "avatar": current.get("face") or current.get("avatar"),
+                        "status": "正在直播" if transition == "start" else "直播结束",
+                        "link": f"https://live.bilibili.com/{room_id}",
+                    }
                     delivered = await self._push_bilibili_message(
-                        subscriptions.get(uid, []), text, "live"
+                        subscriptions.get(uid, []),
+                        text,
+                        "live",
+                        card_data=card_data,
                     )
                 if delivered and previous != current_state:
                     self._bilibili_state["live"][uid] = current_state
@@ -2155,7 +2259,29 @@ class QQGroupAdmin(Star):
                     sections.append(f"> {summary}")
                 sections.append(f"[查看原动态]({item['url']})")
                 text = "\n\n".join(sections)
-                if not await self._push_bilibili_message(targets, text, "dynamic"):
+                card_data = {
+                    "author": item.get("author") or f"UID {uid}",
+                    "kind": kind,
+                    "timestamp": (
+                        time.strftime("%m-%d %H:%M", time.localtime(pub_ts))
+                        if pub_ts
+                        else ""
+                    ),
+                    "title": raw_title
+                    if raw_title and raw_title not in {"新动态", "发布了新动态"}
+                    else "",
+                    "summary": raw_summary if raw_summary != raw_title else "",
+                    "cover": item.get("cover"),
+                    "avatar": item.get("avatar"),
+                    "status": "",
+                    "link": item.get("url"),
+                }
+                if not await self._push_bilibili_message(
+                    targets,
+                    text,
+                    "dynamic",
+                    card_data=card_data,
+                ):
                     break
                 delivered_items.append(item)
             new_seen = list(
