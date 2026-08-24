@@ -1596,6 +1596,22 @@ class QQGroupAdmin(Star):
         }.get(str(value or "").upper(), "动态")
 
     @staticmethod
+    def _bilibili_dynamic_icon(value: Any) -> str:
+        return {
+            "DYNAMIC_TYPE_AV": "🎬",
+            "DYNAMIC_TYPE_DRAW": "🖼️",
+            "DYNAMIC_TYPE_WORD": "📝",
+            "DYNAMIC_TYPE_FORWARD": "🔁",
+            "DYNAMIC_TYPE_ARTICLE": "📖",
+            "DYNAMIC_TYPE_LIVE_RCMD": "🔴",
+        }.get(str(value or "").upper(), "✨")
+
+    @staticmethod
+    def _bilibili_display_text(value: Any) -> str:
+        text = " ".join(str(value or "").split()).strip()
+        return "" if text in {"", "-", "--", "—", "暂无", "暂无内容"} else text
+
+    @staticmethod
     def _bilibili_markdown_image(value: Any) -> str:
         url = str(value or "").strip()
         if url.startswith("//"):
@@ -1619,6 +1635,7 @@ class QQGroupAdmin(Star):
             text,
         )
         text = re.sub(r"(?m)^(?:#{1,6}\s+|>\s*)", "", text)
+        text = re.sub(r"(?m)^\s*\*{3}\s*$", "", text)
         return text.replace("**", "").replace("\\", "").strip()
 
     def _ensure_native_mode(self, group_openid: str) -> None:
@@ -2015,7 +2032,9 @@ class QQGroupAdmin(Star):
                 else:
                     name = self._markdown_text(current.get("uname") or f"UID {uid}")
                     title = self._markdown_text(
-                        current.get("title") or "未设置标题", 300
+                        self._bilibili_display_text(current.get("title"))
+                        or "未设置标题",
+                        300,
                     )
                     room_id = str(current.get("room_id") or "").strip()
                     cover = self._bilibili_markdown_image(
@@ -2024,9 +2043,10 @@ class QQGroupAdmin(Star):
                         or current.get("cover")
                     )
                     if transition == "start":
-                        sections = ["## 🔴 正在直播", f"**{name}** · 直播中"]
+                        sections = ["## 🔴 正在直播"]
                         if cover:
                             sections.append(cover)
+                        sections.extend([f"**{name}** · 直播中", "***"])
                         sections.extend(
                             [
                                 f"**{title}**",
@@ -2035,14 +2055,18 @@ class QQGroupAdmin(Star):
                         )
                         text = "\n\n".join(sections)
                     else:
-                        text = "\n\n".join(
+                        sections = ["## ⚪ 直播结束"]
+                        if cover:
+                            sections.append(cover)
+                        sections.extend(
                             [
-                                "## ⚪ 直播结束",
                                 f"**{name}**",
+                                "***",
                                 f"**{title}**",
                                 "本场直播已结束。",
                             ]
                         )
+                        text = "\n\n".join(sections)
                     delivered = await self._push_bilibili_message(
                         subscriptions.get(uid, []), text, "live"
                     )
@@ -2106,8 +2130,8 @@ class QQGroupAdmin(Star):
             delivered_items = []
             for item in new_items:
                 name = self._markdown_text(item.get("author") or f"UID {uid}")
-                raw_title = str(item.get("title") or "").strip()
-                raw_summary = str(item.get("text") or "").strip()
+                raw_title = self._bilibili_display_text(item.get("title"))
+                raw_summary = self._bilibili_display_text(item.get("text"))
                 title = (
                     self._markdown_text(raw_title, 300)
                     if raw_title not in {"-", "新动态", "发布了新动态"}
@@ -2122,19 +2146,26 @@ class QQGroupAdmin(Star):
                 pub_ts = self._bounded_int(
                     item.get("pub_ts"), 0, 0, 4_000_000_000
                 )
-                meta = f"**{name}** · {kind}"
+                icon = self._bilibili_dynamic_icon(item.get("type"))
+                meta = f"{icon} **{name}** · {kind}"
                 if pub_ts:
                     meta += time.strftime(" · %m-%d %H:%M", time.localtime(pub_ts))
                 if not title and not summary:
                     title = "发布了新动态"
-                    summary = "暂无文字说明，点击下方查看完整动态。"
+                    summary = "点击下方链接查看完整内容。"
                 cover = self._bilibili_markdown_image(item.get("cover"))
-                sections = ["## 🔔 B站动态", meta]
+                sections = ["## 🔔 B站动态"]
                 if cover:
                     sections.append(cover)
-                sections.append(f"**{title or '发布了新动态'}**")
-                sections.append(f"> {summary or '暂无文字说明，点击下方查看完整动态。'}")
-                sections.append(f"[查看动态 ↗]({item['url']})")
+                sections.extend(
+                    [
+                        meta,
+                        "***",
+                        f"**{title or '发布了新动态'}**",
+                        f"> {summary or '点击下方链接查看完整内容。'}",
+                        f"[打开动态 ↗]({item['url']})",
+                    ]
+                )
                 text = "\n\n".join(sections)
                 if not await self._push_bilibili_message(targets, text, "dynamic"):
                     break

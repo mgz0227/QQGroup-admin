@@ -76,6 +76,39 @@ class BilibiliTest(unittest.TestCase):
             ],
         )
 
+    def test_dynamic_parser_cleans_placeholders_and_reads_nested_cover(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "draw-1",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_author": {"name": "UP"},
+                            "module_dynamic": {
+                                "desc": {"text": "-"},
+                                "major": {
+                                    "draw": {
+                                        "items": [
+                                            {"src": "//i0.hdslb.com/bfs/draw.jpg"}
+                                        ]
+                                    }
+                                },
+                            },
+                        },
+                    }
+                ]
+            }
+        }
+
+        self.assertEqual(
+            parse_dynamic_items(payload)[0]["cover"],
+            "https://i0.hdslb.com/bfs/draw.jpg",
+        )
+        self.assertEqual(parse_dynamic_items(payload)[0]["title"], "")
+        self.assertEqual(parse_dynamic_items(payload)[0]["text"], "")
+
     def test_live_transition_seeds_and_detects_changes(self):
         offline = {"live_status": 0, "live_time": 0}
         live = {"live_status": 1, "live_time": 100}

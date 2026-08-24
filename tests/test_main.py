@@ -1864,7 +1864,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("**发布了新动态**", push_text)
         self.assertIn("> 正文", push_text)
-        self.assertIn("[查看动态 ↗](https://www.bilibili.com/opus/dynamic-1)", push_text)
+        self.assertIn("[打开动态 ↗](https://www.bilibili.com/opus/dynamic-1)", push_text)
         self.assertNotIn("\n-\n", push_text)
 
     async def test_bilibili_live_push_uses_named_room_link(self):

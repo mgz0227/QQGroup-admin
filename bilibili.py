@@ -284,8 +284,21 @@ def _media_url(value: Any) -> str:
     return url
 
 
+def _clean_dynamic_text(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text in {"-", "--", "—", "暂无", "暂无内容"} else text
+
+
 def _first_cover(card: dict[str, Any]) -> str:
-    for key in ("cover", "pic", "image", "image_url"):
+    for key in (
+        "cover",
+        "cover_url",
+        "pic",
+        "image",
+        "image_url",
+        "thumbnail",
+        "thumb",
+    ):
         cover = _media_url(card.get(key))
         if cover:
             return cover
@@ -295,7 +308,12 @@ def _first_cover(card: dict[str, Any]) -> str:
             continue
         for value in values:
             if isinstance(value, dict):
-                value = value.get("url") or value.get("src") or value.get("img_src")
+                value = (
+                    value.get("url")
+                    or value.get("src")
+                    or value.get("img_src")
+                    or value.get("image_url")
+                )
             cover = _media_url(value)
             if cover:
                 return cover
@@ -334,22 +352,46 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
                     "opus",
                     "archive",
                     "article",
+                    "draw",
                     "ugc_season",
                     "live",
                     "common",
                     "music",
                     "pgc",
                     "courses",
+                    "forward",
                 )
                 if isinstance(major.get(name), dict)
             ),
             {},
         )
         summary = card.get("summary") if isinstance(card.get("summary"), dict) else {}
-        title = str(card.get("title") or "").strip()
-        text = str(
-            desc.get("text") or summary.get("text") or card.get("desc") or title
-        ).strip()
+        title = next(
+            (
+                value
+                for value in (
+                    _clean_dynamic_text(card.get("title")),
+                    _clean_dynamic_text(card.get("name")),
+                )
+                if value
+            ),
+            "",
+        )
+        text = next(
+            (
+                value
+                for value in (
+                    _clean_dynamic_text(desc.get("text")),
+                    _clean_dynamic_text(summary.get("text")),
+                    _clean_dynamic_text(card.get("desc")),
+                )
+                if value and value != title
+            ),
+            "",
+        )
+        if not title:
+            title = text
+            text = ""
         basic = item.get("basic") if isinstance(item.get("basic"), dict) else {}
         url = str(basic.get("jump_url") or card.get("jump_url") or "").strip()
         if url.startswith("//"):
