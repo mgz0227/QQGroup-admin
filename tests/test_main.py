@@ -2695,6 +2695,56 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(blocked)
         self.assertEqual(calls, ["primary", "fallback"])
 
+    async def test_ai_confirmation_uses_only_remaining_budget_after_initial_block(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        timeouts = []
+
+        class NoopTimeout:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        def capture_timeout(delay):
+            timeouts.append(delay)
+            return NoopTimeout()
+
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=明确违规",
+                ),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="ALLOW confidence=99 reason=正常聊天",
+                ),
+            ]
+        )
+
+        with patch.object(module.asyncio, "timeout", side_effect=capture_timeout):
+            blocked = await plugin._ai_blocks_message(
+                event,
+                "待审核",
+                [],
+                "primary",
+                ["fallback-1", "fallback-2", "fallback-3"],
+                timeout_seconds=5,
+                confirm_provider_id="confirm",
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(len(timeouts), 2)
+        self.assertGreater(timeouts[0], 1.1)
+        self.assertLess(timeouts[0], 1.5)
+        self.assertGreater(timeouts[1], 4.5)
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
+            ["primary", "confirm"],
+        )
+
     def test_runtime_global_ai_validation_accepts_multiple_fallbacks(self):
         runtime = module.GroupAdminWeb._runtime_settings(
             {

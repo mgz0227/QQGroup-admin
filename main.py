@@ -2996,11 +2996,9 @@ class QQGroupAdmin(Star):
             if remaining <= 0:
                 errors.append("达到 AI 审核总超时")
                 break
-            # Reserve a slice for every remaining candidate so a hung model
-            # cannot consume the budget needed by fallbacks or confirmation.
-            remaining_candidates = len(candidates) - index + bool(
-                str(confirm_provider_id or "").strip()
-            )
+            # Split only across initial candidates. Confirmation is attempted
+            # only after BLOCK and uses whatever budget remains.
+            remaining_candidates = len(candidates) - index
             provider_timeout = max(
                 1.0,
                 min(30.0, remaining / max(1, remaining_candidates)),
