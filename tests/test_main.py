@@ -1207,9 +1207,6 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_web_scope_save_keeps_existing_unbound_group(self):
         plugin, _client = self.plugin()
-        plugin.config["auto_review_groups"].append(
-            {"group_openid": "group-2", "group_name": "暂未绑定群"}
-        )
         plugin.config["welcome_rules"] = [
             {
                 "name": "欢迎",

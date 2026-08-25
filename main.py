@@ -6120,6 +6120,11 @@ class QQGroupAdmin(Star):
             for group in await self.web_groups()
             if str(group.get("group_openid") or "").strip()
         }
+        existing = self.config.get(WELCOME_RULES_KEY, [])
+        if isinstance(existing, list):
+            for rule in existing:
+                if isinstance(rule, dict):
+                    allowed.update(self._welcome_rule_groups(rule))
         for rule in rules:
             selected = [item for item in self._welcome_rule_groups(rule) if item in allowed]
             rule["group_openids"] = list(dict.fromkeys(selected))
