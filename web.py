@@ -67,6 +67,12 @@ GLOBAL_POLICY_FIELDS = (
     "global_repeat_mute_max_seconds",
     "global_repeat_reply",
     "global_repeat_at_member",
+    "global_rate_limit_enabled",
+    "global_rate_limit_count",
+    "global_rate_limit_window_seconds",
+    "global_rate_limit_recall_count",
+    "global_rate_limit_reply",
+    "global_rate_limit_at_member",
     "keyword_reply_cooldown_seconds",
     "keyword_reply_recall_seconds",
 )
@@ -683,6 +689,51 @@ class GroupAdminWeb:
                 1_000,
                 multiline=True,
             ),
+            "global_rate_limit_enabled": cls._bool(
+                payload,
+                "global_rate_limit_enabled",
+                False,
+                "全局消息频率限制开关",
+            ),
+            "global_rate_limit_count": cls._int(
+                payload,
+                "global_rate_limit_count",
+                8,
+                2,
+                100,
+                "全局消息频率限制条数",
+            ),
+            "global_rate_limit_window_seconds": cls._int(
+                payload,
+                "global_rate_limit_window_seconds",
+                10,
+                3,
+                120,
+                "全局消息频率限制时间窗",
+            ),
+            "global_rate_limit_recall_count": cls._int(
+                payload,
+                "global_rate_limit_recall_count",
+                5,
+                1,
+                50,
+                "全局消息频率限制撤回数量",
+            ),
+            "global_rate_limit_reply": cls._text(
+                payload.get(
+                    "global_rate_limit_reply",
+                    "消息发送过于频繁，相关消息已撤回。",
+                ),
+                "全局消息频率限制回复",
+                1_000,
+                multiline=True,
+            ),
+            "global_rate_limit_at_member": cls._bool(
+                payload,
+                "global_rate_limit_at_member",
+                True,
+                "全局消息频率限制艾特",
+            ),
             "global_ai_reject_reply": cls._text(
                 payload.get("global_ai_reject_reply", ""),
                 "AI 撤回回复",
@@ -853,6 +904,8 @@ class GroupAdminWeb:
             ("global_image_spam_at_member", "全局连续发图艾特"),
             ("global_repeat_review_enabled", "全局复读开关"),
             ("global_repeat_at_member", "全局复读艾特"),
+            ("global_rate_limit_enabled", "全局消息频率限制开关"),
+            ("global_rate_limit_at_member", "全局消息频率限制艾特"),
         ):
             if key in payload:
                 settings[key] = cls._bool(payload, key, False, label)
@@ -895,6 +948,12 @@ class GroupAdminWeb:
             "global_image_reject_at_member",
             "global_ai_reject_reply",
             "global_ai_reject_at_member",
+            "global_rate_limit_enabled",
+            "global_rate_limit_count",
+            "global_rate_limit_window_seconds",
+            "global_rate_limit_recall_count",
+            "global_rate_limit_reply",
+            "global_rate_limit_at_member",
         ):
             if key not in payload:
                 settings.pop(key, None)

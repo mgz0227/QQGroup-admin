@@ -257,6 +257,40 @@
             "description": "全局复读处置时艾特",
             "default": true
           },
+          "global_rate_limit_enabled": {
+            "type": "bool",
+            "description": "全局消息频率限制",
+            "hint": "按当前策略覆盖群分别统计普通成员消息，默认关闭。",
+            "default": false
+          },
+          "global_rate_limit_count": {
+            "type": "int",
+            "description": "全局频率限制条数",
+            "default": 8,
+            "slider": {"min": 2, "max": 100, "step": 1}
+          },
+          "global_rate_limit_window_seconds": {
+            "type": "int",
+            "description": "全局频率限制时间窗（秒）",
+            "default": 10,
+            "slider": {"min": 3, "max": 120, "step": 1}
+          },
+          "global_rate_limit_recall_count": {
+            "type": "int",
+            "description": "全局频率限制撤回数量",
+            "default": 5,
+            "slider": {"min": 1, "max": 50, "step": 1}
+          },
+          "global_rate_limit_reply": {
+            "type": "string",
+            "description": "全局频率限制撤回回复",
+            "default": "消息发送过于频繁，相关消息已撤回。"
+          },
+          "global_rate_limit_at_member": {
+            "type": "bool",
+            "description": "全局频率限制撤回时艾特",
+            "default": true
+          },
           "keyword_reply_cooldown_seconds": {
             "type": "int",
             "description": "关键词回复单群冷却（秒）",

@@ -29,6 +29,7 @@ class ModerationWindows:
             defaultdict(list)
         )
         self.repeat_last_signature: dict[str, str] = {}
+        self.rates: dict[tuple[str, str], list[tuple[float, str]]] = defaultdict(list)
 
     def duplicate(
         self,
@@ -120,6 +121,43 @@ class ModerationWindows:
         self.images.pop((group_openid, member_openid), None)
         self.group_images.pop(group_openid, None)
 
+    def add_rate(
+        self,
+        group_openid: str,
+        member_openid: str,
+        message_id: str,
+        *,
+        threshold: int,
+        window: int,
+        recall_limit: int = 0,
+        now: float | None = None,
+    ) -> list[str]:
+        """Track ordinary messages for a bounded per-member rate window."""
+
+        if not group_openid or not member_openid or not message_id:
+            return []
+        now = time.monotonic() if now is None else now
+        key = (group_openid, member_openid)
+        events = [
+            event for event in self.rates[key] if event[0] >= now - max(1, window)
+        ]
+        events.append((now, message_id))
+        # ponytail: retain a small fixed tail; larger flood limits belong in a
+        # dedicated counter if a deployment ever needs them.
+        self.rates[key] = events[-100:]
+        if len(events) < max(1, threshold):
+            return []
+        self.rates.pop(key, None)
+        ids = list(dict.fromkeys(event[1] for event in events if event[1]))
+        return ids[-recall_limit:] if recall_limit else ids
+
+    def break_rate(self, group_openid: str, member_openid: str = "") -> None:
+        if member_openid:
+            self.rates.pop((group_openid, member_openid), None)
+            return
+        for key in [key for key in self.rates if key[0] == group_openid]:
+            self.rates.pop(key, None)
+
     def record_message(
         self,
         group_openid: str,
@@ -186,6 +224,14 @@ class ModerationWindows:
             self.repeats[key] = [
                 event for event in self.repeats[key] if event[3] not in removed
             ]
+        for key in [key for key in self.rates if key[0] == group_openid]:
+            remaining = [
+                event for event in self.rates[key] if event[1] not in removed
+            ]
+            if remaining:
+                self.rates[key] = remaining
+            else:
+                self.rates.pop(key, None)
 
     def add_repeat(
         self,

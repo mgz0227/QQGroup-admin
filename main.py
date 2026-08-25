@@ -219,6 +219,12 @@ GLOBAL_POLICY_DEFAULTS = {
     "global_repeat_mute_max_seconds": 600,
     "global_repeat_reply": "检测到集中复读，已随机禁言一名参与者。",
     "global_repeat_at_member": True,
+    "global_rate_limit_enabled": False,
+    "global_rate_limit_count": 8,
+    "global_rate_limit_window_seconds": 10,
+    "global_rate_limit_recall_count": 5,
+    "global_rate_limit_reply": "消息发送过于频繁，相关消息已撤回。",
+    "global_rate_limit_at_member": True,
     "keyword_reply_cooldown_seconds": 0,
     "keyword_reply_recall_seconds": 0,
 }
@@ -269,6 +275,12 @@ GLOBAL_INHERIT_POLICY_KEYS = (
     GLOBAL_IMAGE_OCR_PROVIDER_KEY,
     GLOBAL_IMAGE_OCR_TIMEOUT_KEY,
     GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY,
+    "global_rate_limit_enabled",
+    "global_rate_limit_count",
+    "global_rate_limit_window_seconds",
+    "global_rate_limit_recall_count",
+    "global_rate_limit_reply",
+    "global_rate_limit_at_member",
     "keyword_reply_cooldown_seconds",
     "keyword_reply_recall_seconds",
 )
@@ -2217,6 +2229,37 @@ class QQGroupAdmin(Star):
                     "global_repeat_at_member", "repeat_at_member", True
                 )
             ),
+            "rate_enabled": bool(
+                self._policy_value(policy, "global_rate_limit_enabled")
+            ),
+            "rate_count": self._bounded_int(
+                self._policy_value(policy, "global_rate_limit_count"),
+                8,
+                2,
+                100,
+            ),
+            "rate_window": self._bounded_int(
+                self._policy_value(policy, "global_rate_limit_window_seconds"),
+                10,
+                3,
+                120,
+            ),
+            "rate_recall_count": self._bounded_int(
+                self._policy_value(policy, "global_rate_limit_recall_count"),
+                5,
+                1,
+                50,
+            ),
+            "rate_reply": str(
+                configured_text(
+                    policy,
+                    "global_rate_limit_reply",
+                    "消息发送过于频繁，相关消息已撤回。",
+                )
+            ),
+            "rate_at": bool(
+                self._policy_value(policy, "global_rate_limit_at_member")
+            ),
         }
 
     @staticmethod
@@ -3188,6 +3231,11 @@ class QQGroupAdmin(Star):
                     return "\n".join(
                         dict.fromkeys(value for value in values if value)
                     )[:8000]
+                if self._ai_semaphore.locked():
+                    self.logger.debug("AI 审核并发繁忙，跳过视觉 OCR")
+                    return "\n".join(
+                        dict.fromkeys(value for value in values if value)
+                    )[:8000]
                 async with asyncio.timeout(remaining):
                     async with self._ai_semaphore:
                         response = await self.context.llm_generate(
@@ -3868,6 +3916,9 @@ class QQGroupAdmin(Star):
         global_repeat_enabled = bool(
             entry and entry.get("platform_id") and settings["repeat_enabled"]
         )
+        global_rate_enabled = bool(
+            entry and entry.get("platform_id") and settings["rate_enabled"]
+        )
         admin_exempt = settings["exempt_admins"] and role in GROUP_ADMIN_ROLES
         global_blacklist_match = self._member_list_matches(
             event,
@@ -3883,6 +3934,7 @@ class QQGroupAdmin(Star):
         )
         if not admin_exempt and (global_blacklist_match or group_blacklist_match):
             self._moderation.break_repeat(group_openid)
+            self._moderation.break_rate(group_openid, member_openid)
             await self._handle_member_blacklist(
                 event,
                 group_openid,
@@ -3918,6 +3970,7 @@ class QQGroupAdmin(Star):
             and not member_whitelisted
         ):
             self._moderation.break_repeat(group_openid)
+            self._moderation.break_rate(group_openid, member_openid)
             if await self._consume_verification_answer(
                 self._client(event),
                 group_openid,
@@ -3958,11 +4011,13 @@ class QQGroupAdmin(Star):
                 and not global_image_keyword_enabled
                 and not global_image_spam_enabled
                 and not global_repeat_enabled
+                and not global_rate_enabled
             )
             or admin_exempt
             or member_whitelisted
         ):
             self._moderation.break_repeat(group_openid)
+            self._moderation.break_rate(group_openid, member_openid)
             if global_image_spam_enabled:
                 self._moderation.break_image_chain(group_openid, member_openid)
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
@@ -3972,6 +4027,8 @@ class QQGroupAdmin(Star):
             self._moderation.break_repeat(group_openid)
         if not local_review_enabled and not global_image_spam_enabled:
             self._moderation.break_image_chain(group_openid, member_openid)
+        if not global_rate_enabled:
+            self._moderation.break_rate(group_openid, member_openid)
 
         images = self._image_urls(event)
         image_count, pure_image_count = self._image_like_counts(event, text, images)
@@ -4031,6 +4088,26 @@ class QQGroupAdmin(Star):
                 reason = "图片文字命中本群禁止关键词，已撤回。"
                 warn_text = settings["image_keyword_reply"]
                 warn_at_member = settings["image_keyword_at"]
+        if not reason and global_rate_enabled and not bool(
+            getattr(event, "is_at_or_wake_command", False)
+        ):
+            rate_ids = self._moderation.add_rate(
+                group_openid,
+                member_openid,
+                message_id,
+                threshold=settings["rate_count"],
+                window=settings["rate_window"],
+                recall_limit=settings["rate_recall_count"],
+            )
+            if rate_ids:
+                reason = "消息发送过于频繁，相关消息已撤回。"
+                warn_text = settings["rate_reply"]
+                warn_at_member = settings["rate_at"]
+                recall_ids = rate_ids
+                self._moderation.break_image_chain(group_openid, member_openid)
+                self._moderation.break_repeat(group_openid)
+        elif reason and global_rate_enabled:
+            self._moderation.break_rate(group_openid, member_openid)
         if not reason and global_image_spam_enabled:
             image_recall_ids = self._moderation.add_images(
                 group_openid,

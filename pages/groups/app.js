@@ -899,7 +899,9 @@
         "global_image_spam_group_min_members", "global_image_spam_recall_count", "global_image_spam_reply",
         "global_image_spam_at_member", "global_repeat_review_enabled", "global_repeat_count",
         "global_repeat_window_seconds", "global_repeat_mute_min_seconds", "global_repeat_mute_max_seconds",
-        "global_repeat_reply", "global_repeat_at_member",
+        "global_repeat_reply", "global_repeat_at_member", "global_rate_limit_enabled",
+        "global_rate_limit_count", "global_rate_limit_window_seconds", "global_rate_limit_recall_count",
+        "global_rate_limit_reply", "global_rate_limit_at_member",
         "keyword_reply_cooldown_seconds", "keyword_reply_recall_seconds"
       ];
       var legacyPolicy = { name: "默认全局策略", profile_id: "default", enabled: true, group_openids: [] };
@@ -979,6 +981,12 @@
     element("runtime-repeat-mute-max").value = policy.global_repeat_mute_max_seconds || 600;
     element("runtime-repeat-reply").value = policy.global_repeat_reply || "";
     element("runtime-repeat-at").checked = policy.global_repeat_at_member === true;
+    element("runtime-rate-enabled").checked = policy.global_rate_limit_enabled === true;
+    element("runtime-rate-count").value = policy.global_rate_limit_count || 8;
+    element("runtime-rate-window").value = policy.global_rate_limit_window_seconds || 10;
+    element("runtime-rate-recall-count").value = policy.global_rate_limit_recall_count || 5;
+    element("runtime-rate-reply").value = policy.global_rate_limit_reply || "";
+    element("runtime-rate-at").checked = policy.global_rate_limit_at_member === true;
     element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-confirm-provider").disabled = !element("runtime-ai-enabled").checked;
@@ -1077,7 +1085,13 @@
       global_repeat_mute_min_seconds: Number(element("runtime-repeat-mute-min").value),
       global_repeat_mute_max_seconds: Number(element("runtime-repeat-mute-max").value),
       global_repeat_reply: element("runtime-repeat-reply").value,
-      global_repeat_at_member: element("runtime-repeat-at").checked
+      global_repeat_at_member: element("runtime-repeat-at").checked,
+      global_rate_limit_enabled: element("runtime-rate-enabled").checked,
+      global_rate_limit_count: Number(element("runtime-rate-count").value),
+      global_rate_limit_window_seconds: Number(element("runtime-rate-window").value),
+      global_rate_limit_recall_count: Number(element("runtime-rate-recall-count").value),
+      global_rate_limit_reply: element("runtime-rate-reply").value,
+      global_rate_limit_at_member: element("runtime-rate-at").checked
     });
   }
 

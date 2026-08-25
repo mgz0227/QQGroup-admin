@@ -237,6 +237,15 @@
             <label class="wide"><span>复读禁言后提示</span><textarea id="runtime-repeat-reply" maxlength="1000" rows="2" placeholder="可使用 {duration} 和 {at_user}"></textarea></label>
             <label class="checkbox wide"><input id="runtime-repeat-at" type="checkbox"><span>复读处置时艾特成员</span></label>
 
+            <div class="section-title wide">全局消息频率限制</div>
+            <p class="config-note wide">按当前策略覆盖的群分别统计普通成员消息；默认关闭。达到阈值后只撤回该成员最近的指定数量消息，管理员、白名单和带命令消息不会累计。</p>
+            <label class="checkbox runtime-toggle"><input id="runtime-rate-enabled" type="checkbox"><span>启用全局消息频率限制</span></label>
+            <label><span>时间窗内消息条数</span><input id="runtime-rate-count" type="number" min="2" max="100" required></label>
+            <label><span>统计时间窗（秒）</span><input id="runtime-rate-window" type="number" min="3" max="120" required></label>
+            <label><span>触发时最多撤回条数</span><input id="runtime-rate-recall-count" type="number" min="1" max="50" required></label>
+            <label class="wide"><span>频率限制撤回回复</span><textarea id="runtime-rate-reply" maxlength="1000" rows="2" placeholder="可使用 {at_user}"></textarea></label>
+            <label class="checkbox wide"><input id="runtime-rate-at" type="checkbox"><span>频率限制撤回时艾特成员</span></label>
+
             <div class="section-title wide">B站推送</div>
             <label><span>直播轮询间隔（秒）</span><input id="runtime-live-interval" type="number" min="30" max="600" required></label>
             <label><span>动态轮询间隔（秒）</span><input id="runtime-dynamic-interval" type="number" min="60" max="3600" required></label>

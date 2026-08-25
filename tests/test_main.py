@@ -1298,6 +1298,31 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 {"group-1"},
             )
 
+    def test_global_policy_web_validation_accepts_rate_limit_fields(self):
+        profiles = module.GroupAdminWeb._global_policy_profiles(
+            [
+                {
+                    "profile_id": "rate",
+                    "name": "频率限制",
+                    "enabled": True,
+                    "group_openids": ["group-1"],
+                    "global_rate_limit_enabled": True,
+                    "global_rate_limit_count": 3,
+                    "global_rate_limit_window_seconds": 12,
+                    "global_rate_limit_recall_count": 2,
+                    "global_rate_limit_reply": "太快了 {at_user}",
+                    "global_rate_limit_at_member": False,
+                }
+            ],
+            {"group-1"},
+        )
+        profile = profiles[0]
+        self.assertTrue(profile["global_rate_limit_enabled"])
+        self.assertEqual(profile["global_rate_limit_count"], 3)
+        self.assertEqual(profile["global_rate_limit_window_seconds"], 12)
+        self.assertEqual(profile["global_rate_limit_recall_count"], 2)
+        self.assertFalse(profile["global_rate_limit_at_member"])
+
     def test_global_policy_web_surfaces_legacy_media_values(self):
         plugin, _client = self.plugin()
         plugin.config["auto_review_groups"][0].update(
@@ -1870,6 +1895,43 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         api.set_member_mutes.assert_awaited_once()
         api.recall_group_message.assert_awaited_once_with("group-1", "repeat-3")
 
+    async def test_global_rate_limit_runs_when_local_audit_is_disabled(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "rate",
+                "name": "消息频率",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_rate_limit_enabled": True,
+                "global_rate_limit_count": 2,
+                "global_rate_limit_window_seconds": 30,
+                "global_rate_limit_recall_count": 2,
+                "global_rate_limit_reply": "请稍后再发",
+                "global_rate_limit_at_member": False,
+            }
+        ]
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+        for index in range(1, 3):
+            event = FakeEvent(client, f"普通消息 {index}")
+            event.is_at_or_wake_command = False
+            event.message_obj.message_id = f"rate-{index}"
+            event.message_obj.raw_message.author = SimpleNamespace(
+                member_openid="member-1"
+            )
+            await plugin.audit_group_message(event)
+        self.assertTrue(event.stopped)
+        self.assertEqual(
+            api.recall_group_message.await_args_list,
+            [
+                unittest.mock.call("group-1", "rate-1"),
+                unittest.mock.call("group-1", "rate-2"),
+            ],
+        )
+        self.assertEqual(client.api.messages[-1]["content"], "请稍后再发")
+
     async def test_recall_reply_variable_overrides_disabled_auto_mention(self):
         plugin, client = self.plugin()
         plugin.config.update(
@@ -1997,6 +2059,30 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             worker.assert_not_awaited()
         finally:
             plugin._media_semaphore.release()
+
+    async def test_image_ocr_skips_vision_when_ai_gate_is_busy(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock()
+        await plugin._ai_semaphore.acquire()
+        await plugin._ai_semaphore.acquire()
+        try:
+            with patch.object(
+                plugin,
+                "_bounded_media_thread",
+                AsyncMock(side_effect=["", "vision-ref"]),
+            ):
+                result = await plugin._image_ocr_text(
+                    FakeEvent(client),
+                    ["https://example.test/image.png"],
+                    "vision",
+                    2,
+                    1,
+                )
+        finally:
+            plugin._ai_semaphore.release()
+            plugin._ai_semaphore.release()
+        self.assertEqual(result, "")
+        plugin.context.llm_generate.assert_not_awaited()
 
     async def test_media_timeout_keeps_cpu_gate_until_worker_finishes(self):
         plugin, _client = self.plugin()

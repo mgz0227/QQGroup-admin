@@ -185,6 +185,38 @@ class ModerationWindowsTest(unittest.TestCase):
             ["m3"],
         )
 
+    def test_rate_window_recalls_bounded_recent_member_messages(self):
+        state = ModerationWindows()
+        self.assertEqual(
+            state.add_rate(
+                "g", "u", "m1", threshold=3, window=10, recall_limit=2, now=1
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_rate(
+                "g", "u", "m2", threshold=3, window=10, recall_limit=2, now=2
+            ),
+            [],
+        )
+        self.assertEqual(
+            state.add_rate(
+                "g", "u", "m3", threshold=3, window=10, recall_limit=2, now=3
+            ),
+            ["m2", "m3"],
+        )
+        self.assertEqual(state.rates, {})
+
+        state.add_rate("g", "u", "old", threshold=2, window=3, now=1)
+        self.assertEqual(
+            state.add_rate("g", "u", "new", threshold=2, window=3, now=5), []
+        )
+        state.add_rate("g", "u", "next", threshold=2, window=3, now=6)
+        self.assertEqual(state.rates, {})
+        state.add_rate("g", "u", "kept", threshold=2, window=10, now=10)
+        state.break_rate("g", "u")
+        self.assertEqual(state.rates, {})
+
 
 if __name__ == "__main__":
     unittest.main()
