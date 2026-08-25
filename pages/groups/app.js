@@ -895,6 +895,11 @@
         "global_ai_reject_reply", "global_ai_reject_at_member", "global_image_reject_keywords",
         "global_image_reject_reply", "global_image_reject_at_member", "global_image_ocr_enabled",
         "global_image_ocr_provider_id", "global_image_ocr_timeout_seconds", "global_image_ocr_max_images",
+        "global_image_spam_enabled", "global_image_spam_count", "global_image_spam_window_seconds",
+        "global_image_spam_group_min_members", "global_image_spam_recall_count", "global_image_spam_reply",
+        "global_image_spam_at_member", "global_repeat_review_enabled", "global_repeat_count",
+        "global_repeat_window_seconds", "global_repeat_mute_min_seconds", "global_repeat_mute_max_seconds",
+        "global_repeat_reply", "global_repeat_at_member",
         "keyword_reply_cooldown_seconds", "keyword_reply_recall_seconds"
       ];
       var legacyPolicy = { name: "默认全局策略", profile_id: "default", enabled: true, group_openids: [] };
@@ -960,6 +965,20 @@
     );
     element("runtime-image-ocr-timeout").value = policy.global_image_ocr_timeout_seconds || 4;
     element("runtime-image-ocr-max-images").value = policy.global_image_ocr_max_images || 1;
+    element("runtime-image-spam-enabled").checked = policy.global_image_spam_enabled === true;
+    element("runtime-image-spam-count").value = policy.global_image_spam_count || 5;
+    element("runtime-image-spam-window").value = policy.global_image_spam_window_seconds || 15;
+    element("runtime-image-spam-group-min-members").value = policy.global_image_spam_group_min_members || 2;
+    element("runtime-image-spam-recall-count").value = policy.global_image_spam_recall_count || 5;
+    element("runtime-image-spam-reply").value = policy.global_image_spam_reply || "";
+    element("runtime-image-spam-at").checked = policy.global_image_spam_at_member === true;
+    element("runtime-repeat-enabled").checked = policy.global_repeat_review_enabled === true;
+    element("runtime-repeat-count").value = policy.global_repeat_count || 4;
+    element("runtime-repeat-window").value = policy.global_repeat_window_seconds || 30;
+    element("runtime-repeat-mute-min").value = policy.global_repeat_mute_min_seconds || 60;
+    element("runtime-repeat-mute-max").value = policy.global_repeat_mute_max_seconds || 600;
+    element("runtime-repeat-reply").value = policy.global_repeat_reply || "";
+    element("runtime-repeat-at").checked = policy.global_repeat_at_member === true;
     element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-confirm-provider").disabled = !element("runtime-ai-enabled").checked;
@@ -1044,7 +1063,21 @@
       global_image_ocr_enabled: element("runtime-image-ocr-enabled").checked,
       global_image_ocr_provider_id: element("runtime-image-ocr-provider").value,
       global_image_ocr_timeout_seconds: Number(element("runtime-image-ocr-timeout").value),
-      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value)
+      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value),
+      global_image_spam_enabled: element("runtime-image-spam-enabled").checked,
+      global_image_spam_count: Number(element("runtime-image-spam-count").value),
+      global_image_spam_window_seconds: Number(element("runtime-image-spam-window").value),
+      global_image_spam_group_min_members: Number(element("runtime-image-spam-group-min-members").value),
+      global_image_spam_recall_count: Number(element("runtime-image-spam-recall-count").value),
+      global_image_spam_reply: element("runtime-image-spam-reply").value,
+      global_image_spam_at_member: element("runtime-image-spam-at").checked,
+      global_repeat_review_enabled: element("runtime-repeat-enabled").checked,
+      global_repeat_count: Number(element("runtime-repeat-count").value),
+      global_repeat_window_seconds: Number(element("runtime-repeat-window").value),
+      global_repeat_mute_min_seconds: Number(element("runtime-repeat-mute-min").value),
+      global_repeat_mute_max_seconds: Number(element("runtime-repeat-mute-max").value),
+      global_repeat_reply: element("runtime-repeat-reply").value,
+      global_repeat_at_member: element("runtime-repeat-at").checked
     });
   }
 
@@ -1447,20 +1480,6 @@
     element("image-reject-reply").value = group.image_reject_reply || "";
     element("image-reject-at").checked = group.image_reject_at_member === true;
     renderKeywordReplies(group.keyword_replies);
-    element("image-spam-enabled").checked = group.image_spam_enabled === true;
-    element("image-spam-count").value = group.image_spam_count || 5;
-    element("image-spam-window").value = group.image_spam_window_seconds || 15;
-    element("image-spam-group-min-members").value = group.image_spam_group_min_members || 2;
-    element("image-spam-recall-count").value = group.image_spam_recall_count || 5;
-    element("image-spam-reply").value = group.image_spam_reply || "";
-    element("image-spam-at").checked = group.image_spam_at_member === true;
-    element("repeat-review-enabled").checked = group.repeat_review_enabled === true;
-    element("repeat-count").value = group.repeat_count || 4;
-    element("repeat-window").value = group.repeat_window_seconds || 30;
-    element("repeat-mute-min").value = group.repeat_mute_min_seconds || 60;
-    element("repeat-mute-max").value = group.repeat_mute_max_seconds || 600;
-    element("repeat-reply").value = group.repeat_reply || "";
-    element("repeat-at").checked = group.repeat_at_member === true;
     element("bilibili-uids").value = group.bilibili_uids || "";
     element("bilibili-dynamic-enabled").checked = group.bilibili_dynamic_enabled === true;
     element("bilibili-live-enabled").checked = group.bilibili_live_enabled === true;
@@ -1498,20 +1517,6 @@
       image_reject_reply: element("image-reject-reply").value,
       image_reject_at_member: element("image-reject-at").checked,
       keyword_replies: readKeywordReplies(),
-      image_spam_enabled: element("image-spam-enabled").checked,
-      image_spam_count: Number(element("image-spam-count").value),
-      image_spam_window_seconds: Number(element("image-spam-window").value),
-      image_spam_group_min_members: Number(element("image-spam-group-min-members").value),
-      image_spam_recall_count: Number(element("image-spam-recall-count").value),
-      image_spam_reply: element("image-spam-reply").value,
-      image_spam_at_member: element("image-spam-at").checked,
-      repeat_review_enabled: element("repeat-review-enabled").checked,
-      repeat_count: Number(element("repeat-count").value),
-      repeat_window_seconds: Number(element("repeat-window").value),
-      repeat_mute_min_seconds: Number(element("repeat-mute-min").value),
-      repeat_mute_max_seconds: Number(element("repeat-mute-max").value),
-      repeat_reply: element("repeat-reply").value,
-      repeat_at_member: element("repeat-at").checked,
       bilibili_uids: element("bilibili-uids").value,
       bilibili_dynamic_enabled: element("bilibili-dynamic-enabled").checked,
       bilibili_live_enabled: element("bilibili-live-enabled").checked
@@ -1551,12 +1556,8 @@
       ["batch-moderation-exempt-admins", "moderation_exempt_admins", true],
       ["batch-blacklist-at", "blacklist_at_member", true],
       ["batch-message-at", "message_reject_at_member", true],
-      ["batch-image-spam-enabled", "image_spam_enabled", true],
       ["batch-image-keyword-enabled", "image_keyword_review_enabled", true],
       ["batch-image-at", "image_reject_at_member", true],
-      ["batch-image-spam-at", "image_spam_at_member", true],
-      ["batch-repeat-review-enabled", "repeat_review_enabled", true],
-      ["batch-repeat-at", "repeat_at_member", true],
       ["batch-bilibili-dynamic-enabled", "bilibili_dynamic_enabled", true],
       ["batch-bilibili-live-enabled", "bilibili_live_enabled", true]
     ].forEach(function (item) {

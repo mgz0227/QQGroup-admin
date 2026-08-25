@@ -205,9 +205,40 @@ GLOBAL_POLICY_DEFAULTS = {
     GLOBAL_IMAGE_OCR_PROVIDER_KEY: "",
     GLOBAL_IMAGE_OCR_TIMEOUT_KEY: IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS,
     GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY: IMAGE_OCR_DEFAULT_MAX_IMAGES,
+    "global_image_spam_enabled": False,
+    "global_image_spam_count": 5,
+    "global_image_spam_window_seconds": 15,
+    "global_image_spam_group_min_members": 2,
+    "global_image_spam_recall_count": 5,
+    "global_image_spam_reply": "检测到连续发送图片或表情，相关消息已撤回。",
+    "global_image_spam_at_member": True,
+    "global_repeat_review_enabled": False,
+    "global_repeat_count": 4,
+    "global_repeat_window_seconds": 30,
+    "global_repeat_mute_min_seconds": 60,
+    "global_repeat_mute_max_seconds": 600,
+    "global_repeat_reply": "检测到集中复读，已随机禁言一名参与者。",
+    "global_repeat_at_member": True,
     "keyword_reply_cooldown_seconds": 0,
     "keyword_reply_recall_seconds": 0,
 }
+
+GLOBAL_MEDIA_POLICY_KEYS = (
+    "global_image_spam_enabled",
+    "global_image_spam_count",
+    "global_image_spam_window_seconds",
+    "global_image_spam_group_min_members",
+    "global_image_spam_recall_count",
+    "global_image_spam_reply",
+    "global_image_spam_at_member",
+    "global_repeat_review_enabled",
+    "global_repeat_count",
+    "global_repeat_window_seconds",
+    "global_repeat_mute_min_seconds",
+    "global_repeat_mute_max_seconds",
+    "global_repeat_reply",
+    "global_repeat_at_member",
+)
 
 
 def normalize_provider_ids(
@@ -1714,8 +1745,13 @@ class QQGroupAdmin(Star):
             "enabled": True,
             "group_openids": [],
         }
-        for key, default in GLOBAL_POLICY_DEFAULTS.items():
-            value = self.config.get(key, default)
+        # Keep absent keys absent so the moderation layer can preserve legacy
+        # per-group image/repeat settings until the user explicitly saves a
+        # new scoped policy in WebUI.
+        for key in GLOBAL_POLICY_DEFAULTS:
+            if key not in self.config:
+                continue
+            value = self.config.get(key)
             policy[key] = list(value) if isinstance(value, list) else value
         return policy
 
@@ -1745,7 +1781,41 @@ class QQGroupAdmin(Star):
             if not groups or group_openid in groups:
                 policy[key] = value
                 return
-        raise ValueError("当前群未匹配任何全局策略，请先在 WebUI 选择覆盖群")
+        if len(policies) >= 50:
+            raise ValueError("全局策略已达到 50 套上限，请先在 WebUI 合并策略")
+        template = next(
+            (policy for policy in policies if bool(policy.get("enabled", True))),
+            policies[0] if policies else {},
+        )
+        profile_id = re.sub(r"[^A-Za-z0-9._:-]", "-", group_openid)[:48]
+        profile_id = f"group-{profile_id or 'default'}"
+        used_ids = {
+            str(policy.get("profile_id") or "") for policy in policies
+        }
+        suffix = 2
+        candidate = profile_id
+        while candidate in used_ids:
+            candidate = f"{profile_id}-{suffix}"
+            suffix += 1
+        created = {
+            key_name: (list(item) if isinstance(item, list) else item)
+            for key_name, item in template.items()
+            if key_name in GLOBAL_POLICY_DEFAULTS
+        }
+        created.update(
+            {
+                "__template_key": "global_policy",
+                "profile_id": candidate,
+                "name": f"群内设置策略 {group_openid[:8]}",
+                "enabled": True,
+                "group_openids": [group_openid],
+                key: value,
+            }
+        )
+        for media_key in GLOBAL_MEDIA_POLICY_KEYS:
+            created.setdefault(media_key, GLOBAL_POLICY_DEFAULTS[media_key])
+        policies.append(created)
+        self.config[GLOBAL_POLICIES_KEY] = policies
 
     @staticmethod
     def _policy_value(policy: dict[str, Any], key: str) -> Any:
@@ -1804,16 +1874,34 @@ class QQGroupAdmin(Star):
 
     def _moderation_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         entry = entry or {}
+        configured_policies = self._configured_global_policies()
         policy = self._global_policy_for_group(str(entry.get("group_openid") or ""))
         def configured_text(source: dict[str, Any], key: str, default: str) -> str:
             value = source.get(key, default)
             return default if value is None else str(value)
 
+        def policy_or_legacy(key: str, legacy_key: str, default: Any) -> Any:
+            if key in policy:
+                return self._policy_value(policy, key)
+            if configured_policies and not policy:
+                return default
+            return entry.get(legacy_key, default)
+
         minimum = self._bounded_int(
-            entry.get("repeat_mute_min_seconds"), 60, 1, 2_592_000
+            policy_or_legacy(
+                "global_repeat_mute_min_seconds", "repeat_mute_min_seconds", 60
+            ),
+            60,
+            1,
+            2_592_000,
         )
         maximum = self._bounded_int(
-            entry.get("repeat_mute_max_seconds"), 600, minimum, 2_592_000
+            policy_or_legacy(
+                "global_repeat_mute_max_seconds", "repeat_mute_max_seconds", 600
+            ),
+            600,
+            minimum,
+            2_592_000,
         )
         return {
             "enabled": bool(entry.get("moderation_enabled", False)),
@@ -1962,40 +2050,90 @@ class QQGroupAdmin(Star):
                 0,
                 120,
             ),
-            "image_enabled": bool(entry.get("image_spam_enabled", False)),
-            "image_count": self._bounded_int(entry.get("image_spam_count"), 5, 2, 20),
+            "image_enabled": bool(
+                policy_or_legacy(
+                    "global_image_spam_enabled", "image_spam_enabled", False
+                )
+            ),
+            "image_count": self._bounded_int(
+                policy_or_legacy("global_image_spam_count", "image_spam_count", 5),
+                5,
+                2,
+                20,
+            ),
             "image_window": self._bounded_int(
-                entry.get("image_spam_window_seconds"), 15, 3, 120
+                policy_or_legacy(
+                    "global_image_spam_window_seconds",
+                    "image_spam_window_seconds",
+                    15,
+                ),
+                15,
+                3,
+                120,
             ),
             "image_group_min_members": self._bounded_int(
-                entry.get("image_spam_group_min_members"), 2, 2, 10
+                policy_or_legacy(
+                    "global_image_spam_group_min_members",
+                    "image_spam_group_min_members",
+                    2,
+                ),
+                2,
+                2,
+                10,
             ),
             "image_recall_count": self._bounded_int(
-                entry.get("image_spam_recall_count"), 5, 1, 50
+                policy_or_legacy(
+                    "global_image_spam_recall_count", "image_spam_recall_count", 5
+                ),
+                5,
+                1,
+                50,
             ),
             "image_spam_reply": str(
-                configured_text(
-                    entry,
+                policy_or_legacy(
+                    "global_image_spam_reply",
                     "image_spam_reply",
                     "检测到连续发送图片或表情，相关消息已撤回。",
                 )
             ),
-            "image_spam_at": bool(entry.get("image_spam_at_member", True)),
-            "repeat_enabled": bool(entry.get("repeat_review_enabled", False)),
-            "repeat_count": self._bounded_int(entry.get("repeat_count"), 4, 3, 20),
+            "image_spam_at": bool(
+                policy_or_legacy(
+                    "global_image_spam_at_member", "image_spam_at_member", True
+                )
+            ),
+            "repeat_enabled": bool(
+                policy_or_legacy(
+                    "global_repeat_review_enabled", "repeat_review_enabled", False
+                )
+            ),
+            "repeat_count": self._bounded_int(
+                policy_or_legacy("global_repeat_count", "repeat_count", 4),
+                4,
+                3,
+                20,
+            ),
             "repeat_window": self._bounded_int(
-                entry.get("repeat_window_seconds"), 30, 5, 120
+                policy_or_legacy(
+                    "global_repeat_window_seconds", "repeat_window_seconds", 30
+                ),
+                30,
+                5,
+                120,
             ),
             "repeat_mute_min": minimum,
             "repeat_mute_max": maximum,
             "repeat_reply": str(
-                configured_text(
-                    entry,
+                policy_or_legacy(
+                    "global_repeat_reply",
                     "repeat_reply",
                     "检测到集中复读，已随机禁言一名参与者。",
                 )
             ),
-            "repeat_at": bool(entry.get("repeat_at_member", True)),
+            "repeat_at": bool(
+                policy_or_legacy(
+                    "global_repeat_at_member", "repeat_at_member", True
+                )
+            ),
         }
 
     @staticmethod
@@ -3544,6 +3682,23 @@ class QQGroupAdmin(Star):
         global_ai_enabled = bool(
             entry and entry.get("platform_id") and settings["ai_enabled"]
         )
+        global_keyword_enabled = bool(
+            entry
+            and entry.get("platform_id")
+            and settings["global_keywords"]
+        )
+        global_image_keyword_enabled = bool(
+            entry
+            and entry.get("platform_id")
+            and settings["image_ocr_enabled"]
+            and settings["global_image_keywords"]
+        )
+        global_image_spam_enabled = bool(
+            entry and entry.get("platform_id") and settings["image_enabled"]
+        )
+        global_repeat_enabled = bool(
+            entry and entry.get("platform_id") and settings["repeat_enabled"]
+        )
         admin_exempt = settings["exempt_admins"] and role in GROUP_ADMIN_ROLES
         global_blacklist_match = self._member_list_matches(
             event,
@@ -3627,18 +3782,26 @@ class QQGroupAdmin(Star):
                 self._moderation.remember(delivery_key, True)
             return
         if (
-            (not local_review_enabled and not global_ai_enabled)
+            (
+                not local_review_enabled
+                and not global_ai_enabled
+                and not global_keyword_enabled
+                and not global_image_keyword_enabled
+                and not global_image_spam_enabled
+                and not global_repeat_enabled
+            )
             or admin_exempt
             or member_whitelisted
         ):
             self._moderation.break_repeat(group_openid)
-            if settings["image_enabled"]:
+            if global_image_spam_enabled:
                 self._moderation.break_image_chain(group_openid, member_openid)
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
-        if not local_review_enabled:
+        if not local_review_enabled and not global_repeat_enabled:
             self._moderation.break_repeat(group_openid)
+        if not local_review_enabled and not global_image_spam_enabled:
             self._moderation.break_image_chain(group_openid, member_openid)
 
         images = self._image_urls(event)
@@ -3650,9 +3813,9 @@ class QQGroupAdmin(Star):
         ai_record_only = False
         recall_ids: list[str] = []
         ocr_text = ""
-        if local_review_enabled and settings["image_enabled"] and image_count == 0:
+        if global_image_spam_enabled and image_count == 0:
             self._moderation.break_image_chain(group_openid, member_openid)
-        if local_review_enabled and matched_keyword(
+        if global_keyword_enabled and matched_keyword(
             text, settings["global_keywords"]
         ):
             reason = "消息命中全局禁止关键词，已撤回。"
@@ -3662,9 +3825,17 @@ class QQGroupAdmin(Star):
             reason = "消息命中本群禁止关键词，已撤回。"
             warn_text = settings["keyword_reply"]
             warn_at_member = settings["keyword_at"]
-        elif local_review_enabled and settings["image_ocr_enabled"] and image_count and (
-            settings["global_image_keywords"]
-            or (settings["image_keyword_enabled"] and settings["image_keywords"])
+        elif (
+            image_count
+            and settings["image_ocr_enabled"]
+            and (
+                global_image_keyword_enabled
+                or (
+                    local_review_enabled
+                    and settings["image_keyword_enabled"]
+                    and settings["image_keywords"]
+                )
+            )
         ):
             ocr_text = embedded_image_text(event)
             embedded_match = matched_keyword(
@@ -3691,7 +3862,7 @@ class QQGroupAdmin(Star):
                 reason = "图片文字命中本群禁止关键词，已撤回。"
                 warn_text = settings["image_keyword_reply"]
                 warn_at_member = settings["image_keyword_at"]
-        if not reason and local_review_enabled and settings["image_enabled"]:
+        if not reason and global_image_spam_enabled:
             image_recall_ids = self._moderation.add_images(
                 group_openid,
                 member_openid,
@@ -3722,15 +3893,14 @@ class QQGroupAdmin(Star):
         if (
             reason
             and not recall_ids
-            and local_review_enabled
-            and settings["image_enabled"]
+            and global_image_spam_enabled
         ):
             self._moderation.break_image_chain(group_openid, member_openid)
 
         repeat_members: list[str] = []
         if reason:
             self._moderation.break_repeat(group_openid)
-        elif local_review_enabled and settings["repeat_enabled"]:
+        elif global_repeat_enabled:
             signature = "" if pure_image_count else normalize_message(text)
             repeat_members = self._moderation.add_repeat(
                 group_openid,
@@ -5086,10 +5256,6 @@ class QQGroupAdmin(Star):
             "approve": ("fallback_action", "approve"),
             "mod_on": ("moderation_enabled", True),
             "mod_off": ("moderation_enabled", False),
-            "image_on": ("image_spam_enabled", True),
-            "image_off": ("image_spam_enabled", False),
-            "repeat_on": ("repeat_review_enabled", True),
-            "repeat_off": ("repeat_review_enabled", False),
             "verify_on": ("fallback_human_verify_enabled", True),
             "verify_off": ("fallback_human_verify_enabled", False),
             "bili_dynamic_on": ("bilibili_dynamic_enabled", True),
@@ -5109,6 +5275,17 @@ class QQGroupAdmin(Star):
                 entry["uid_exists_auto_approve"] = False
             elif action == "direct_on":
                 entry["uid_check_enabled"] = True
+            self.config.save_config()
+            return
+        if action in {"image_on", "image_off", "repeat_on", "repeat_off"}:
+            policy_keys = {
+                "image_on": ("global_image_spam_enabled", True),
+                "image_off": ("global_image_spam_enabled", False),
+                "repeat_on": ("global_repeat_review_enabled", True),
+                "repeat_off": ("global_repeat_review_enabled", False),
+            }
+            key, value = policy_keys[action]
+            self._set_global_policy_value_for_group(group_openid, key, value)
             self.config.save_config()
             return
         if action in {"ai_on", "ai_off"}:
@@ -5339,6 +5516,27 @@ class QQGroupAdmin(Star):
         configured = self._configured_global_policies()
         if not configured:
             configured = [self._legacy_global_policy()]
+        group_entries = [
+            entry
+            for entry in (self.config.get("auto_review_groups") or [])
+            if isinstance(entry, dict) and str(entry.get("group_openid") or "").strip()
+        ]
+        legacy_media_fields = {
+            "global_image_spam_enabled": "image_spam_enabled",
+            "global_image_spam_count": "image_spam_count",
+            "global_image_spam_window_seconds": "image_spam_window_seconds",
+            "global_image_spam_group_min_members": "image_spam_group_min_members",
+            "global_image_spam_recall_count": "image_spam_recall_count",
+            "global_image_spam_reply": "image_spam_reply",
+            "global_image_spam_at_member": "image_spam_at_member",
+            "global_repeat_review_enabled": "repeat_review_enabled",
+            "global_repeat_count": "repeat_count",
+            "global_repeat_window_seconds": "repeat_window_seconds",
+            "global_repeat_mute_min_seconds": "repeat_mute_min_seconds",
+            "global_repeat_mute_max_seconds": "repeat_mute_max_seconds",
+            "global_repeat_reply": "repeat_reply",
+            "global_repeat_at_member": "repeat_at_member",
+        }
         profiles = []
         for index, raw in enumerate(configured, 1):
             profile = {
@@ -5363,6 +5561,37 @@ class QQGroupAdmin(Star):
             profile["name"] = str(raw.get("name") or f"全局策略 {index}").strip()[:80]
             profile["enabled"] = bool(raw.get("enabled", True))
             profile["group_openids"] = self._policy_group_openids(raw)
+            legacy_media_values: dict[str, Any] = {}
+            # v2.16 profiles can lack the media fields while the old group
+            # entries still contain them. Surface uniform legacy values so
+            # the new scoped editor reflects the effective runtime behavior.
+            scoped_groups = set(profile["group_openids"])
+            relevant_entries = (
+                [
+                    entry
+                    for entry in group_entries
+                    if not scoped_groups
+                    or str(entry.get("group_openid") or "") in scoped_groups
+                ]
+            )
+            for global_key, legacy_key in legacy_media_fields.items():
+                if global_key in raw or not relevant_entries:
+                    continue
+                values = [
+                    entry[legacy_key]
+                    for entry in relevant_entries
+                    if legacy_key in entry
+                ]
+                if values and all(value == values[0] for value in values[1:]):
+                    profile[global_key] = values[0]
+                    legacy_media_values[global_key] = values[0]
+                elif values:
+                    # Mixed legacy values are shown as the safe default. Keep
+                    # the displayed value as a round-trip marker so an
+                    # unchanged WebUI save does not silently flatten them.
+                    legacy_media_values[global_key] = profile[global_key]
+            if legacy_media_values:
+                profile["_legacy_media_values"] = legacy_media_values
             profiles.append(profile)
         return profiles
 
@@ -5383,16 +5612,33 @@ class QQGroupAdmin(Star):
     async def web_save_global_policies(
         self, settings: dict[str, Any]
     ) -> dict[str, Any]:
+        existing = {
+            str(item.get("profile_id") or ""): item
+            for item in self._configured_global_policies()
+            if str(item.get("profile_id") or "")
+        }
         profiles = []
         for index, raw in enumerate(settings.get("profiles", []), 1):
+            profile_id = str(raw.get("profile_id") or f"profile-{index}").strip()
+            existing_raw = existing.get(profile_id, {})
+            legacy_values = raw.get("_legacy_media_values")
+            if not isinstance(legacy_values, dict):
+                legacy_values = {}
             profile = {
                 "__template_key": "global_policy",
-                "profile_id": str(raw.get("profile_id") or f"profile-{index}").strip(),
+                "profile_id": profile_id,
                 "name": str(raw.get("name") or f"全局策略 {index}").strip(),
                 "enabled": bool(raw.get("enabled", True)),
                 "group_openids": list(raw.get("group_openids") or []),
             }
             for key in GLOBAL_POLICY_DEFAULTS:
+                if (
+                    key in GLOBAL_MEDIA_POLICY_KEYS
+                    and key in legacy_values
+                    and key not in existing_raw
+                    and raw.get(key) == legacy_values[key]
+                ):
+                    continue
                 value = raw.get(key, GLOBAL_POLICY_DEFAULTS[key])
                 profile[key] = list(value) if isinstance(value, list) else value
             profiles.append(profile)
@@ -5717,28 +5963,43 @@ class QQGroupAdmin(Star):
                 "image_reject_keywords": str(payload["image_reject_keywords"]),
                 "image_reject_reply": str(payload["image_reject_reply"]),
                 "image_reject_at_member": bool(payload["image_reject_at_member"]),
-                "image_spam_enabled": bool(payload["image_spam_enabled"]),
-                "image_spam_count": int(payload["image_spam_count"]),
-                "image_spam_window_seconds": int(payload["image_spam_window_seconds"]),
-                "image_spam_group_min_members": int(
-                    payload["image_spam_group_min_members"]
-                ),
-                "image_spam_recall_count": int(payload["image_spam_recall_count"]),
-                "image_spam_reply": str(payload["image_spam_reply"]),
-                "image_spam_at_member": bool(payload["image_spam_at_member"]),
-                "repeat_review_enabled": bool(payload["repeat_review_enabled"]),
-                "repeat_count": int(payload["repeat_count"]),
-                "repeat_window_seconds": int(payload["repeat_window_seconds"]),
-                "repeat_mute_min_seconds": int(payload["repeat_mute_min_seconds"]),
-                "repeat_mute_max_seconds": int(payload["repeat_mute_max_seconds"]),
-                "repeat_reply": str(payload["repeat_reply"]),
-                "repeat_at_member": bool(payload["repeat_at_member"]),
                 "bilibili_uids": str(payload["bilibili_uids"]),
                 "bilibili_dynamic_enabled": bool(payload["bilibili_dynamic_enabled"]),
                 "bilibili_live_enabled": bool(payload["bilibili_live_enabled"]),
                 "keyword_replies": list(payload["keyword_replies"]),
             }
         )
+        if payload.get("_legacy_media_fields_present", True):
+            entry.update(
+                {
+                    "image_spam_enabled": bool(payload["image_spam_enabled"]),
+                    "image_spam_count": int(payload["image_spam_count"]),
+                    "image_spam_window_seconds": int(
+                        payload["image_spam_window_seconds"]
+                    ),
+                    "image_spam_group_min_members": int(
+                        payload["image_spam_group_min_members"]
+                    ),
+                    "image_spam_recall_count": int(
+                        payload["image_spam_recall_count"]
+                    ),
+                    "image_spam_reply": str(payload["image_spam_reply"]),
+                    "image_spam_at_member": bool(payload["image_spam_at_member"]),
+                    "repeat_review_enabled": bool(payload["repeat_review_enabled"]),
+                    "repeat_count": int(payload["repeat_count"]),
+                    "repeat_window_seconds": int(
+                        payload["repeat_window_seconds"]
+                    ),
+                    "repeat_mute_min_seconds": int(
+                        payload["repeat_mute_min_seconds"]
+                    ),
+                    "repeat_mute_max_seconds": int(
+                        payload["repeat_mute_max_seconds"]
+                    ),
+                    "repeat_reply": str(payload["repeat_reply"]),
+                    "repeat_at_member": bool(payload["repeat_at_member"]),
+                }
+            )
 
     def _identity_items(
         self,

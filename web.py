@@ -53,9 +53,39 @@ GLOBAL_POLICY_FIELDS = (
     "global_image_ocr_provider_id",
     "global_image_ocr_timeout_seconds",
     "global_image_ocr_max_images",
+    "global_image_spam_enabled",
+    "global_image_spam_count",
+    "global_image_spam_window_seconds",
+    "global_image_spam_group_min_members",
+    "global_image_spam_recall_count",
+    "global_image_spam_reply",
+    "global_image_spam_at_member",
+    "global_repeat_review_enabled",
+    "global_repeat_count",
+    "global_repeat_window_seconds",
+    "global_repeat_mute_min_seconds",
+    "global_repeat_mute_max_seconds",
+    "global_repeat_reply",
+    "global_repeat_at_member",
     "keyword_reply_cooldown_seconds",
     "keyword_reply_recall_seconds",
 )
+GLOBAL_MEDIA_POLICY_KEYS = {
+    "global_image_spam_enabled",
+    "global_image_spam_count",
+    "global_image_spam_window_seconds",
+    "global_image_spam_group_min_members",
+    "global_image_spam_recall_count",
+    "global_image_spam_reply",
+    "global_image_spam_at_member",
+    "global_repeat_review_enabled",
+    "global_repeat_count",
+    "global_repeat_window_seconds",
+    "global_repeat_mute_min_seconds",
+    "global_repeat_mute_max_seconds",
+    "global_repeat_reply",
+    "global_repeat_at_member",
+}
 VIOLATION_REVIEW_LABELS = {
     "pending": "待复核",
     "confirmed": "确认违规",
@@ -516,6 +546,14 @@ class GroupAdminWeb:
             profile.update(
                 {key: validated[key] for key in GLOBAL_POLICY_FIELDS if key in validated}
             )
+            legacy_values = item.get("_legacy_media_values", {})
+            if isinstance(legacy_values, dict):
+                profile["_legacy_media_values"] = {
+                    key: value
+                    for key, value in legacy_values.items()
+                    if key in GLOBAL_MEDIA_POLICY_KEYS
+                    and isinstance(value, (str, int, float, bool))
+                }
             profiles.append(profile)
         return profiles
 
@@ -627,6 +665,24 @@ class GroupAdminWeb:
                 True,
                 "全局图片关键词撤回艾特",
             ),
+            "global_image_spam_reply": cls._text(
+                payload.get(
+                    "global_image_spam_reply",
+                    "检测到连续发送图片或表情，相关消息已撤回。",
+                ),
+                "全局连续发图撤回回复",
+                1_000,
+                multiline=True,
+            ),
+            "global_repeat_reply": cls._text(
+                payload.get(
+                    "global_repeat_reply",
+                    "检测到集中复读，已随机禁言一名参与者。",
+                ),
+                "全局复读处置回复",
+                1_000,
+                multiline=True,
+            ),
             "global_ai_reject_reply": cls._text(
                 payload.get("global_ai_reject_reply", ""),
                 "AI 撤回回复",
@@ -731,15 +787,82 @@ class GroupAdminWeb:
                 3,
                 "单条 OCR 图片数",
             ),
+            (
+                "global_image_spam_count",
+                5,
+                2,
+                20,
+                "全局连续图片数量",
+            ),
+            (
+                "global_image_spam_window_seconds",
+                15,
+                3,
+                120,
+                "全局发图时间窗",
+            ),
+            (
+                "global_image_spam_group_min_members",
+                2,
+                2,
+                10,
+                "全局跨成员触发人数",
+            ),
+            (
+                "global_image_spam_recall_count",
+                5,
+                1,
+                50,
+                "全局连续发图撤回数量",
+            ),
+            (
+                "global_repeat_count",
+                4,
+                3,
+                20,
+                "全局复读触发次数",
+            ),
+            (
+                "global_repeat_window_seconds",
+                30,
+                5,
+                120,
+                "全局复读时间窗",
+            ),
+            (
+                "global_repeat_mute_min_seconds",
+                60,
+                1,
+                2_592_000,
+                "全局复读最短禁言",
+            ),
+            (
+                "global_repeat_mute_max_seconds",
+                600,
+                1,
+                2_592_000,
+                "全局复读最长禁言",
+            ),
         ):
             if key in payload:
                 settings[key] = cls._int(payload, key, default, minimum, maximum, label)
         for key, label in (
             ("global_ai_review_images_enabled", "AI 图片审核开关"),
             ("global_image_ocr_enabled", "图片 OCR 开关"),
+            ("global_image_spam_enabled", "全局连续发图开关"),
+            ("global_image_spam_at_member", "全局连续发图艾特"),
+            ("global_repeat_review_enabled", "全局复读开关"),
+            ("global_repeat_at_member", "全局复读艾特"),
         ):
             if key in payload:
                 settings[key] = cls._bool(payload, key, False, label)
+        if (
+            "global_repeat_mute_min_seconds" in settings
+            and "global_repeat_mute_max_seconds" in settings
+            and settings["global_repeat_mute_max_seconds"]
+            < settings["global_repeat_mute_min_seconds"]
+        ):
+            raise ValueError("全局复读最长禁言不能小于最短禁言")
         if "global_image_ocr_provider_id" in payload:
             settings["global_image_ocr_provider_id"] = cls._text(
                 payload["global_image_ocr_provider_id"], "图片 OCR 模型", 256
@@ -781,6 +904,24 @@ class GroupAdminWeb:
     def _validated_save(cls, payload: Any) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
+
+        legacy_media_fields = (
+            "image_spam_enabled",
+            "image_spam_count",
+            "image_spam_window_seconds",
+            "image_spam_group_min_members",
+            "image_spam_recall_count",
+            "image_spam_reply",
+            "image_spam_at_member",
+            "repeat_review_enabled",
+            "repeat_count",
+            "repeat_window_seconds",
+            "repeat_mute_min_seconds",
+            "repeat_mute_max_seconds",
+            "repeat_reply",
+            "repeat_at_member",
+        )
+        legacy_media_present = any(key in payload for key in legacy_media_fields)
 
         group_openid = cls._text(
             payload.get("group_openid"), "群 OpenID", 128, required=True
@@ -1024,6 +1165,9 @@ class GroupAdminWeb:
             "repeat_at_member": cls._bool(
                 payload, "repeat_at_member", True, "复读处置艾特"
             ),
+            # New WebUI versions move these controls to scoped global policies.
+            # Preserve legacy per-group values when a basic form omits them.
+            "_legacy_media_fields_present": legacy_media_present,
             "bilibili_uids": bili_uids,
             "bilibili_dynamic_enabled": bili_dynamic_enabled,
             "bilibili_live_enabled": bili_live_enabled,

@@ -220,6 +220,23 @@
             <label><span>OCR 超时（秒）</span><input id="runtime-image-ocr-timeout" type="number" min="2" max="30" required></label>
             <label><span>单条最多 OCR 图片数</span><input id="runtime-image-ocr-max-images" type="number" min="1" max="3" required></label>
 
+            <div class="section-title wide">全局连续发图与复读</div>
+            <p class="config-note wide">按当前策略覆盖的已绑定群统一生效；连续发图和复读不再受单群“消息审核”开关限制。每套策略可单独设置阈值、撤回数量、随机禁言区间和回复。</p>
+            <label class="checkbox runtime-toggle"><input id="runtime-image-spam-enabled" type="checkbox"><span>启用全局连续发图检测</span></label>
+            <label><span>连续图片数量</span><input id="runtime-image-spam-count" type="number" min="2" max="20" required></label>
+            <label><span>发图时间窗（秒）</span><input id="runtime-image-spam-window" type="number" min="3" max="120" required></label>
+            <label><span>跨成员触发人数</span><input id="runtime-image-spam-group-min-members" type="number" min="2" max="10" required></label>
+            <label><span>最多撤回图片数</span><input id="runtime-image-spam-recall-count" type="number" min="1" max="50" required></label>
+            <label class="wide"><span>连续发图撤回回复</span><textarea id="runtime-image-spam-reply" maxlength="1000" rows="2"></textarea></label>
+            <label class="checkbox wide"><input id="runtime-image-spam-at" type="checkbox"><span>连续发图撤回时艾特成员</span></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-repeat-enabled" type="checkbox"><span>启用全局复读随机禁言</span></label>
+            <label><span>复读触发次数</span><input id="runtime-repeat-count" type="number" min="3" max="20" required></label>
+            <label><span>复读时间窗（秒）</span><input id="runtime-repeat-window" type="number" min="5" max="120" required></label>
+            <label><span>随机禁言最短秒数</span><input id="runtime-repeat-mute-min" type="number" min="1" max="2592000" required></label>
+            <label><span>随机禁言最长秒数</span><input id="runtime-repeat-mute-max" type="number" min="1" max="2592000" required></label>
+            <label class="wide"><span>复读禁言后提示</span><textarea id="runtime-repeat-reply" maxlength="1000" rows="2" placeholder="可使用 {duration} 和 {at_user}"></textarea></label>
+            <label class="checkbox wide"><input id="runtime-repeat-at" type="checkbox"><span>复读处置时艾特成员</span></label>
+
             <div class="section-title wide">B站推送</div>
             <label><span>直播轮询间隔（秒）</span><input id="runtime-live-interval" type="number" min="30" max="600" required></label>
             <label><span>动态轮询间隔（秒）</span><input id="runtime-dynamic-interval" type="number" min="60" max="3600" required></label>
@@ -359,27 +376,7 @@
             <p>仅在当前群生效，按列表顺序匹配。</p>
             <div class="keyword-reply-list" id="keyword-replies"></div>
           </div>
-          <p class="wide config-note">AI 内容审核为全局配置，对全部已绑定群生效，不受此处消息审查开关影响。</p>
-          <label class="checkbox">
-            <input id="image-spam-enabled" type="checkbox">
-            <span>连续发图检测</span>
-          </label>
-          <label><span>连续图片数量</span><input id="image-spam-count" type="number" min="2" max="20"></label>
-          <label><span>发图时间窗（秒）</span><input id="image-spam-window" type="number" min="3" max="120"></label>
-          <label><span>跨成员触发人数</span><input id="image-spam-group-min-members" type="number" min="2" max="10"></label>
-          <label><span>触发时最多撤回图片数</span><input id="image-spam-recall-count" type="number" min="1" max="50"></label>
-          <label class="wide"><span>连续发图撤回回复</span><textarea id="image-spam-reply" maxlength="1000" rows="2"></textarea></label>
-          <label class="checkbox wide"><input id="image-spam-at" type="checkbox"><span>连续发图撤回时艾特成员</span></label>
-          <label class="checkbox wide">
-            <input id="repeat-review-enabled" type="checkbox">
-            <span>不同成员连续复读并随机禁言</span>
-          </label>
-          <label><span>复读触发次数</span><input id="repeat-count" type="number" min="3" max="20"></label>
-          <label><span>复读时间窗（秒）</span><input id="repeat-window" type="number" min="5" max="120"></label>
-          <label><span>随机禁言最短秒数</span><input id="repeat-mute-min" type="number" min="1" max="2592000"></label>
-          <label><span>随机禁言最长秒数</span><input id="repeat-mute-max" type="number" min="1" max="2592000"></label>
-          <label class="wide"><span>复读禁言后提示</span><textarea id="repeat-reply" maxlength="1000" rows="2" placeholder="禁言成功后发送；可使用 {duration} 和 {at_user}"></textarea></label>
-          <label class="checkbox wide"><input id="repeat-at" type="checkbox"><span>复读处置时艾特成员</span></label>
+          <p class="wide config-note">AI 内容审核和连续发图/复读处置均由“运行配置”的群级策略控制；本群页面只保留基础消息审核开关和本群规则。</p>
           <div class="section-title wide">B站推送</div>
           <label class="wide"><span>UP 主 UID</span><textarea id="bilibili-uids" rows="3" placeholder="每行一个 UID"></textarea></label>
           <label class="checkbox"><input id="bilibili-dynamic-enabled" type="checkbox"><span>推送动态</span></label>
@@ -416,8 +413,6 @@
           <label><span>兜底真人验证</span><select id="batch-fallback-human-verify"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>消息审查</span><select id="batch-moderation-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>管理员免审</span><select id="batch-moderation-exempt-admins"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
-          <label><span>连续发图检测</span><select id="batch-image-spam-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
-          <label><span>复读检测</span><select id="batch-repeat-review-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>动态推送</span><select id="batch-bilibili-dynamic-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>直播推送</span><select id="batch-bilibili-live-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label>
@@ -481,18 +476,6 @@
           <label><span>图片关键词撤回艾特</span><select id="batch-image-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <label><span>图片文字审核</span><select id="batch-image-keyword-enabled"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-bilibili-uids" data-field="bilibili_uids"><span>覆盖 B站 UP 主 UID</span></label><textarea id="batch-bilibili-uids" rows="3" disabled></textarea></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-count" data-field="image_spam_count"><span>覆盖连续图片数量</span></label><input id="batch-image-count" type="number" min="2" max="20" value="5" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-window" data-field="image_spam_window_seconds"><span>覆盖发图时间窗</span></label><input id="batch-image-window" type="number" min="3" max="120" value="15" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-group-members" data-field="image_spam_group_min_members"><span>覆盖跨成员触发人数</span></label><input id="batch-image-group-members" type="number" min="2" max="10" value="2" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-image-recall-count" data-field="image_spam_recall_count"><span>覆盖图片撤回数量</span></label><input id="batch-image-recall-count" type="number" min="1" max="50" value="5" disabled></fieldset>
-          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-image-spam-reply" data-field="image_spam_reply"><span>覆盖连续发图撤回回复</span></label><textarea id="batch-image-spam-reply" rows="2" maxlength="1000" disabled></textarea></fieldset>
-          <label><span>连续发图撤回艾特</span><select id="batch-image-spam-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-count" data-field="repeat_count"><span>覆盖复读次数</span></label><input id="batch-repeat-count" type="number" min="3" max="20" value="4" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-window" data-field="repeat_window_seconds"><span>覆盖复读时间窗</span></label><input id="batch-repeat-window" type="number" min="5" max="120" value="30" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-min" data-field="repeat_mute_min_seconds"><span>覆盖最短禁言秒数</span></label><input id="batch-mute-min" type="number" min="1" max="2592000" value="60" disabled></fieldset>
-          <fieldset class="batch-overwrite"><label class="checkbox"><input type="checkbox" data-controls="batch-mute-max" data-field="repeat_mute_max_seconds"><span>覆盖最长禁言秒数</span></label><input id="batch-mute-max" type="number" min="1" max="2592000" value="600" disabled></fieldset>
-          <fieldset class="batch-overwrite wide"><label class="checkbox"><input type="checkbox" data-controls="batch-repeat-reply" data-field="repeat_reply"><span>覆盖复读禁言后提示</span></label><textarea id="batch-repeat-reply" rows="2" maxlength="1000" placeholder="禁言成功后发送；可使用 {duration} 和 {at_user}" disabled></textarea></fieldset>
-          <label><span>复读处置艾特</span><select id="batch-repeat-at"><option value="">不修改</option><option value="true">开启</option><option value="false">关闭</option></select></label>
           <fieldset class="batch-overwrite wide">
             <label class="checkbox">
               <input type="checkbox" data-controls="batch-approve-keywords" data-field="approve_keywords">

@@ -179,6 +179,84 @@
             "default": 1,
             "slider": {"min": 1, "max": 3, "step": 1}
           },
+          "global_image_spam_enabled": {
+            "type": "bool",
+            "description": "全局连续发图检测",
+            "default": false
+          },
+          "global_image_spam_count": {
+            "type": "int",
+            "description": "全局连续图片数量",
+            "default": 5,
+            "slider": {"min": 2, "max": 20, "step": 1}
+          },
+          "global_image_spam_window_seconds": {
+            "type": "int",
+            "description": "全局发图时间窗（秒）",
+            "default": 15,
+            "slider": {"min": 3, "max": 120, "step": 1}
+          },
+          "global_image_spam_group_min_members": {
+            "type": "int",
+            "description": "全局跨成员触发人数",
+            "default": 2,
+            "slider": {"min": 2, "max": 10, "step": 1}
+          },
+          "global_image_spam_recall_count": {
+            "type": "int",
+            "description": "全局连续发图撤回数量",
+            "default": 5,
+            "slider": {"min": 1, "max": 50, "step": 1}
+          },
+          "global_image_spam_reply": {
+            "type": "string",
+            "description": "全局连续发图撤回回复",
+            "default": "检测到连续发送图片或表情，相关消息已撤回。"
+          },
+          "global_image_spam_at_member": {
+            "type": "bool",
+            "description": "全局连续发图撤回时艾特",
+            "default": true
+          },
+          "global_repeat_review_enabled": {
+            "type": "bool",
+            "description": "全局复读随机禁言",
+            "default": false
+          },
+          "global_repeat_count": {
+            "type": "int",
+            "description": "全局复读触发次数",
+            "default": 4,
+            "slider": {"min": 3, "max": 20, "step": 1}
+          },
+          "global_repeat_window_seconds": {
+            "type": "int",
+            "description": "全局复读时间窗（秒）",
+            "default": 30,
+            "slider": {"min": 5, "max": 120, "step": 1}
+          },
+          "global_repeat_mute_min_seconds": {
+            "type": "int",
+            "description": "全局复读随机禁言最短秒数",
+            "default": 60,
+            "slider": {"min": 1, "max": 2592000, "step": 1}
+          },
+          "global_repeat_mute_max_seconds": {
+            "type": "int",
+            "description": "全局复读随机禁言最长秒数",
+            "default": 600,
+            "slider": {"min": 1, "max": 2592000, "step": 1}
+          },
+          "global_repeat_reply": {
+            "type": "string",
+            "description": "全局复读处置回复",
+            "default": "检测到集中复读，已随机禁言一名参与者。"
+          },
+          "global_repeat_at_member": {
+            "type": "bool",
+            "description": "全局复读处置时艾特",
+            "default": true
+          },
           "keyword_reply_cooldown_seconds": {
             "type": "int",
             "description": "关键词回复单群冷却（秒）",
@@ -705,82 +783,97 @@
           "image_spam_enabled": {
             "type": "bool",
             "description": "检测连续发图",
-            "default": false
+            "hint": "兼容旧配置；请在插件 WebUI 的群级全局策略中设置。",
+            "default": false,
+            "invisible": true
           },
           "image_spam_count": {
             "type": "int",
             "description": "连续图片触发数量",
             "default": 5,
-            "slider": {"min": 2, "max": 20, "step": 1}
+            "slider": {"min": 2, "max": 20, "step": 1},
+            "invisible": true
           },
           "image_spam_window_seconds": {
             "type": "int",
             "description": "连续发图时间窗（秒）",
             "default": 15,
-            "slider": {"min": 3, "max": 120, "step": 3}
+            "slider": {"min": 3, "max": 120, "step": 3},
+            "invisible": true
           },
           "image_spam_group_min_members": {
             "type": "int",
             "description": "跨成员刷图最少人数",
             "hint": "连续纯图片或表情来自至少这些不同成员时，也会触发撤回。",
             "default": 2,
-            "slider": {"min": 2, "max": 10, "step": 1}
+            "slider": {"min": 2, "max": 10, "step": 1},
+            "invisible": true
           },
           "image_spam_recall_count": {
             "type": "int",
             "description": "图片触发时最多撤回数量",
             "hint": "达到阈值后只撤回最近这些图片消息，避免误伤更早的正常内容。",
             "default": 5,
-            "slider": {"min": 1, "max": 50, "step": 1}
+            "slider": {"min": 1, "max": 50, "step": 1},
+            "invisible": true
           },
           "image_spam_reply": {
             "type": "string",
             "description": "连续发图撤回回复",
-            "default": "检测到连续发送图片或表情，相关消息已撤回。"
+            "default": "检测到连续发送图片或表情，相关消息已撤回。",
+            "invisible": true
           },
           "image_spam_at_member": {
             "type": "bool",
             "description": "连续发图撤回时艾特成员",
-            "default": true
+            "default": true,
+            "invisible": true
           },
           "repeat_review_enabled": {
             "type": "bool",
             "description": "检测不同成员连续复读并随机禁言",
             "hint": "只有连续消息内容相同且来自至少 2 名普通成员时触发；任意不同内容会打断当前序列。",
-            "default": false
+            "default": false,
+            "invisible": true
           },
           "repeat_count": {
             "type": "int",
             "description": "复读触发次数",
             "default": 4,
-            "slider": {"min": 3, "max": 20, "step": 1}
+            "slider": {"min": 3, "max": 20, "step": 1},
+            "invisible": true
           },
           "repeat_window_seconds": {
             "type": "int",
             "description": "复读时间窗（秒）",
             "default": 30,
-            "slider": {"min": 5, "max": 120, "step": 5}
+            "slider": {"min": 5, "max": 120, "step": 5},
+            "invisible": true
           },
           "repeat_mute_min_seconds": {
             "type": "int",
             "description": "复读随机禁言最短秒数",
-            "default": 60
+            "default": 60,
+            "invisible": true
           },
           "repeat_mute_max_seconds": {
             "type": "int",
             "description": "复读随机禁言最长秒数",
-            "default": 600
+            "default": 600,
+            "invisible": true
           },
           "repeat_reply": {
             "type": "string",
             "description": "复读禁言后提示",
             "hint": "禁言成功后单独发送；支持 {duration} 实际秒数和 {at_user} QQ 艾特。留空且关闭艾特时不发送。",
-            "default": "检测到集中复读，已随机禁言一名参与者。"
+            "default": "检测到集中复读，已随机禁言一名参与者。",
+            "invisible": true
           },
           "repeat_at_member": {
             "type": "bool",
             "description": "复读处置时艾特成员",
-            "default": true
+            "default": true,
+            "invisible": true
           },
           "bilibili_uids": {
             "type": "text",

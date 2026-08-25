@@ -471,6 +471,66 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         sleep.assert_awaited_once_with(module.SETTINGS_MESSAGE_TTL)
         api.recall_group_message.assert_awaited_once_with("group-1", "sent-1")
 
+    async def test_settings_buttons_update_scoped_media_policy(self):
+        plugin, client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        await plugin._apply_settings_button(
+            client, "group-1", "platform-1", "image_on", "测试群"
+        )
+        await plugin._apply_settings_button(
+            client, "group-1", "platform-1", "repeat_on", "测试群"
+        )
+        self.assertTrue(plugin.config["global_image_spam_enabled"])
+        self.assertTrue(plugin.config["global_repeat_review_enabled"])
+        self.assertFalse(entry.get("image_spam_enabled", False))
+        self.assertFalse(entry.get("repeat_review_enabled", False))
+
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "p1",
+                "name": "媒体策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+            }
+        ]
+        await plugin._apply_settings_button(
+            client, "group-1", "platform-1", "image_off", "测试群"
+        )
+        self.assertFalse(plugin.config["global_policy_profiles"][0]["global_image_spam_enabled"])
+
+    async def test_settings_button_creates_scoped_policy_for_uncovered_group(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "other",
+                "name": "其他群策略",
+                "enabled": True,
+                "group_openids": ["group-2"],
+            }
+        ]
+        await plugin._apply_settings_button(
+            client, "group-1", "platform-1", "repeat_on", "测试群"
+        )
+        created = plugin.config["global_policy_profiles"][-1]
+        self.assertEqual(created["group_openids"], ["group-1"])
+        self.assertTrue(created["global_repeat_review_enabled"])
+
+    async def test_uncovered_group_does_not_fall_back_to_legacy_media_policy(self):
+        plugin, _client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(image_spam_enabled=True, repeat_review_enabled=True)
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "other",
+                "name": "其他群策略",
+                "enabled": True,
+                "group_openids": ["group-2"],
+            }
+        ]
+        settings = plugin._moderation_settings(entry)
+        self.assertFalse(settings["image_enabled"])
+        self.assertFalse(settings["repeat_enabled"])
+
     async def test_settings_panel_can_disable_auto_recall(self):
         plugin, client = self.plugin()
         plugin.config["settings_panel_auto_recall"] = False
@@ -953,6 +1013,18 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+        self.assertFalse(payload["_legacy_media_fields_present"])
+        legacy_entry = {
+            "image_spam_enabled": True,
+            "image_spam_count": 9,
+            "repeat_review_enabled": True,
+            "repeat_count": 8,
+        }
+        module.QQGroupAdmin._update_web_group(legacy_entry, payload)
+        self.assertTrue(legacy_entry["image_spam_enabled"])
+        self.assertEqual(legacy_entry["image_spam_count"], 9)
+        self.assertTrue(legacy_entry["repeat_review_enabled"])
+        self.assertEqual(legacy_entry["repeat_count"], 8)
         payload["uid_check_enabled"] = False
         self.assertFalse(
             module.GroupAdminWeb._validated_save(payload)["uid_exists_auto_approve"]
@@ -1153,6 +1225,101 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             module.GroupAdminWeb._global_policy_profiles(
                 [profile, {**profile, "name": "第二套"}], {"group-1"}
             )
+
+    def test_global_policy_web_validation_accepts_media_and_repeat_fields(self):
+        profile = {
+            "profile_id": "media-repeat",
+            "name": "媒体复读",
+            "enabled": True,
+            "group_openids": ["group-1"],
+            "global_image_spam_enabled": True,
+            "global_image_spam_count": 8,
+            "global_image_spam_window_seconds": 20,
+            "global_image_spam_group_min_members": 3,
+            "global_image_spam_recall_count": 6,
+            "global_image_spam_reply": "图片已清理",
+            "global_image_spam_at_member": False,
+            "global_repeat_review_enabled": True,
+            "global_repeat_count": 5,
+            "global_repeat_window_seconds": 40,
+            "global_repeat_mute_min_seconds": 10,
+            "global_repeat_mute_max_seconds": 30,
+            "global_repeat_reply": "复读处理",
+            "global_repeat_at_member": False,
+        }
+        profiles = module.GroupAdminWeb._global_policy_profiles(
+            [profile], {"group-1"}
+        )
+        self.assertTrue(profiles[0]["global_image_spam_enabled"])
+        self.assertEqual(profiles[0]["global_image_spam_count"], 8)
+        self.assertEqual(profiles[0]["global_repeat_mute_max_seconds"], 30)
+        with self.assertRaisesRegex(ValueError, "最长禁言不能小于最短禁言"):
+            module.GroupAdminWeb._global_policy_profiles(
+                [
+                    {
+                        **profile,
+                        "global_repeat_mute_min_seconds": 40,
+                        "global_repeat_mute_max_seconds": 30,
+                    }
+                ],
+                {"group-1"},
+            )
+
+    def test_global_policy_web_surfaces_legacy_media_values(self):
+        plugin, _client = self.plugin()
+        plugin.config["auto_review_groups"][0].update(
+            image_spam_enabled=True,
+            image_spam_count=9,
+            repeat_review_enabled=True,
+            repeat_mute_min_seconds=13,
+            repeat_mute_max_seconds=27,
+        )
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "legacy",
+                "name": "旧媒体策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+            }
+        ]
+        profile = plugin._global_policy_profiles_for_web()[0]
+        self.assertTrue(profile["global_image_spam_enabled"])
+        self.assertEqual(profile["global_image_spam_count"], 9)
+        self.assertTrue(profile["global_repeat_review_enabled"])
+        self.assertEqual(profile["global_repeat_mute_min_seconds"], 13)
+        self.assertEqual(profile["global_repeat_mute_max_seconds"], 27)
+
+    async def test_legacy_media_policy_round_trip_preserves_unchanged_values(self):
+        plugin, _client = self.plugin()
+        entry = plugin.config["auto_review_groups"][0]
+        entry.update(
+            image_spam_enabled=True,
+            image_spam_count=9,
+            repeat_review_enabled=True,
+            repeat_mute_min_seconds=13,
+            repeat_mute_max_seconds=27,
+        )
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "legacy",
+                "name": "旧媒体策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+            }
+        ]
+        displayed = plugin._global_policy_profiles_for_web()
+        validated = module.GroupAdminWeb._global_policy_profiles(
+            displayed, {"group-1"}
+        )
+        await plugin.web_save_global_policies({"profiles": validated})
+        saved = plugin.config["global_policy_profiles"][0]
+        self.assertNotIn("global_image_spam_enabled", saved)
+        self.assertNotIn("global_repeat_review_enabled", saved)
+        settings = plugin._moderation_settings(entry)
+        self.assertTrue(settings["image_enabled"])
+        self.assertEqual(settings["image_count"], 9)
+        self.assertTrue(settings["repeat_enabled"])
+        self.assertEqual(settings["repeat_mute_max"], 27)
 
     def test_uid_review_waits_for_native_strategy_sync(self):
         plugin, _ = self.plugin()
@@ -1515,6 +1682,160 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(client.api.messages[-1]["content"], "这条文字消息已撤回。")
+
+    async def test_scoped_global_keyword_runs_when_group_audit_is_disabled(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "strict-text",
+                "name": "严格文字策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_message_reject_keywords": "禁止词",
+                "global_message_reject_reply": "全局策略已撤回。",
+                "global_message_reject_at_member": False,
+            }
+        ]
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        event = FakeEvent(client, "包含禁止词")
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        self.assertEqual(client.api.messages[-1]["content"], "全局策略已撤回。")
+
+    async def test_scoped_global_image_and_repeat_settings_are_used(self):
+        plugin, _client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "media-repeat",
+                "name": "媒体与复读策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_image_spam_enabled": True,
+                "global_image_spam_count": 7,
+                "global_image_spam_window_seconds": 21,
+                "global_image_spam_group_min_members": 3,
+                "global_image_spam_recall_count": 4,
+                "global_image_spam_reply": "图片过多",
+                "global_image_spam_at_member": False,
+                "global_repeat_review_enabled": True,
+                "global_repeat_count": 6,
+                "global_repeat_window_seconds": 42,
+                "global_repeat_mute_min_seconds": 11,
+                "global_repeat_mute_max_seconds": 22,
+                "global_repeat_reply": "复读处理 {duration}",
+                "global_repeat_at_member": False,
+            }
+        ]
+        settings = plugin._moderation_settings(
+            plugin.config["auto_review_groups"][0]
+        )
+        self.assertFalse(settings["enabled"])
+        self.assertTrue(settings["image_enabled"])
+        self.assertEqual(settings["image_count"], 7)
+        self.assertEqual(settings["image_window"], 21)
+        self.assertEqual(settings["image_group_min_members"], 3)
+        self.assertEqual(settings["image_recall_count"], 4)
+        self.assertTrue(settings["repeat_enabled"])
+        self.assertEqual(settings["repeat_count"], 6)
+        self.assertEqual(settings["repeat_window"], 42)
+        self.assertEqual(settings["repeat_mute_min"], 11)
+        self.assertEqual(settings["repeat_mute_max"], 22)
+        self.assertEqual(settings["repeat_reply"], "复读处理 {duration}")
+        self.assertFalse(settings["repeat_at"])
+
+    async def test_global_image_spam_runs_when_local_audit_is_disabled(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "images",
+                "name": "连续发图",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_image_spam_enabled": True,
+                "global_image_spam_count": 2,
+                "global_image_spam_window_seconds": 30,
+                "global_image_spam_group_min_members": 2,
+                "global_image_spam_recall_count": 5,
+                "global_image_spam_reply": "图片过多",
+                "global_image_spam_at_member": False,
+            }
+        ]
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+        image_type = type("Image", (), {})
+
+        for index, member in enumerate(("member-1", "member-2"), 1):
+            event = FakeEvent(client, "")
+            event.is_at_or_wake_command = False
+            event.message_obj.message_id = f"image-{index}"
+            event.message_obj.raw_message.author = SimpleNamespace(
+                member_openid=member
+            )
+            image = image_type()
+            image.url = f"https://example.test/{index}.png"
+            event.message_obj.message = [image]
+            with patch.object(module.asyncio, "sleep", AsyncMock()):
+                await plugin.audit_group_message(event)
+            if index == 1:
+                self.assertFalse(event.stopped)
+            else:
+                self.assertTrue(event.stopped)
+
+        self.assertEqual(
+            api.recall_group_message.await_args_list,
+            [
+                unittest.mock.call("group-1", "image-1"),
+                unittest.mock.call("group-1", "image-2"),
+            ],
+        )
+
+    async def test_global_repeat_runs_when_local_audit_is_disabled(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "repeat",
+                "name": "复读禁言",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_repeat_review_enabled": True,
+                "global_repeat_count": 3,
+                "global_repeat_window_seconds": 30,
+                "global_repeat_mute_min_seconds": 10,
+                "global_repeat_mute_max_seconds": 20,
+                "global_repeat_reply": "复读 {duration} 秒",
+                "global_repeat_at_member": False,
+            }
+        ]
+        api = SimpleNamespace(
+            set_member_mutes=AsyncMock(),
+            recall_group_message=AsyncMock(),
+        )
+        plugin._api = lambda _event: api
+        members = ("member-1", "member-2", "member-1")
+        with (
+            patch.object(module.secrets, "choice", return_value="member-2"),
+            patch.object(module.secrets, "randbelow", return_value=7),
+            patch.object(module, "future_rfc3339", return_value="expires-17"),
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+        ):
+            for index, member in enumerate(members, 1):
+                event = FakeEvent(client, "同一条消息")
+                event.is_at_or_wake_command = False
+                event.message_obj.message_id = f"repeat-{index}"
+                event.message_obj.raw_message.author = SimpleNamespace(
+                    member_openid=member
+                )
+                await plugin.audit_group_message(event)
+        self.assertTrue(event.stopped)
+        api.set_member_mutes.assert_awaited_once()
+        api.recall_group_message.assert_awaited_once_with("group-1", "repeat-3")
 
     async def test_recall_reply_variable_overrides_disabled_auto_mention(self):
         plugin, client = self.plugin()
