@@ -360,12 +360,15 @@
       var summary = document.createElement("summary");
       summary.innerHTML = '<strong></strong><span class="identity-card-meta"></span>';
       summary.querySelector("strong").textContent = identityText(member.username || member.member_openid);
+      var groupName = recordGroupLabel(member);
       summary.querySelector(".identity-card-meta").textContent =
-        groupLabel(member.group_openid) + " · " + identityText(member.reason);
+        groupName + " · " + identityText(member.reason);
       var body = document.createElement("div");
       body.className = "identity-card-body";
+      recordField(body, "B站 UID", member.uid || member.bilibili_uid, true);
       recordField(body, "成员 OpenID", member.member_openid, true);
-      recordField(body, "群", groupLabel(member.group_openid));
+      recordField(body, "联合 OpenID", member.union_openid, true);
+      recordField(body, "群", groupName);
       recordField(body, "标记原因", member.reason);
       recordField(body, "标记时间", timestamp(member.created_at));
       var actions = document.createElement("div");

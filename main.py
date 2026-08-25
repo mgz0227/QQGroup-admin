@@ -1586,9 +1586,17 @@ class QQGroupAdmin(Star):
         group_openid: str,
         member_openid: str,
         reason: str,
+        *,
+        uid: str = "",
     ) -> None:
         key = self._member_state_key(group_openid, member_openid)
-        self._suspicious_members[key] = {
+        verified_uid = str(
+            uid
+            or request.get("uid")
+            or self._uid_for_member(group_openid, member_openid)
+            or ""
+        ).strip()
+        record = {
             "group_openid": group_openid,
             "member_openid": member_openid,
             "union_openid": str(request.get("union_openid") or ""),
@@ -1596,6 +1604,10 @@ class QQGroupAdmin(Star):
             "reason": reason,
             "created_at": int(time.time()),
         }
+        if verified_uid:
+            record["uid"] = verified_uid
+            record["bilibili_uid"] = verified_uid
+        self._suspicious_members[key] = record
         self._trim_suspicious_members()
         await self._save_state()
 
@@ -1653,10 +1665,15 @@ class QQGroupAdmin(Star):
             "如果看不到按钮，请直接发送正确数字；答对后即可正常发言。\n"
             "验证前发送的消息会被撤回。"
         )
-        # QQ clients do not render every Markdown paragraph when a custom
-        # keyboard is attached.  Send the stable plain-text instruction first
-        # and keep the card focused on the equation/buttons.
-        challenge = f"# 真人验证\n**{left} + {right} = ?**"
+        # Keep the instruction in the card as well as the plain-text notice:
+        # some clients collapse the preceding message when a keyboard follows.
+        challenge = (
+            "# 真人验证\n"
+            "请点击下方正确答案按钮。\n\n"
+            "如果看不到按钮，请直接发送正确数字；答对后即可正常发言。\n\n"
+            f"**{left} + {right} = ?**\n\n"
+            "验证前发送的消息会被撤回。"
+        )
         try:
             try:
                 await self._send_group_text(client, group_openid, prompt)
@@ -2972,6 +2989,9 @@ class QQGroupAdmin(Star):
                         group_openid,
                         member_openid,
                         "入群条件未通过，由兜底规则同意",
+                        uid=verified_uid or self._uid_for_member(
+                            group_openid, member_openid
+                        ),
                     )
                     await self._send_verification_challenge(
                         client,
@@ -6846,19 +6866,26 @@ class QQGroupAdmin(Star):
             items.sort(key=uid_key)
             return items
         if kind == "suspicious":
-            return sorted(
-                (
-                    {
-                        **dict(item),
-                        "group_name": groups_by_id.get(
-                            str(item.get("group_openid") or ""), ""
-                        ),
-                    }
-                    for item in self._suspicious_members.values()
-                ),
-                key=created_at,
-                reverse=True,
-            )
+            items = []
+            for suspicious in self._suspicious_members.values():
+                item = dict(suspicious)
+                group_openid = str(item.get("group_openid") or "")
+                item["group_name"] = item.get("group_name") or groups_by_id.get(
+                    group_openid, ""
+                )
+                uid = str(
+                    item.get("uid")
+                    or item.get("bilibili_uid")
+                    or self._uid_for_member(
+                        group_openid, str(item.get("member_openid") or "")
+                    )
+                    or ""
+                ).strip()
+                if uid:
+                    item["uid"] = uid
+                    item["bilibili_uid"] = uid
+                items.append(item)
+            return sorted(items, key=created_at, reverse=True)
         if kind == "violations":
             items = []
             seen_ids: set[str] = set()

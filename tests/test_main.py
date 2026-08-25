@@ -1807,7 +1807,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIn("真人验证", prompt["content"])
-        self.assertNotIn("如果看不到按钮", message["markdown"]["content"])
+        self.assertIn("如果看不到按钮", message["markdown"]["content"])
+        self.assertIn("验证前发送的消息会被撤回", message["markdown"]["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
         self.assertEqual(
             [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
@@ -4145,6 +4146,33 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "分页参数"):
             await plugin.web_identity_page("bindings", "", 1, 100)
 
+    async def test_suspicious_identity_keeps_uid_and_historical_group_name(self):
+        plugin, _ = self.plugin()
+        plugin.config["auto_review_groups"][0]["group_name"] = "历史审核群"
+        plugin._uid_bindings = {
+            "123": {
+                "uid": "123",
+                "members": {"group-1": "member-9"},
+                "groups": ["group-1"],
+            }
+        }
+        plugin._suspicious_members = {
+            "group-1:member-9": {
+                "group_openid": "group-1",
+                "member_openid": "member-9",
+                "username": "待验证成员",
+                "reason": "兜底验证",
+                "created_at": 1_700_000_001,
+            }
+        }
+
+        page = await plugin.web_identity_page("suspicious", "123", 1, 10)
+
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["uid"], "123")
+        self.assertEqual(page["items"][0]["bilibili_uid"], "123")
+        self.assertEqual(page["items"][0]["group_name"], "历史审核群")
+
     async def test_legacy_binding_members_map_restores_group_scope_for_search(self):
         plugin, _ = self.plugin()
         plugin.config["auto_review_groups"][0]["group_name"] = "旧版审核群"
@@ -4576,6 +4604,17 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("group-1:member-1", plugin._suspicious_members)
         self.assertEqual(plugin._verification_tokens, {})
+
+    async def test_verification_button_card_includes_prompt(self):
+        plugin, client = self.plugin()
+        with patch.object(module.secrets, "randbelow", side_effect=[1, 2]):
+            await plugin._send_verification_challenge(client, "group-1", "member-1")
+
+        card = next(message for message in client.api.messages if message["msg_type"] == 2)
+        content = card["markdown"]["content"]
+        self.assertIn("请点击下方正确答案按钮", content)
+        self.assertIn("请直接发送正确数字", content)
+        self.assertIn("验证前发送的消息会被撤回", content)
 
     async def test_verification_rejects_prefixed_answer(self):
         plugin, client = self.plugin()
