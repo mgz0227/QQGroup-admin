@@ -90,7 +90,8 @@
           },
           "global_ai_review_enabled": {
             "type": "bool",
-            "description": "全局 AI 内容审核",
+            "description": "全局 AI 内容审核（统一配置）",
+            "hint": "由插件 WebUI 的运行配置统一维护，对所有已绑定群生效。",
             "default": false
           },
           "global_ai_review_provider_id": {

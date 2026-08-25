@@ -1280,6 +1280,77 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         second = plugin._moderation_settings(entry)
         self.assertEqual(second["global_keywords"], ["默认"])
 
+    def test_ai_settings_are_global_across_scoped_profiles(self):
+        plugin, _ = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="global-primary",
+            global_ai_review_fallback_provider_ids=["global-fallback"],
+            global_ai_review_timeout_seconds=37,
+        )
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "one",
+                "name": "群一",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_ai_review_enabled": False,
+                "global_ai_review_provider_id": "scoped-primary",
+            },
+            {
+                "profile_id": "two",
+                "name": "群二",
+                "enabled": True,
+                "group_openids": ["group-2"],
+                "global_ai_review_provider_id": "other-primary",
+            },
+        ]
+
+        first = plugin._moderation_settings({"group_openid": "group-1"})
+        second = plugin._moderation_settings({"group_openid": "group-2"})
+        uncovered = plugin._moderation_settings({"group_openid": "group-3"})
+        for settings in (first, second, uncovered):
+            self.assertTrue(settings["ai_enabled"])
+            self.assertEqual(settings["ai_provider_id"], "global-primary")
+            self.assertEqual(settings["ai_fallback_provider_ids"], ["global-fallback"])
+            self.assertEqual(settings["ai_timeout"], 37)
+
+        displayed = plugin._global_policy_profiles_for_web()
+        self.assertEqual(
+            {item["global_ai_review_provider_id"] for item in displayed},
+            {"global-primary"},
+        )
+
+    async def test_global_policy_save_normalizes_ai_values_to_first_profile(self):
+        plugin, _ = self.plugin()
+        profiles = module.GroupAdminWeb._global_policy_profiles(
+            [
+                {
+                    "profile_id": "one",
+                    "name": "群一",
+                    "enabled": True,
+                    "group_openids": ["group-1"],
+                    "global_ai_review_enabled": True,
+                    "global_ai_review_provider_id": "primary-one",
+                },
+                {
+                    "profile_id": "two",
+                    "name": "群二",
+                    "enabled": True,
+                    "group_openids": ["group-2"],
+                    "global_ai_review_enabled": False,
+                    "global_ai_review_provider_id": "primary-two",
+                },
+            ],
+            {"group-1", "group-2"},
+        )
+        await plugin.web_save_global_policies({"profiles": profiles})
+        self.assertEqual(plugin.config["global_ai_review_provider_id"], "primary-one")
+        self.assertEqual(
+            [item["global_ai_review_provider_id"] for item in plugin.config["global_policy_profiles"]],
+            ["primary-one", "primary-one"],
+        )
+
     def test_old_global_profile_inherits_top_level_ai_settings(self):
         plugin, _ = self.plugin()
         plugin.config.update(
@@ -1733,12 +1804,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 for button in buttons
             )
         )
+        self.assertIn("真人验证", message["markdown"]["content"])
+        self.assertIn("如果看不到按钮", message["markdown"]["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
-        prompt = next(
-            item for item in client.api.messages if item.get("msg_type") == 0
+        self.assertFalse(
+            any(item.get("msg_type") == 0 for item in client.api.messages)
         )
-        self.assertIn("真人验证", prompt["content"])
-        self.assertIn("如果看不到按钮", prompt["content"])
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
         interaction = SimpleNamespace(

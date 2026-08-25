@@ -134,6 +134,24 @@ AI_REVIEW_DEFAULT_BLOCK_THRESHOLD = 95
 AI_REVIEW_ACTIONS = {"recall", "record_only"}
 IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS = 4
 IMAGE_OCR_DEFAULT_MAX_IMAGES = 1
+# AI and OCR are platform-wide controls.  Group policy profiles keep their
+# scope for keyword/media rules, but never override this tuple.
+GLOBAL_AI_POLICY_KEYS = (
+    GLOBAL_AI_ENABLED_KEY,
+    GLOBAL_AI_PROVIDER_KEY,
+    GLOBAL_AI_FALLBACKS_KEY,
+    GLOBAL_AI_CONFIRM_PROVIDER_KEY,
+    GLOBAL_AI_TIMEOUT_KEY,
+    GLOBAL_AI_IMAGES_KEY,
+    GLOBAL_AI_BLOCK_THRESHOLD_KEY,
+    GLOBAL_AI_ACTION_KEY,
+    "global_ai_reject_reply",
+    "global_ai_reject_at_member",
+    GLOBAL_IMAGE_OCR_ENABLED_KEY,
+    GLOBAL_IMAGE_OCR_PROVIDER_KEY,
+    GLOBAL_IMAGE_OCR_TIMEOUT_KEY,
+    GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY,
+)
 CONDITION_LOGICS = {"all", "any"}
 FALLBACK_ACTIONS = {"pending", "decline", "approve"}
 GROUP_ADMIN_ROLES = {"admin", "owner"}
@@ -1631,18 +1649,11 @@ class QQGroupAdmin(Star):
             "真人验证：请点击下方正确答案；如果看不到按钮，请直接发送正确数字。"
             "答对后即可正常发言；验证前发送的消息会被撤回。"
         )
-        challenge = f"# 算式\n**{left} + {right} = ?**"
+        # Keep the purpose and numeric fallback in the same message as the
+        # keyboard.  Some QQ clients hide an immediately preceding text
+        # message when the Markdown keyboard arrives.
+        challenge = f"# 真人验证\n{prompt}\n\n**{left} + {right} = ?**"
         try:
-            # QQ 客户端对“Markdown + 内嵌键盘”的多行正文展示不一致。
-            # 先发纯文本提示，确保用途和回退方式在所有客户端可见。
-            prompt_sent = False
-            try:
-                await self._send_group_text(client, group_openid, prompt)
-                prompt_sent = True
-            except Exception as prompt_exc:  # noqa: BLE001 - optional notice
-                self.logger.debug("真人验证提示发送失败，继续发送按钮：%s", prompt_exc)
-            if not prompt_sent:
-                challenge = f"# 真人验证\n{prompt}\n**{left} + {right} = ?**"
             await self._send_group_markdown(
                 client,
                 group_openid,
@@ -2175,6 +2186,17 @@ class QQGroupAdmin(Star):
             policy[key] = list(value) if isinstance(value, list) else value
         return policy
 
+    def _global_ai_policy(self) -> dict[str, Any]:
+        """Return the single top-level AI/OCR policy used by every group."""
+        legacy = self._legacy_global_policy()
+        return {
+            key: (
+                list(legacy[key]) if isinstance(legacy.get(key), list) else legacy.get(key)
+            )
+            for key in GLOBAL_AI_POLICY_KEYS
+            if key in legacy
+        }
+
     def _global_policy_for_group(self, group_openid: str) -> dict[str, Any]:
         policies = self._configured_global_policies()
         if not policies:
@@ -2364,6 +2386,7 @@ class QQGroupAdmin(Star):
         entry = entry or {}
         configured_policies = self._configured_global_policies()
         policy = self._global_policy_for_group(str(entry.get("group_openid") or ""))
+        ai_policy = self._global_ai_policy()
         def configured_text(source: dict[str, Any], key: str, default: str) -> str:
             value = source.get(key, default)
             return default if value is None else str(value)
@@ -2442,45 +2465,47 @@ class QQGroupAdmin(Star):
                 )
             ),
             "keyword_at": bool(entry.get("message_reject_at_member", True)),
-            "ai_enabled": bool(self._policy_value(policy, GLOBAL_AI_ENABLED_KEY)),
+            "ai_enabled": bool(self._policy_value(ai_policy, GLOBAL_AI_ENABLED_KEY)),
             "ai_provider_id": str(
-                self._policy_value(policy, GLOBAL_AI_PROVIDER_KEY) or ""
+                self._policy_value(ai_policy, GLOBAL_AI_PROVIDER_KEY) or ""
             ).strip(),
             "ai_fallback_provider_ids": normalize_provider_ids(
-                self._policy_value(policy, GLOBAL_AI_FALLBACKS_KEY)
+                self._policy_value(ai_policy, GLOBAL_AI_FALLBACKS_KEY)
             ),
             "ai_confirm_provider_id": str(
-                self._policy_value(policy, GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
+                self._policy_value(ai_policy, GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
             ).strip(),
             "ai_timeout": self._bounded_int(
-                self._policy_value(policy, GLOBAL_AI_TIMEOUT_KEY),
+                self._policy_value(ai_policy, GLOBAL_AI_TIMEOUT_KEY),
                 AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
                 5,
                 120,
             ),
             "ai_images_enabled": bool(
-                self._policy_value(policy, GLOBAL_AI_IMAGES_KEY)
+                self._policy_value(ai_policy, GLOBAL_AI_IMAGES_KEY)
             ),
             "ai_block_threshold": self._bounded_int(
-                self._policy_value(policy, GLOBAL_AI_BLOCK_THRESHOLD_KEY),
+                self._policy_value(ai_policy, GLOBAL_AI_BLOCK_THRESHOLD_KEY),
                 AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
                 50,
                 100,
             ),
             "ai_action": (
-                str(self._policy_value(policy, GLOBAL_AI_ACTION_KEY) or "record_only")
-                if str(self._policy_value(policy, GLOBAL_AI_ACTION_KEY) or "record_only")
+                str(self._policy_value(ai_policy, GLOBAL_AI_ACTION_KEY) or "record_only")
+                if str(self._policy_value(ai_policy, GLOBAL_AI_ACTION_KEY) or "record_only")
                 in AI_REVIEW_ACTIONS
                 else "record_only"
             ),
             "ai_reply": str(
                 configured_text(
-                    policy,
+                    ai_policy,
                     "global_ai_reject_reply",
                     "消息未通过 AI 内容审核，已撤回。",
                 )
             ),
-            "ai_at": bool(self._policy_value(policy, "global_ai_reject_at_member")),
+            "ai_at": bool(
+                self._policy_value(ai_policy, "global_ai_reject_at_member")
+            ),
             "global_image_keywords": parse_keywords(
                 str(self._policy_value(policy, GLOBAL_IMAGE_KEYWORDS_KEY) or "")
             ),
@@ -2509,19 +2534,19 @@ class QQGroupAdmin(Star):
             ),
             "image_keyword_at": bool(entry.get("image_reject_at_member", True)),
             "image_ocr_enabled": bool(
-                self._policy_value(policy, GLOBAL_IMAGE_OCR_ENABLED_KEY)
+                self._policy_value(ai_policy, GLOBAL_IMAGE_OCR_ENABLED_KEY)
             ),
             "image_ocr_provider_id": str(
-                self._policy_value(policy, GLOBAL_IMAGE_OCR_PROVIDER_KEY) or ""
+                self._policy_value(ai_policy, GLOBAL_IMAGE_OCR_PROVIDER_KEY) or ""
             ).strip(),
             "image_ocr_timeout": self._bounded_int(
-                self._policy_value(policy, GLOBAL_IMAGE_OCR_TIMEOUT_KEY),
+                self._policy_value(ai_policy, GLOBAL_IMAGE_OCR_TIMEOUT_KEY),
                 IMAGE_OCR_DEFAULT_TIMEOUT_SECONDS,
                 2,
                 30,
             ),
             "image_ocr_max_images": self._bounded_int(
-                self._policy_value(policy, GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY),
+                self._policy_value(ai_policy, GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY),
                 IMAGE_OCR_DEFAULT_MAX_IMAGES,
                 1,
                 3,
@@ -6022,9 +6047,9 @@ class QQGroupAdmin(Star):
             self._save_config()
             return
         if action in {"ai_on", "ai_off"}:
-            self._set_global_policy_value_for_group(
-                group_openid, GLOBAL_AI_ENABLED_KEY, action == "ai_on"
-            )
+            # AI review is intentionally global; the group button only
+            # changes the single top-level switch.
+            self.config[GLOBAL_AI_ENABLED_KEY] = action == "ai_on"
             self._save_config()
             return
         if action in {"uid", "conditional"}:
@@ -6335,6 +6360,12 @@ class QQGroupAdmin(Star):
                     legacy_media_values[global_key] = profile[global_key]
             if legacy_media_values:
                 profile["_legacy_media_values"] = legacy_media_values
+            # AI/OCR controls are global.  Always render the top-level values
+            # so stale per-profile copies cannot mislead the WebUI.
+            for key in GLOBAL_AI_POLICY_KEYS:
+                if key in legacy_global:
+                    value = legacy_global[key]
+                    profile[key] = list(value) if isinstance(value, list) else value
             profiles.append(profile)
         return profiles
 
@@ -6358,6 +6389,16 @@ class QQGroupAdmin(Star):
     async def web_save_global_policies(
         self, settings: dict[str, Any]
     ) -> dict[str, Any]:
+        raw_profiles = [
+            item for item in settings.get("profiles", []) if isinstance(item, dict)
+        ]
+        first_raw = raw_profiles[0] if raw_profiles else {}
+        global_ai_values: dict[str, Any] = {}
+        for key in GLOBAL_AI_POLICY_KEYS:
+            value = first_raw.get(key, self.config.get(key, GLOBAL_POLICY_DEFAULTS[key]))
+            if key == GLOBAL_AI_FALLBACKS_KEY:
+                value = normalize_provider_ids(value)
+            global_ai_values[key] = list(value) if isinstance(value, list) else value
         existing = {
             str(item.get("profile_id") or ""): item
             for item in self._configured_global_policies()
@@ -6385,7 +6426,9 @@ class QQGroupAdmin(Star):
                     and raw.get(key) == legacy_values[key]
                 ):
                     continue
-                value = raw.get(key, GLOBAL_POLICY_DEFAULTS[key])
+                value = global_ai_values[key] if key in GLOBAL_AI_POLICY_KEYS else raw.get(
+                    key, GLOBAL_POLICY_DEFAULTS[key]
+                )
                 profile[key] = list(value) if isinstance(value, list) else value
             profiles.append(profile)
         self.config[GLOBAL_POLICIES_KEY] = profiles
@@ -6393,6 +6436,8 @@ class QQGroupAdmin(Star):
         if profiles:
             for key in GLOBAL_POLICY_DEFAULTS:
                 self.config[key] = profiles[0].get(key, GLOBAL_POLICY_DEFAULTS[key])
+        for key, value in global_ai_values.items():
+            self.config[key] = list(value) if isinstance(value, list) else value
         self._save_config()
         return await self.web_global_policies()
 

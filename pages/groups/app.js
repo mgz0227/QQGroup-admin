@@ -32,6 +32,15 @@
   var runtimeSettings = {};
   var runtimePolicies = [];
   var runtimePolicyIndex = 0;
+  var GLOBAL_AI_FIELDS = [
+    "global_ai_review_enabled", "global_ai_review_provider_id",
+    "global_ai_review_fallback_provider_ids", "global_ai_review_confirm_provider_id",
+    "global_ai_review_timeout_seconds", "global_ai_review_images_enabled",
+    "global_ai_review_block_threshold", "global_ai_review_action",
+    "global_ai_reject_reply", "global_ai_reject_at_member",
+    "global_image_ocr_enabled", "global_image_ocr_provider_id",
+    "global_image_ocr_timeout_seconds", "global_image_ocr_max_images"
+  ];
   var bilibiliLoginKey = "";
   var bilibiliLoginTimer;
   var editingGroup;
@@ -1152,6 +1161,13 @@
     var current = readRuntimePolicy();
     if (!current.name) throw new Error("策略名称不能为空");
     runtimePolicies[runtimePolicyIndex] = current;
+    // AI/OCR is global; edits made while viewing any scoped policy must be
+    // copied to every payload item before the server normalizes the save.
+    runtimePolicies.forEach(function (policy) {
+      GLOBAL_AI_FIELDS.forEach(function (key) {
+        policy[key] = Array.isArray(current[key]) ? current[key].slice() : current[key];
+      });
+    });
     return current;
   }
 
