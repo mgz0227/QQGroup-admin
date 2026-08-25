@@ -1689,22 +1689,19 @@ class QQGroupAdmin(Star):
         prompt = (
             "真人验证：请点击下方正确答案按钮。\n"
             "如果看不到按钮，请直接发送正确数字；答对后即可正常发言。\n"
+            f"算式：{left} + {right} = ?\n"
             "验证前发送的消息会被撤回。"
         )
-        # Keep the instruction in the card as well as the plain-text notice:
-        # some clients collapse the preceding message when a keyboard follows.
+        # Some QQ clients show only the bold paragraph of a Markdown card
+        # when a custom keyboard is attached, so keep all essential guidance
+        # in bold and repeat the plain-text notice after the card.
         challenge = (
-            "# 真人验证\n"
-            "请点击下方正确答案按钮。\n\n"
-            "如果看不到按钮，请直接发送正确数字；答对后即可正常发言。\n\n"
-            f"**{left} + {right} = ?**\n\n"
+            "**真人验证：请点击下方正确答案按钮。**\n"
+            "**如果看不到按钮，请直接发送正确数字；答对后即可正常发言。**\n"
+            f"**{left} + {right} = ?**\n"
             "验证前发送的消息会被撤回。"
         )
         try:
-            try:
-                await self._send_group_text(client, group_openid, prompt)
-            except Exception as prompt_exc:  # noqa: BLE001 - optional notice
-                self.logger.debug("真人验证文字提示发送失败，继续发送按钮：%s", prompt_exc)
             await self._send_group_markdown(
                 client,
                 group_openid,
@@ -1716,17 +1713,23 @@ class QQGroupAdmin(Star):
             # Keep the token when buttons are unavailable; plain text answers
             # are handled by _consume_verification_answer.
             try:
-                fallback = f"{prompt}\n算式：{left} + {right} = ?"
                 await self._send_group_text(
                     client,
                     group_openid,
-                    fallback,
+                    prompt,
                     message_id=message_id,
                 )
             except Exception:  # noqa: BLE001 - plain fallback can also fail
                 self._verification_tokens.pop(token, None)
                 self._verification_tokens.update(previous)
                 raise exc
+        else:
+            # Sending this after the keyboard avoids clients collapsing the
+            # preceding notice while retaining a readable fallback path.
+            try:
+                await self._send_group_text(client, group_openid, prompt)
+            except Exception as prompt_exc:  # noqa: BLE001 - optional notice
+                self.logger.debug("真人验证文字提示发送失败：%s", prompt_exc)
 
     async def _consume_verification_answer(
         self,

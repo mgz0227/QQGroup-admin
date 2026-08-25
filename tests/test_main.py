@@ -1861,7 +1861,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(event.stopped)
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
-        prompt = client.api.messages[0]
+        prompt = next(
+            item for item in client.api.messages if item.get("msg_type") == 0
+        )
         self.assertEqual(prompt["msg_type"], 0)
         self.assertIn("真人验证", prompt["content"])
         self.assertIn("如果看不到按钮", prompt["content"])
@@ -1879,9 +1881,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("真人验证", prompt["content"])
         self.assertIn("如果看不到按钮", message["markdown"]["content"])
         self.assertIn("验证前发送的消息会被撤回", message["markdown"]["content"])
+        self.assertIn("算式：", prompt["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
         self.assertEqual(
-            [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
+            [item["msg_type"] for item in client.api.messages[:2]], [2, 0]
         )
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
@@ -4719,6 +4722,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("请点击下方正确答案按钮", content)
         self.assertIn("请直接发送正确数字", content)
         self.assertIn("验证前发送的消息会被撤回", content)
+        self.assertIn("**真人验证：请点击下方正确答案按钮。**", content)
 
     async def test_verification_rejects_prefixed_answer(self):
         plugin, client = self.plugin()
