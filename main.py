@@ -1452,12 +1452,30 @@ class QQGroupAdmin(Star):
         request: dict[str, Any],
         group_openid: str,
         member_openid: str,
+        *,
+        group_name: str = "",
     ) -> None:
         identity = self._request_identity(request, group_openid, member_openid)
         current = self._uid_bindings.get(uid) or {}
         groups = list(dict.fromkeys([*(current.get("groups") or []), group_openid]))
         members = dict(current.get("members") or {})
         members[group_openid] = member_openid
+        raw_group_names = current.get("group_names_by_id")
+        group_names_by_id = (
+            {
+                str(key): str(value).strip()[:160]
+                for key, value in raw_group_names.items()
+                if str(key).strip() and str(value).strip()
+            }
+            if isinstance(raw_group_names, dict)
+            else {}
+        )
+        resolved_group_name = str(group_name or "").strip()
+        if not resolved_group_name:
+            entry = self._group_config(group_openid)
+            resolved_group_name = str((entry or {}).get("group_name") or "").strip()
+        if resolved_group_name:
+            group_names_by_id[group_openid] = resolved_group_name[:160]
         self._uid_bindings[uid] = {
             "uid": uid,
             "identity": identity,
@@ -1466,6 +1484,7 @@ class QQGroupAdmin(Star):
             "members": members,
             "username": str(request.get("username") or ""),
             "groups": groups,
+            "group_names_by_id": group_names_by_id,
             "bound_at": current.get("bound_at") or int(time.time()),
             "last_seen_at": int(time.time()),
         }
@@ -1588,6 +1607,7 @@ class QQGroupAdmin(Star):
         reason: str,
         *,
         uid: str = "",
+        group_name: str = "",
     ) -> None:
         key = self._member_state_key(group_openid, member_openid)
         verified_uid = str(
@@ -1596,6 +1616,10 @@ class QQGroupAdmin(Star):
             or self._uid_for_member(group_openid, member_openid)
             or ""
         ).strip()
+        resolved_group_name = str(group_name or "").strip()
+        if not resolved_group_name:
+            entry = self._group_config(group_openid)
+            resolved_group_name = str((entry or {}).get("group_name") or "").strip()
         record = {
             "group_openid": group_openid,
             "member_openid": member_openid,
@@ -1604,6 +1628,8 @@ class QQGroupAdmin(Star):
             "reason": reason,
             "created_at": int(time.time()),
         }
+        if resolved_group_name:
+            record["group_name"] = resolved_group_name[:160]
         if verified_uid:
             record["uid"] = verified_uid
             record["bilibili_uid"] = verified_uid
@@ -2975,6 +3001,7 @@ class QQGroupAdmin(Star):
                         request,
                         group_openid,
                         member_openid,
+                        group_name=str((self._group_config(group_openid) or {}).get("group_name") or ""),
                     )
                 except Exception:
                     self.logger.exception("保存 UID 身份绑定失败")
@@ -2992,6 +3019,7 @@ class QQGroupAdmin(Star):
                         uid=verified_uid or self._uid_for_member(
                             group_openid, member_openid
                         ),
+                        group_name=str((self._group_config(group_openid) or {}).get("group_name") or ""),
                     )
                     await self._send_verification_challenge(
                         client,
@@ -6851,8 +6879,19 @@ class QQGroupAdmin(Star):
                         )
                     )
                 item["groups"] = groups
+                raw_group_names = item.get("group_names_by_id")
+                group_names_by_id = (
+                    {
+                        str(key): str(value).strip()
+                        for key, value in raw_group_names.items()
+                        if str(key).strip() and str(value).strip()
+                    }
+                    if isinstance(raw_group_names, dict)
+                    else {}
+                )
                 item["group_names"] = [
-                    groups_by_id.get(str(group_id), str(group_id))
+                    group_names_by_id.get(str(group_id))
+                    or groups_by_id.get(str(group_id), str(group_id))
                     for group_id in groups
                 ]
                 items.append(item)
@@ -6950,11 +6989,31 @@ class QQGroupAdmin(Star):
         return False
 
     def _identity_groups_by_id(self) -> dict[str, str]:
-        return {
+        groups = {
             str(item.get("group_openid") or ""): str(item.get("group_name") or "")
             for item in (self.config.get("auto_review_groups") or [])
             if isinstance(item, dict)
         }
+        for binding in self._uid_bindings.values():
+            raw_group_names = binding.get("group_names_by_id")
+            if not isinstance(raw_group_names, dict):
+                continue
+            for group_openid, group_name in raw_group_names.items():
+                group_openid = str(group_openid or "").strip()
+                group_name = str(group_name or "").strip()
+                if group_openid and group_name:
+                    groups.setdefault(group_openid, group_name)
+        for record in self._suspicious_members.values():
+            group_openid = str(record.get("group_openid") or "").strip()
+            group_name = str(record.get("group_name") or "").strip()
+            if group_openid and group_name:
+                groups.setdefault(group_openid, group_name)
+        for record in self._violation_records:
+            group_openid = str(record.get("group_openid") or "").strip()
+            group_name = str(record.get("group_name") or "").strip()
+            if group_openid and group_name:
+                groups.setdefault(group_openid, group_name)
+        return groups
 
     async def web_identities(self) -> dict[str, list[dict[str, Any]]]:
         groups_by_id = self._identity_groups_by_id()

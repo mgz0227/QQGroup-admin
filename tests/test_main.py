@@ -4173,6 +4173,27 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(page["items"][0]["bilibili_uid"], "123")
         self.assertEqual(page["items"][0]["group_name"], "历史审核群")
 
+    async def test_identity_history_survives_group_unbinding(self):
+        plugin, _ = self.plugin()
+        plugin.config["auto_review_groups"][0]["group_name"] = "可持久化群"
+        request = {"username": "历史成员", "union_openid": "union-history"}
+
+        await plugin._bind_uid_identity("123", request, "group-1", "member-1")
+        await plugin._mark_suspicious(
+            request, "group-1", "member-2", "需要真人验证"
+        )
+        plugin.config["auto_review_groups"] = []
+
+        binding_page = await plugin.web_identity_page("bindings", "可持久化群", 1, 10)
+        suspicious_page = await plugin.web_identity_page(
+            "suspicious", "可持久化群", 1, 10
+        )
+
+        self.assertEqual(binding_page["total"], 1)
+        self.assertEqual(binding_page["items"][0]["group_names"], ["可持久化群"])
+        self.assertEqual(suspicious_page["total"], 1)
+        self.assertEqual(suspicious_page["items"][0]["group_name"], "可持久化群")
+
     async def test_legacy_binding_members_map_restores_group_scope_for_search(self):
         plugin, _ = self.plugin()
         plugin.config["auto_review_groups"][0]["group_name"] = "旧版审核群"
