@@ -891,34 +891,28 @@
     providers.forEach(function (provider) {
       if (provider && provider.id) providerById.set(provider.id, provider);
     });
-    var orderedIds = [];
+    var rendered = new Set();
+    // Keep configured fallback order, including providers that are temporarily unavailable.
     selected.forEach(function (providerId) {
-      if (providerById.has(providerId) && orderedIds.indexOf(providerId) < 0) {
-        orderedIds.push(providerId);
-      }
+      if (!providerId || rendered.has(providerId)) return;
+      rendered.add(providerId);
+      var provider = providerById.get(providerId);
+      var option = document.createElement("option");
+      option.value = providerId;
+      option.textContent = provider
+        ? (provider.label || provider.model || provider.id)
+        : ("已不可用：" + providerId);
+      option.selected = true;
+      select.appendChild(option);
     });
     providers.forEach(function (provider) {
-      if (provider && provider.id && orderedIds.indexOf(provider.id) < 0) {
-        orderedIds.push(provider.id);
-      }
-    });
-    orderedIds.forEach(function (providerId) {
-      var provider = providerById.get(providerId);
-      if (!provider) return;
-      if (!provider || !provider.id) return;
+      if (!provider || !provider.id || rendered.has(provider.id)) return;
+      rendered.add(provider.id);
       var option = document.createElement("option");
       option.value = provider.id;
       option.textContent = provider.label || provider.model || provider.id;
-      option.selected = selected.indexOf(provider.id) >= 0;
+      option.selected = false;
       select.appendChild(option);
-    });
-    selected.forEach(function (providerId) {
-      if (!providerId || providers.some(function (provider) { return provider && provider.id === providerId; })) return;
-      var missing = document.createElement("option");
-      missing.value = providerId;
-      missing.textContent = "已不可用：" + providerId;
-      missing.selected = true;
-      select.appendChild(missing);
     });
   }
 

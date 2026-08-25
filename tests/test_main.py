@@ -3877,6 +3877,20 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", 1)', script)
         self.assertGreaterEqual(script.count('"runtime-ai-confirm-provider"'), 3)
 
+    def test_runtime_page_preserves_unavailable_fallback_order(self):
+        script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
+        start = script.index("function fillProviderMultiSelect")
+        end = script.index("function moveSelectedOptions", start)
+        body = script[start:end]
+        selected_index = body.index("selected.forEach(function (providerId)")
+        self.assertLess(
+            selected_index,
+            body.index("providers.forEach(function (provider)", selected_index),
+        )
+        self.assertIn('("已不可用：" + providerId)', body)
+        self.assertIn("rendered.has(providerId)", body)
+        self.assertIn("option.selected = true", body)
+
     def test_ai_decision_requires_confidence_and_is_conservative(self):
         self.assertIsNone(module.QQGroupAdmin._ai_decision("BLOCK", 95))
         self.assertTrue(
