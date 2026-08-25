@@ -158,6 +158,12 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .runtime-grid label > span { display: block; margin-bottom: 7px; }
 .runtime-grid label small, .config-note { display: block; margin-top: 7px; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
 .runtime-grid select[multiple] { min-height: 112px; padding: 6px; }
+.global-ai-panel { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; margin: 24px 24px 0; padding: 18px; border: 1px solid #dce2e8; border-radius: 6px; }
+.global-ai-panel legend { padding: 0 6px; color: #18212f; font-size: 15px; font-weight: 700; }
+.global-ai-panel label { min-width: 0; color: #344054; font-size: 13px; font-weight: 600; }
+.global-ai-panel label > span { display: block; margin-bottom: 7px; }
+.global-ai-panel label small { display: block; margin-top: 7px; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
+.global-ai-panel .wide { grid-column: 1 / -1; }
 .global-policy-toolbar { display: flex; align-items: end; justify-content: space-between; gap: 16px; padding: 14px; border: 1px solid #dce2e8; border-radius: 6px; background: #fafbfc; }
 .global-policy-toolbar label { flex: 1; max-width: 520px; }
 .runtime-policy-scope { margin: 0; }
@@ -234,6 +240,8 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .group-choice-grid { grid-template-columns: 1fr; }
   .runtime-grid { grid-template-columns: 1fr; padding: 18px; }
   .runtime-grid .wide { grid-column: auto; }
+  .global-ai-panel { grid-template-columns: 1fr; margin: 18px 18px 0; }
+  .global-ai-panel .wide { grid-column: auto; }
   .global-policy-toolbar { align-items: stretch; flex-direction: column; }
   .global-policy-toolbar label { max-width: none; }
   .identity-records { padding: 10px 16px 14px; }
@@ -276,8 +284,11 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .group-choice { border-color: #46515e; background: #20262e; }
   .unbound-group-choice { border-color: #8c6b2d; background: #332b1b; color: #f1d28a; }
   .global-keyword-row label, .global-group-scope legend, .global-keyword-defaults label { color: #c3ccd7; }
-  .runtime-grid label { color: #c3ccd7; }
+  .runtime-grid label, .global-ai-panel label { color: #c3ccd7; }
   .runtime-grid label small, .config-note { color: #9ca7b5; }
+  .global-ai-panel { border-color: #39424d; }
+  .global-ai-panel legend { color: #e8edf3; }
+  .global-ai-panel label small { color: #9ca7b5; }
   .global-policy-toolbar { border-color: #39424d; background: #1b2128; }
   .config-note { border-color: #39424d; background: #1b2128; }
   .bilibili-login, .bilibili-qr { border-color: #39424d; }

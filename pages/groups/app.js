@@ -32,6 +32,7 @@
   var runtimeSettings = {};
   var runtimePolicies = [];
   var runtimePolicyIndex = 0;
+  var globalAiSettings = {};
   var GLOBAL_AI_FIELDS = [
     "global_ai_review_enabled", "global_ai_review_provider_id",
     "global_ai_review_fallback_provider_ids", "global_ai_review_confirm_provider_id",
@@ -975,11 +976,24 @@
       });
       runtimePolicies = [legacyPolicy];
     }
+    var explicitGlobalAi = runtimeSettings.global_ai;
+    var globalAiSource = explicitGlobalAi && typeof explicitGlobalAi === "object"
+      ? explicitGlobalAi
+      : (runtimePolicies[0] || runtimeSettings);
+    globalAiSettings = {};
+    GLOBAL_AI_FIELDS.forEach(function (key) {
+      if (Object.prototype.hasOwnProperty.call(globalAiSource, key)) {
+        globalAiSettings[key] = Array.isArray(globalAiSource[key])
+          ? globalAiSource[key].slice()
+          : globalAiSource[key];
+      }
+    });
     runtimePolicyIndex = Math.min(runtimePolicyIndex, runtimePolicies.length - 1);
     fillRuntimePolicySelector();
     fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
     element("runtime-review-interval").value = runtimeSettings.uid_review_interval_seconds || 60;
     fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+    fillGlobalAiFields(globalAiSettings);
     element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
     element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
     element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
@@ -1024,38 +1038,9 @@
     element("runtime-blacklist-reply").value = policy.global_blacklist_reply || "";
     element("runtime-blacklist-at").checked = policy.global_blacklist_at_member === true;
     element("runtime-mute-message").value = policy.mute_success_message || "";
-    element("runtime-ai-enabled").checked = policy.global_ai_review_enabled === true;
-    element("runtime-ai-timeout").value = policy.global_ai_review_timeout_seconds || 20;
-    element("runtime-ai-threshold").value = policy.global_ai_review_block_threshold || 95;
-    element("runtime-ai-action").value = policy.global_ai_review_action || "record_only";
-    element("runtime-ai-reject-reply").value = policy.global_ai_reject_reply || "";
-    element("runtime-ai-reject-at").checked = policy.global_ai_reject_at_member === true;
-    element("runtime-ai-images").checked = policy.global_ai_review_images_enabled === true;
-    fillProviderSelect(
-      "runtime-ai-provider",
-      "使用当前会话模型",
-      policy.global_ai_review_provider_id || ""
-    );
-    fillProviderMultiSelect(
-      "runtime-ai-fallback-providers",
-      policy.global_ai_review_fallback_provider_ids || []
-    );
-    fillProviderSelect(
-      "runtime-ai-confirm-provider",
-      "不进行二次确认",
-      policy.global_ai_review_confirm_provider_id || ""
-    );
     element("runtime-image-reject-keywords").value = policy.global_image_reject_keywords || "";
     element("runtime-image-reject-reply").value = policy.global_image_reject_reply || "";
     element("runtime-image-reject-at").checked = policy.global_image_reject_at_member === true;
-    element("runtime-image-ocr-enabled").checked = policy.global_image_ocr_enabled === true;
-    fillProviderSelect(
-      "runtime-image-ocr-provider",
-      "不使用视觉 OCR 模型",
-      policy.global_image_ocr_provider_id || ""
-    );
-    element("runtime-image-ocr-timeout").value = policy.global_image_ocr_timeout_seconds || 4;
-    element("runtime-image-ocr-max-images").value = policy.global_image_ocr_max_images || 1;
     element("runtime-image-spam-enabled").checked = policy.global_image_spam_enabled === true;
     element("runtime-image-spam-count").value = policy.global_image_spam_count || 5;
     element("runtime-image-spam-window").value = policy.global_image_spam_window_seconds || 15;
@@ -1076,11 +1061,30 @@
     element("runtime-rate-recall-count").value = policy.global_rate_limit_recall_count || 5;
     element("runtime-rate-reply").value = policy.global_rate_limit_reply || "";
     element("runtime-rate-at").checked = policy.global_rate_limit_at_member === true;
-    element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
-    element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
-    element("runtime-ai-confirm-provider").disabled = !element("runtime-ai-enabled").checked;
-    element("runtime-ai-fallback-up").disabled = !element("runtime-ai-enabled").checked;
-    element("runtime-ai-fallback-down").disabled = !element("runtime-ai-enabled").checked;
+  }
+
+  function fillGlobalAiFields(settings) {
+    settings = settings || {};
+    element("runtime-ai-enabled").checked = settings.global_ai_review_enabled === true;
+    element("runtime-ai-timeout").value = settings.global_ai_review_timeout_seconds || 20;
+    element("runtime-ai-threshold").value = settings.global_ai_review_block_threshold || 95;
+    element("runtime-ai-action").value = settings.global_ai_review_action || "record_only";
+    element("runtime-ai-reject-reply").value = settings.global_ai_reject_reply || "";
+    element("runtime-ai-reject-at").checked = settings.global_ai_reject_at_member === true;
+    element("runtime-ai-images").checked = settings.global_ai_review_images_enabled === true;
+    fillProviderSelect("runtime-ai-provider", "使用当前会话模型", settings.global_ai_review_provider_id || "");
+    fillProviderMultiSelect("runtime-ai-fallback-providers", settings.global_ai_review_fallback_provider_ids || []);
+    fillProviderSelect("runtime-ai-confirm-provider", "不进行二次确认", settings.global_ai_review_confirm_provider_id || "");
+    element("runtime-image-ocr-enabled").checked = settings.global_image_ocr_enabled === true;
+    fillProviderSelect("runtime-image-ocr-provider", "不使用视觉 OCR 模型", settings.global_image_ocr_provider_id || "");
+    element("runtime-image-ocr-timeout").value = settings.global_image_ocr_timeout_seconds || 4;
+    element("runtime-image-ocr-max-images").value = settings.global_image_ocr_max_images || 1;
+    var aiEnabled = element("runtime-ai-enabled").checked;
+    element("runtime-ai-provider").disabled = !aiEnabled;
+    element("runtime-ai-fallback-providers").disabled = !aiEnabled;
+    element("runtime-ai-confirm-provider").disabled = !aiEnabled;
+    element("runtime-ai-fallback-up").disabled = !aiEnabled;
+    element("runtime-ai-fallback-down").disabled = !aiEnabled;
     element("runtime-image-ocr-provider").disabled = !element("runtime-image-ocr-enabled").checked;
   }
 
@@ -1130,6 +1134,25 @@
     };
   }
 
+  function readGlobalAiFields() {
+    return {
+      global_ai_review_enabled: element("runtime-ai-enabled").checked,
+      global_ai_review_provider_id: element("runtime-ai-provider").value,
+      global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
+      global_ai_review_confirm_provider_id: element("runtime-ai-confirm-provider").value,
+      global_ai_review_timeout_seconds: Number(element("runtime-ai-timeout").value),
+      global_ai_review_block_threshold: Number(element("runtime-ai-threshold").value),
+      global_ai_review_action: element("runtime-ai-action").value,
+      global_ai_reject_reply: element("runtime-ai-reject-reply").value,
+      global_ai_reject_at_member: element("runtime-ai-reject-at").checked,
+      global_ai_review_images_enabled: element("runtime-ai-images").checked,
+      global_image_ocr_enabled: element("runtime-image-ocr-enabled").checked,
+      global_image_ocr_provider_id: element("runtime-image-ocr-provider").value,
+      global_image_ocr_timeout_seconds: Number(element("runtime-image-ocr-timeout").value),
+      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value)
+    };
+  }
+
   function readRuntimePolicy() {
     var all = element("runtime-policy-all-groups").checked;
     var selectedGroups = Array.from(element("runtime-policy-groups").querySelectorAll("input:checked")).map(function (input) { return input.value; });
@@ -1151,23 +1174,9 @@
       global_member_whitelist: element("runtime-member-whitelist").value,
       global_blacklist_reply: element("runtime-blacklist-reply").value,
       global_blacklist_at_member: element("runtime-blacklist-at").checked,
-      global_ai_review_enabled: element("runtime-ai-enabled").checked,
-      global_ai_review_provider_id: element("runtime-ai-provider").value,
-      global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
-      global_ai_review_confirm_provider_id: element("runtime-ai-confirm-provider").value,
-      global_ai_review_timeout_seconds: Number(element("runtime-ai-timeout").value),
-      global_ai_review_block_threshold: Number(element("runtime-ai-threshold").value),
-      global_ai_review_action: element("runtime-ai-action").value,
-      global_ai_reject_reply: element("runtime-ai-reject-reply").value,
-      global_ai_reject_at_member: element("runtime-ai-reject-at").checked,
-      global_ai_review_images_enabled: element("runtime-ai-images").checked,
       global_image_reject_keywords: element("runtime-image-reject-keywords").value,
       global_image_reject_reply: element("runtime-image-reject-reply").value,
       global_image_reject_at_member: element("runtime-image-reject-at").checked,
-      global_image_ocr_enabled: element("runtime-image-ocr-enabled").checked,
-      global_image_ocr_provider_id: element("runtime-image-ocr-provider").value,
-      global_image_ocr_timeout_seconds: Number(element("runtime-image-ocr-timeout").value),
-      global_image_ocr_max_images: Number(element("runtime-image-ocr-max-images").value),
       global_image_spam_enabled: element("runtime-image-spam-enabled").checked,
       global_image_spam_count: Number(element("runtime-image-spam-count").value),
       global_image_spam_window_seconds: Number(element("runtime-image-spam-window").value),
@@ -1195,13 +1204,6 @@
     var current = readRuntimePolicy();
     if (!current.name) throw new Error("策略名称不能为空");
     runtimePolicies[runtimePolicyIndex] = current;
-    // AI/OCR is global; edits made while viewing any scoped policy must be
-    // copied to every payload item before the server normalizes the save.
-    runtimePolicies.forEach(function (policy) {
-      GLOBAL_AI_FIELDS.forEach(function (key) {
-        policy[key] = Array.isArray(current[key]) ? current[key].slice() : current[key];
-      });
-    });
     return current;
   }
 
@@ -1214,16 +1216,20 @@
     }
     var button = element("runtime-policy-save");
     button.disabled = true;
-    apiPost("global-policies/save", { profiles: runtimePolicies })
+    var globalAi = readGlobalAiFields();
+    apiPost("global-policies/save", { profiles: runtimePolicies, global_ai: globalAi })
       .then(function (saved) {
         runtimePolicies = (saved && Array.isArray(saved.profiles)) ? saved.profiles : runtimePolicies;
         if (saved) {
+          globalAiSettings = saved.global_ai || globalAi;
+          runtimeSettings.global_ai = globalAiSettings;
           runtimeSettings.global_policy_warnings = Array.isArray(saved.warnings) ? saved.warnings : [];
           runtimeSettings.global_policy_groups = Array.isArray(saved.groups) ? saved.groups : runtimeSettings.global_policy_groups;
         }
         fillRuntimePolicySelector();
         fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
         fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+        fillGlobalAiFields(globalAiSettings);
         renderRuntimePolicyWarnings();
         toast("全局群策略已保存");
       })
@@ -1282,8 +1288,10 @@
       bilibili_dynamic_interval_seconds: Number(element("runtime-dynamic-interval").value)
     };
     var current;
+    var globalAi;
     try {
       current = commitCurrentRuntimePolicy();
+      globalAi = readGlobalAiFields();
     } catch (error) {
       toast(error.message, true);
       return;
@@ -1292,8 +1300,11 @@
     button.disabled = true;
     apiPost("runtime/save", settings)
       .then(function (saved) {
-        return apiPost("global-policies/save", { profiles: runtimePolicies }).then(function (policySaved) {
-          var merged = Object.assign({}, saved || {}, { global_policies: policySaved && policySaved.profiles });
+        return apiPost("global-policies/save", { profiles: runtimePolicies, global_ai: globalAi }).then(function (policySaved) {
+          var merged = Object.assign({}, saved || {}, {
+            global_policies: policySaved && policySaved.profiles,
+            global_ai: policySaved && policySaved.global_ai
+          });
           fillRuntime(merged);
           toast("全局运行配置已保存");
         });

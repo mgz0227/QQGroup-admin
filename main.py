@@ -2249,6 +2249,16 @@ class QQGroupAdmin(Star):
             if key in legacy
         }
 
+    def _global_ai_values_for_web(self) -> dict[str, Any]:
+        """Expose AI/OCR settings independently from scoped policy profiles."""
+        configured = self._global_ai_policy()
+        return {
+            key: list(configured.get(key, GLOBAL_POLICY_DEFAULTS[key]))
+            if isinstance(configured.get(key, GLOBAL_POLICY_DEFAULTS[key]), list)
+            else configured.get(key, GLOBAL_POLICY_DEFAULTS[key])
+            for key in GLOBAL_AI_POLICY_KEYS
+        }
+
     def _global_policy_for_group(self, group_openid: str) -> dict[str, Any]:
         policies = self._configured_global_policies()
         if not policies:
@@ -6438,6 +6448,7 @@ class QQGroupAdmin(Star):
                 for group in bound_groups
             ],
             "profiles": self._global_policy_profiles_for_web(),
+            "global_ai": self._global_ai_values_for_web(),
             "warnings": self._global_policy_scope_warnings(
                 {str(group["group_openid"]) for group in bound_groups}
             ),
@@ -6450,9 +6461,25 @@ class QQGroupAdmin(Star):
             item for item in settings.get("profiles", []) if isinstance(item, dict)
         ]
         first_raw = raw_profiles[0] if raw_profiles else {}
+        explicit_global_ai = settings.get("global_ai")
+        if explicit_global_ai is not None and not isinstance(explicit_global_ai, dict):
+            raise TypeError("全局 AI 配置必须是对象")
+        configured_global_ai = self._global_ai_values_for_web()
+        if isinstance(explicit_global_ai, dict):
+            configured_global_ai.update(
+                {
+                    key: value
+                    for key, value in explicit_global_ai.items()
+                    if key in GLOBAL_AI_POLICY_KEYS
+                }
+            )
         global_ai_values: dict[str, Any] = {}
         for key in GLOBAL_AI_POLICY_KEYS:
-            value = first_raw.get(key, self.config.get(key, GLOBAL_POLICY_DEFAULTS[key]))
+            value = (
+                configured_global_ai.get(key, GLOBAL_POLICY_DEFAULTS[key])
+                if isinstance(explicit_global_ai, dict)
+                else first_raw.get(key, self.config.get(key, GLOBAL_POLICY_DEFAULTS[key]))
+            )
             if key == GLOBAL_AI_FALLBACKS_KEY:
                 value = normalize_provider_ids(value)
             global_ai_values[key] = list(value) if isinstance(value, list) else value
@@ -6658,6 +6685,7 @@ class QQGroupAdmin(Star):
                 }
                 for group in bound_groups
             ],
+            "global_ai": self._global_ai_values_for_web(),
         }
 
     async def web_save_runtime_settings(

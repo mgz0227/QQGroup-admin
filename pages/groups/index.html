@@ -163,6 +163,24 @@
             <h2>全局运行配置</h2>
             <button class="button" id="save-runtime" type="submit">保存</button>
           </div>
+          <fieldset class="global-ai-panel">
+            <legend>全局 AI 内容审核（所有已绑定群）</legend>
+            <p class="config-note wide">以下 AI/OCR 设置独立于群级策略，对所有已绑定群生效；切换、增加或删除群策略不会改变这里的配置。管理员和白名单成员仍按免审规则处理。</p>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-enabled" type="checkbox"><span>启用全局 AI 内容审核</span></label>
+            <label><span>主模型</span><select id="runtime-ai-provider"></select></label>
+            <label class="wide"><span>回退模型（按列表顺序尝试）</span><div class="fallback-model-picker"><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><div class="fallback-model-actions"><button class="button secondary small-button" id="runtime-ai-fallback-up" type="button" aria-label="上移选中的回退模型">上移</button><button class="button secondary small-button" id="runtime-ai-fallback-down" type="button" aria-label="下移选中的回退模型">下移</button></div></div><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，按列表顺序尝试，主模型不能重复选择。</small></label>
+            <label><span>二次确认模型（可选）</span><select id="runtime-ai-confirm-provider"></select><small>仅在初判 BLOCK 后调用；确认失败时只记录。</small></label>
+            <label><span>审核总超时（秒）</span><input id="runtime-ai-timeout" type="number" min="5" max="120" required></label>
+            <label><span>拦截置信度阈值</span><input id="runtime-ai-threshold" type="number" min="50" max="100" required></label>
+            <label><span>AI 命中动作</span><select id="runtime-ai-action"><option value="record_only">只记录，不撤回</option><option value="recall">撤回消息</option></select></label>
+            <label class="wide"><span>AI 撤回回复</span><textarea id="runtime-ai-reject-reply" maxlength="1000" rows="2"></textarea></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-reject-at" type="checkbox"><span>AI 撤回时艾特成员</span></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-images" type="checkbox"><span>启用 AI 图片审核</span></label>
+            <label class="checkbox runtime-toggle"><input id="runtime-image-ocr-enabled" type="checkbox"><span>启用图片 OCR 关键词审核</span></label>
+            <label><span>OCR 模型（可选）</span><select id="runtime-image-ocr-provider"></select></label>
+            <label><span>OCR 超时（秒）</span><input id="runtime-image-ocr-timeout" type="number" min="2" max="30" required></label>
+            <label><span>单条最多 OCR 图片数</span><input id="runtime-image-ocr-max-images" type="number" min="1" max="3" required></label>
+          </fieldset>
           <div class="runtime-grid">
             <div class="section-title wide">群级全局策略</div>
             <div class="global-policy-toolbar wide">
@@ -180,7 +198,7 @@
               <label class="checkbox"><input id="runtime-policy-all-groups" type="checkbox"><span>全部已绑定群（包含以后新增的群）</span></label>
               <div class="group-choice-grid" id="runtime-policy-groups"></div>
             </fieldset>
-            <p class="config-note wide">策略按列表顺序匹配；同一群命中第一套启用策略。入群关键词、黑白名单、图片规则、回复和冷却可按群设置；AI 主备模型、审核阈值和图片 OCR 为全局单份。运行轮询间隔、B站登录账号等平台级参数仍保持单份。</p>
+            <p class="config-note wide">策略按列表顺序匹配；同一群命中第一套启用策略。入群关键词、黑白名单、图片规则、回复和冷却可按群设置；AI/OCR 请在上方独立面板维护。运行轮询间隔、B站登录账号等平台级参数仍保持单份。</p>
             <div class="config-note config-warning wide" id="runtime-policy-warnings" role="status" hidden></div>
             <div class="section-title wide">入群审核</div>
             <label><span>审核轮询间隔（秒）</span><input id="runtime-review-interval" type="number" min="15" max="600" required></label>
@@ -201,25 +219,9 @@
             <label class="checkbox runtime-toggle"><input id="runtime-blacklist-at" type="checkbox"><span>全局黑名单撤回时艾特成员</span></label>
             <label class="wide"><span>禁言成功回复</span><textarea id="runtime-mute-message" maxlength="1000" rows="3"></textarea></label>
 
-            <div class="section-title wide">全局 AI 内容审核</div>
-            <label class="checkbox runtime-toggle"><input id="runtime-ai-enabled" type="checkbox"><span>启用全局 AI 内容审核</span></label>
-            <p class="config-note wide">以下 AI/OCR 设置对所有已绑定群生效；管理员和白名单成员仍按免审规则处理。</p>
-            <label><span>主模型</span><select id="runtime-ai-provider"></select></label>
-            <label class="wide"><span>回退模型（按列表顺序尝试）</span><div class="fallback-model-picker"><select id="runtime-ai-fallback-providers" multiple size="4" aria-describedby="runtime-ai-hint"></select><div class="fallback-model-actions"><button class="button secondary small-button" id="runtime-ai-fallback-up" type="button" aria-label="上移选中的回退模型">上移</button><button class="button secondary small-button" id="runtime-ai-fallback-down" type="button" aria-label="下移选中的回退模型">下移</button></div></div><small id="runtime-ai-hint">仅在主模型失败、超时或返回无效结果时调用；最多 3 个回退模型，按列表顺序尝试，主模型不能重复选择。</small></label>
-            <label><span>二次确认模型（可选）</span><select id="runtime-ai-confirm-provider"></select><small>仅在初判 BLOCK 后调用；确认失败时只记录。</small></label>
-            <label><span>审核总超时（秒）</span><input id="runtime-ai-timeout" type="number" min="5" max="120" required></label>
-            <label><span>拦截置信度阈值</span><input id="runtime-ai-threshold" type="number" min="50" max="100" required></label>
-            <label><span>AI 命中动作</span><select id="runtime-ai-action"><option value="record_only">只记录，不撤回</option><option value="recall">撤回消息</option></select></label>
-            <label class="wide"><span>AI 撤回回复</span><textarea id="runtime-ai-reject-reply" maxlength="1000" rows="2"></textarea></label>
-            <label class="checkbox runtime-toggle"><input id="runtime-ai-reject-at" type="checkbox"><span>AI 撤回时艾特成员</span></label>
-            <label class="checkbox runtime-toggle"><input id="runtime-ai-images" type="checkbox"><span>启用 AI 图片审核</span></label>
             <label class="wide"><span>全局图片文字撤回关键词</span><textarea id="runtime-image-reject-keywords" rows="3" placeholder="开启图片 OCR 后生效，每行一个关键词"></textarea></label>
             <label class="wide"><span>全局图片关键词撤回回复</span><textarea id="runtime-image-reject-reply" maxlength="1000" rows="2"></textarea></label>
             <label class="checkbox runtime-toggle"><input id="runtime-image-reject-at" type="checkbox"><span>全局图片关键词撤回时艾特成员</span></label>
-            <label class="checkbox runtime-toggle"><input id="runtime-image-ocr-enabled" type="checkbox"><span>启用图片 OCR 关键词审核</span></label>
-            <label><span>OCR 模型（可选）</span><select id="runtime-image-ocr-provider"></select></label>
-            <label><span>OCR 超时（秒）</span><input id="runtime-image-ocr-timeout" type="number" min="2" max="30" required></label>
-            <label><span>单条最多 OCR 图片数</span><input id="runtime-image-ocr-max-images" type="number" min="1" max="3" required></label>
 
             <div class="section-title wide">全局连续发图与复读</div>
             <p class="config-note wide">按当前策略覆盖的已绑定群统一生效；连续发图和复读不再受单群“消息审核”开关限制。每套策略可单独设置阈值、撤回数量、随机禁言区间和回复。</p>

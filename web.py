@@ -76,6 +76,22 @@ GLOBAL_POLICY_FIELDS = (
     "keyword_reply_cooldown_seconds",
     "keyword_reply_recall_seconds",
 )
+GLOBAL_AI_FIELDS = (
+    "global_ai_review_enabled",
+    "global_ai_review_provider_id",
+    "global_ai_review_fallback_provider_ids",
+    "global_ai_review_confirm_provider_id",
+    "global_ai_review_timeout_seconds",
+    "global_ai_review_images_enabled",
+    "global_ai_review_block_threshold",
+    "global_ai_review_action",
+    "global_ai_reject_reply",
+    "global_ai_reject_at_member",
+    "global_image_ocr_enabled",
+    "global_image_ocr_provider_id",
+    "global_image_ocr_timeout_seconds",
+    "global_image_ocr_max_images",
+)
 GLOBAL_MEDIA_POLICY_KEYS = {
     "global_image_spam_enabled",
     "global_image_spam_count",
@@ -1464,8 +1480,24 @@ class GroupAdminWeb:
         )
         if not profiles:
             raise ValueError("至少保留一套全局群策略")
+        settings: dict[str, Any] = {"profiles": profiles}
+        if "global_ai" in payload:
+            raw_global_ai = payload.get("global_ai")
+            if not isinstance(raw_global_ai, dict):
+                raise TypeError("全局 AI 配置必须是 JSON 对象")
+            current_global_ai = current.get("global_ai")
+            merged_global_ai = {
+                **(current_global_ai if isinstance(current_global_ai, dict) else {}),
+                **raw_global_ai,
+            }
+            validated_global_ai = self._runtime_settings(merged_global_ai)
+            settings["global_ai"] = {
+                key: validated_global_ai[key]
+                for key in GLOBAL_AI_FIELDS
+                if key in validated_global_ai
+            }
         return self._response(
-            await self.plugin.web_save_global_policies({"profiles": profiles}),
+            await self.plugin.web_save_global_policies(settings),
             message="全局群策略已保存",
         )
 

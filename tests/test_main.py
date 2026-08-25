@@ -1351,6 +1351,76 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["primary-one", "primary-one"],
         )
 
+    async def test_global_policy_save_keeps_explicit_ai_outside_scoped_profiles(self):
+        plugin, _ = self.plugin()
+        current = await plugin.web_global_policies()
+        saved = await plugin.web_save_global_policies(
+            {
+                "profiles": current["profiles"],
+                "global_ai": {
+                    "global_ai_review_enabled": True,
+                    "global_ai_review_provider_id": "global-primary",
+                    "global_ai_review_fallback_provider_ids": [
+                        "fallback-one",
+                        "fallback-two",
+                    ],
+                    "global_ai_review_timeout_seconds": 41,
+                    "global_image_ocr_enabled": True,
+                    "global_image_ocr_provider_id": "vision-ocr",
+                },
+            }
+        )
+
+        self.assertTrue(saved["global_ai"]["global_ai_review_enabled"])
+        self.assertEqual(
+            saved["global_ai"]["global_ai_review_provider_id"], "global-primary"
+        )
+        self.assertEqual(
+            saved["global_ai"]["global_ai_review_fallback_provider_ids"],
+            ["fallback-one", "fallback-two"],
+        )
+        self.assertEqual(saved["global_ai"]["global_ai_review_timeout_seconds"], 41)
+        self.assertTrue(saved["global_ai"]["global_image_ocr_enabled"])
+        self.assertEqual(saved["global_ai"]["global_image_ocr_provider_id"], "vision-ocr")
+        self.assertEqual(plugin.config["global_ai_review_provider_id"], "global-primary")
+        self.assertEqual(
+            {item["global_ai_review_provider_id"] for item in saved["profiles"]},
+            {"global-primary"},
+        )
+
+    async def test_global_policy_route_validates_explicit_ai_object(self):
+        plugin, _ = self.plugin()
+        web = module.GroupAdminWeb(plugin, plugin.context)
+        current = await plugin.web_global_policies()
+        payload = {
+            "profiles": current["profiles"],
+            "global_ai": {
+                "global_ai_review_provider_id": "primary",
+                "global_ai_review_fallback_provider_ids": ["fallback-1", "fallback-2"],
+                "global_ai_review_timeout_seconds": 55,
+            },
+        }
+        web_module = sys.modules[module.GroupAdminWeb.__module__]
+        with patch.object(
+            web_module.request, "json", AsyncMock(return_value=payload), create=True
+        ):
+            response = await web.page_global_policies_save()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(
+            response["data"]["global_ai"]["global_ai_review_fallback_provider_ids"],
+            ["fallback-1", "fallback-2"],
+        )
+        with patch.object(
+            web_module.request,
+            "json",
+            AsyncMock(
+                return_value={"profiles": current["profiles"], "global_ai": []}
+            ),
+            create=True,
+        ), self.assertRaisesRegex(TypeError, "全局 AI 配置必须是 JSON 对象"):
+            await web.page_global_policies_save()
+
     def test_old_global_profile_inherits_top_level_ai_settings(self):
         plugin, _ = self.plugin()
         plugin.config.update(
@@ -3877,6 +3947,19 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", -1)', script)
         self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", 1)', script)
         self.assertGreaterEqual(script.count('"runtime-ai-confirm-provider"'), 3)
+
+    def test_runtime_page_keeps_ai_controls_in_independent_panel(self):
+        html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
+        script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
+        self.assertIn('class="global-ai-panel"', html)
+        self.assertIn("全局 AI 内容审核（所有已绑定群）", html)
+        self.assertIn("var globalAiSettings = {};", script)
+        self.assertIn("fillGlobalAiFields(globalAiSettings);", script)
+        self.assertIn(
+            'apiPost("global-policies/save", { profiles: runtimePolicies, global_ai: globalAi })',
+            script,
+        )
+        self.assertNotIn("GLOBAL_AI_FIELDS.forEach(function (key) {", script[script.index("function commitCurrentRuntimePolicy"):script.index("function saveRuntimePolicies")])
 
     def test_runtime_page_preserves_unavailable_fallback_order(self):
         script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
