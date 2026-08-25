@@ -3068,6 +3068,100 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             backup["auto_review_groups"],
         )
 
+    async def test_join_config_backup_restores_schema_default_empty_list(self):
+        plugin, _client = self.plugin()
+        await plugin._save_config_backup()
+        backup = plugin._config_backup
+        plugin.config["auto_review_groups"] = []
+        plugin._config_reset_candidate = True
+
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertEqual(
+            plugin.config["auto_review_groups"],
+            backup["auto_review_groups"],
+        )
+
+    async def test_startup_migration_does_not_overwrite_join_backup(self):
+        config = TestConfig(auto_review_groups=[])
+        plugin = module.QQGroupAdmin(SimpleNamespace(), config)
+        plugin._kv[module.CONFIG_BACKUP_KEY] = {
+            "auto_review_groups": [{"group_openid": "kept-group"}],
+            module.WELCOME_RULES_KEY: [
+                {"name": "入群欢迎", "group_openids": "kept-group"}
+            ],
+        }
+
+        await plugin._load_state()
+        self.assertEqual(
+            plugin._config_backup["auto_review_groups"][0]["group_openid"],
+            "kept-group",
+        )
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertEqual(
+            plugin.config["auto_review_groups"][0]["group_openid"],
+            "kept-group",
+        )
+        self.assertEqual(
+            plugin.config[module.WELCOME_RULES_KEY][0]["name"],
+            "入群欢迎",
+        )
+
+    async def test_partial_welcome_reset_restores_without_touching_groups(self):
+        plugin, _client = self.plugin()
+        plugin.config[module.WELCOME_RULES_KEY] = []
+        plugin._config_backup = {
+            "auto_review_groups": [{"group_openid": "kept-group"}],
+            module.WELCOME_RULES_KEY: [{"name": "欢迎", "group_openids": "kept-group"}],
+        }
+        plugin._config_reset_keys = {module.WELCOME_RULES_KEY}
+        plugin._config_reset_candidate = True
+
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertEqual(
+            plugin.config["auto_review_groups"][0]["group_openid"],
+            "group-1",
+        )
+        self.assertEqual(plugin.config[module.WELCOME_RULES_KEY][0]["name"], "欢迎")
+
+    async def test_corrupt_state_still_loads_separate_config_backup(self):
+        config = TestConfig(auto_review_groups=[])
+        plugin = module.QQGroupAdmin(SimpleNamespace(), config)
+        plugin._kv[module.STATE_KEY] = "corrupt"
+        plugin._kv[module.CONFIG_BACKUP_KEY] = {
+            "auto_review_groups": [{"group_openid": "recovered"}],
+        }
+
+        await plugin._load_state()
+        self.assertEqual(
+            plugin._config_backup["auto_review_groups"][0]["group_openid"],
+            "recovered",
+        )
+
+    async def test_backup_save_retries_after_inflight_config_change(self):
+        plugin, _client = self.plugin()
+        plugin._config_backup_ready = True
+        writes = []
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def put(key, value):
+            writes.append((key, value["auto_review_groups"][0]["group_openid"]))
+            if len(writes) == 1:
+                entered.set()
+                await release.wait()
+
+        plugin.put_kv_data = put
+        plugin._schedule_config_backup()
+        await asyncio.sleep(0.25)
+        await entered.wait()
+        plugin.config["auto_review_groups"][0]["group_openid"] = "latest"
+        plugin._schedule_config_backup()
+        release.set()
+        await asyncio.wait_for(plugin._config_backup_task, timeout=1)
+
+        self.assertEqual(writes[-1][1], "latest")
+        self.assertGreaterEqual(len(writes), 2)
+
     async def test_join_config_backup_does_not_restore_intentional_empty_list(self):
         plugin, _client = self.plugin()
         await plugin._save_config_backup()

@@ -502,17 +502,27 @@ class QQGroupAdmin(Star):
             "dynamic": {},
         }
         raw_group_config = self.config.get("auto_review_groups")
-        self._config_reset_candidate = bool(
-            getattr(self.config, "first_deploy", False)
-            or "auto_review_groups" not in self.config
-            or raw_group_config is None
-            or not isinstance(raw_group_config, list)
-        )
+        self._config_reset_candidate = not isinstance(raw_group_config, list) or not raw_group_config
         self._config_full_reset_candidate = bool(
             getattr(self.config, "first_deploy", False)
         )
+        self._config_reset_keys = {
+            key
+            for key in (
+                "auto_review_groups",
+                WELCOME_RULES_KEY,
+                GLOBAL_POLICIES_KEY,
+            )
+            if not isinstance(self.config.get(key), list)
+            or not self.config.get(key)
+        }
+        self._config_reset_candidate = bool(self._config_reset_keys)
         self._config_backup: dict[str, Any] = {}
         self._config_backup_task: asyncio.Task[None] | None = None
+        self._config_backup_dirty = False
+        # Config migration runs before AstrBot loads the durable KV store. Do
+        # not let startup defaults overwrite the last good snapshot.
+        self._config_backup_ready = False
         self._moderation = ModerationWindows()
         self._ai_semaphore = asyncio.Semaphore(2)
         # Keep local OCR and image decoding from competing with the host for CPU.
@@ -723,7 +733,13 @@ class QQGroupAdmin(Star):
         """Save config and schedule a durable, bounded join-config snapshot."""
 
         self.config.save_config()
-        self._schedule_config_backup()
+        if self._config_backup_ready:
+            # A post-startup save is an explicit user/config-manager write;
+            # an empty list must not be mistaken for an update reset later.
+            self._config_reset_candidate = False
+            self._config_full_reset_candidate = False
+            self._config_reset_keys.clear()
+            self._schedule_config_backup()
 
     def _config_backup_payload(self) -> dict[str, Any] | None:
         entries = self.config.get("auto_review_groups")
@@ -747,6 +763,7 @@ class QQGroupAdmin(Star):
         return payload
 
     def _schedule_config_backup(self) -> None:
+        self._config_backup_dirty = True
         try:
             loop = asyncio.get_running_loop()
         except RuntimeError:
@@ -761,8 +778,10 @@ class QQGroupAdmin(Star):
 
     async def _save_config_backup_later(self) -> None:
         # ponytail: coalesce bursty WebUI/whitelist saves into one bounded KV write.
-        await asyncio.sleep(0.2)
-        await self._save_config_backup()
+        while self._config_backup_dirty:
+            self._config_backup_dirty = False
+            await asyncio.sleep(0.2)
+            await self._save_config_backup()
 
     async def _save_config_backup(self) -> None:
         payload = self._config_backup_payload()
@@ -779,31 +798,47 @@ class QQGroupAdmin(Star):
     async def _restore_config_backup(self) -> bool:
         if not self._config_reset_candidate:
             return False
-        entries = self._config_backup.get("auto_review_groups")
-        if not isinstance(entries, list) or not entries:
-            return False
-        self.config["auto_review_groups"] = copy.deepcopy(
-            entries[:CONFIG_BACKUP_GROUP_LIMIT]
+        restored: dict[str, int] = {}
+        candidates = (
+            ("auto_review_groups", CONFIG_BACKUP_GROUP_LIMIT),
+            (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
+            (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
         )
-        if self._config_full_reset_candidate:
-            for key, limit in (
-                (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
-                (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
+        for key, limit in candidates:
+            current = self.config.get(key)
+            backup = self._config_backup.get(key)
+            # AstrBot fills a missing template_list with its [] default. Treat
+            # an empty list as a reset only when a non-empty durable snapshot
+            # exists; an intentional empty save snapshots [] and is preserved.
+            reset_key = key in self._config_reset_keys or (
+                key == "auto_review_groups" and self._config_reset_candidate
+            )
+            if (
+                not reset_key
+                or not isinstance(backup, list)
+                or not backup
+                or (isinstance(current, list) and current)
             ):
-                value = self._config_backup.get(key)
-                if isinstance(value, list):
-                    self.config[key] = copy.deepcopy(value[:limit])
+                continue
+            self.config[key] = copy.deepcopy(backup[:limit])
+            restored[key] = len(self.config[key])
+        if not restored:
+            return False
         self.config.save_config()
-        self._config_reset_candidate = False
-        self.logger.warning(
-            "检测到插件配置被重建，已从持久快照恢复 %d 个入群审核群配置",
-            len(self.config["auto_review_groups"]),
-        )
+        self._config_reset_keys.difference_update(restored)
+        self._config_reset_candidate = bool(self._config_reset_keys)
+        self._config_full_reset_candidate = False
+        if "auto_review_groups" in restored:
+            self.logger.warning(
+                "检测到插件配置被重建，已从持久快照恢复 %d 个入群审核群配置",
+                restored["auto_review_groups"],
+            )
         return True
 
     async def initialize(self) -> None:
         await self._load_state()
         await self._restore_config_backup()
+        self._config_backup_ready = True
         await self._save_config_backup()
         self._web.register_routes()
         self._patch_qq_clients()
@@ -876,7 +911,7 @@ class QQGroupAdmin(Star):
         value = await getter(STATE_KEY, {}) if getter else {}
         if not isinstance(value, dict):
             self.logger.warning("QQ群管理持久状态格式错误，已忽略")
-            return
+            value = {}
         self._uid_bindings, bindings_trimmed = self._bounded_identity_state(
             value.get("uid_bindings"), MAX_UID_BINDINGS, ("last_seen_at", "bound_at")
         )
