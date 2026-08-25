@@ -3661,6 +3661,52 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         saved = plugin._kv[module.STATE_KEY]["violation_records"]
         self.assertEqual([record["record_id"] for record in saved], record_ids)
 
+    async def test_identity_state_is_bounded_and_member_lookup_is_indexed(self):
+        plugin, _ = self.plugin()
+        previous_limits = (module.MAX_UID_BINDINGS, module.MAX_SUSPICIOUS_MEMBERS)
+        module.MAX_UID_BINDINGS = 2
+        module.MAX_SUSPICIOUS_MEMBERS = 2
+        try:
+            plugin._kv[module.STATE_KEY] = {
+                "uid_bindings": {
+                    "old": {
+                        "uid": "old",
+                        "groups": ["group-1"],
+                        "member_openid": "member-old",
+                        "bound_at": 1,
+                    },
+                    "new-1": {
+                        "uid": "new-1",
+                        "groups": ["group-1"],
+                        "member_openid": "member-1",
+                        "last_seen_at": 3,
+                    },
+                    "new-2": {
+                        "uid": "new-2",
+                        "members": {"group-1": "member-2"},
+                        "last_seen_at": 2,
+                    },
+                },
+                "suspicious_members": {
+                    "old": {"created_at": 1},
+                    "new-1": {"created_at": 3},
+                    "new-2": {"created_at": 2},
+                },
+            }
+
+            await plugin._load_state()
+
+            self.assertEqual(set(plugin._uid_bindings), {"new-1", "new-2"})
+            self.assertEqual(set(plugin._suspicious_members), {"new-1", "new-2"})
+            self.assertEqual(plugin._uid_for_member("group-1", "member-1"), "new-1")
+            self.assertEqual(plugin._uid_for_member("group-1", "member-2"), "new-2")
+            plugin._uid_bindings["new-2"]["members"]["group-2"] = "member-2b"
+            self.assertEqual(plugin._uid_for_member("group-2", "member-2b"), "new-2")
+            await plugin.web_delete_binding("new-1")
+            self.assertEqual(plugin._uid_for_member("group-1", "member-1"), "")
+        finally:
+            module.MAX_UID_BINDINGS, module.MAX_SUSPICIOUS_MEMBERS = previous_limits
+
     async def test_violation_review_updates_by_stable_id_and_filters(self):
         plugin, _ = self.plugin()
         await plugin._record_uid_violation(

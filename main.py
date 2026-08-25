@@ -174,6 +174,10 @@ SETTINGS_ACTIONS = {
     "bili_live_off",
 }
 STATE_KEY = "qqgroup_admin_state_v1"
+# Keep identity state bounded so a busy deployment cannot grow its KV payload
+# or make every WebUI query increasingly expensive.
+MAX_UID_BINDINGS = 20_000
+MAX_SUSPICIOUS_MEMBERS = 10_000
 VIOLATION_REVIEW_STATUSES = frozenset({"pending", "confirmed", "false_positive"})
 
 GLOBAL_POLICY_DEFAULTS = {
@@ -476,6 +480,10 @@ class QQGroupAdmin(Star):
         self._bilibili_task: asyncio.Task[None] | None = None
         self._state_lock = asyncio.Lock()
         self._uid_bindings: dict[str, dict[str, Any]] = {}
+        self._uid_binding_members: dict[tuple[str, str], str] = {}
+        self._uid_binding_index_source = self._uid_bindings
+        self._uid_binding_index_count = 0
+        self._uid_binding_index_size = 0
         self._suspicious_members: dict[str, dict[str, Any]] = {}
         self._violation_records: list[dict[str, Any]] = []
         self._last_violation_state_save_at = 0.0
@@ -758,8 +766,17 @@ class QQGroupAdmin(Star):
         if not isinstance(value, dict):
             self.logger.warning("QQ群管理持久状态格式错误，已忽略")
             return
-        self._uid_bindings = valid_state_dict(value.get("uid_bindings"))
-        self._suspicious_members = valid_state_dict(value.get("suspicious_members"))
+        self._uid_bindings, bindings_trimmed = self._bounded_identity_state(
+            value.get("uid_bindings"), MAX_UID_BINDINGS, ("last_seen_at", "bound_at")
+        )
+        self._suspicious_members, suspicious_trimmed = self._bounded_identity_state(
+            value.get("suspicious_members"),
+            MAX_SUSPICIOUS_MEMBERS,
+            ("created_at",),
+        )
+        self._rebuild_uid_binding_index()
+        if bindings_trimmed or suspicious_trimmed:
+            self._violation_state_dirty = True
         records = value.get("violation_records")
         if isinstance(records, list):
             loaded_records = [
@@ -782,6 +799,110 @@ class QQGroupAdmin(Star):
             }
         if self._violation_state_dirty:
             await self._save_state()
+
+    @staticmethod
+    def _identity_state_timestamp(
+        item: Any,
+        fields: tuple[str, ...],
+    ) -> int:
+        if not isinstance(item, dict):
+            return 0
+        timestamp = 0
+        for field in fields:
+            try:
+                timestamp = max(timestamp, int(item.get(field) or 0))
+            except (TypeError, ValueError):
+                continue
+        return max(0, timestamp)
+
+    @classmethod
+    def _bounded_identity_state(
+        cls,
+        value: Any,
+        limit: int,
+        timestamp_fields: tuple[str, ...],
+    ) -> tuple[dict[str, dict[str, Any]], bool]:
+        state = valid_state_dict(value)
+        if len(state) <= limit:
+            return state, False
+        # Keep the newest entries while retaining insertion order for equal
+        # timestamps.  The state is capped before any WebUI query or save.
+        ranked = sorted(
+            enumerate(state.items()),
+            key=lambda item: (
+                cls._identity_state_timestamp(item[1][1], timestamp_fields),
+                item[0],
+            ),
+            reverse=True,
+        )
+        return dict(item for _, item in ranked[:limit]), True
+
+    @staticmethod
+    def _binding_member_pairs(
+        uid: str,
+        binding: Any,
+    ) -> list[tuple[tuple[str, str], str]]:
+        if not isinstance(binding, dict):
+            return []
+        pairs: list[tuple[tuple[str, str], str]] = []
+        members = binding.get("members")
+        if isinstance(members, dict):
+            for group_openid, member_openid in members.items():
+                group = str(group_openid or "").strip()
+                member = str(member_openid or "").strip()
+                if group and member:
+                    pairs.append(((group, member), uid))
+        member_openid = str(binding.get("member_openid") or "").strip()
+        if member_openid:
+            for group_openid in binding.get("groups") or []:
+                group = str(group_openid or "").strip()
+                if group:
+                    pair = ((group, member_openid), uid)
+                    if pair not in pairs:
+                        pairs.append(pair)
+        return pairs
+
+    def _rebuild_uid_binding_index(self) -> None:
+        index: dict[tuple[str, str], str] = {}
+        for uid, binding in self._uid_bindings.items():
+            normalized_uid = str(uid)
+            for key, mapped_uid in self._binding_member_pairs(normalized_uid, binding):
+                index.setdefault(key, mapped_uid)
+        self._uid_binding_members = index
+        self._uid_binding_index_source = self._uid_bindings
+        self._uid_binding_index_count = len(self._uid_bindings)
+        self._uid_binding_index_size = len(self._uid_bindings)
+
+    def _index_uid_binding(self, uid: str, binding: Any) -> None:
+        # A UID update can remove a member mapping from an older group entry.
+        for key, mapped_uid in tuple(self._uid_binding_members.items()):
+            if mapped_uid == uid:
+                self._uid_binding_members.pop(key, None)
+        for key, mapped_uid in self._binding_member_pairs(uid, binding):
+            self._uid_binding_members[key] = mapped_uid
+        self._uid_binding_index_source = self._uid_bindings
+        self._uid_binding_index_size = len(self._uid_bindings)
+
+    def _trim_uid_bindings(self) -> bool:
+        if len(self._uid_bindings) <= MAX_UID_BINDINGS:
+            return False
+        self._uid_bindings, trimmed = self._bounded_identity_state(
+            self._uid_bindings,
+            MAX_UID_BINDINGS,
+            ("last_seen_at", "bound_at"),
+        )
+        self._rebuild_uid_binding_index()
+        return trimmed
+
+    def _trim_suspicious_members(self) -> bool:
+        if len(self._suspicious_members) <= MAX_SUSPICIOUS_MEMBERS:
+            return False
+        self._suspicious_members, trimmed = self._bounded_identity_state(
+            self._suspicious_members,
+            MAX_SUSPICIOUS_MEMBERS,
+            ("created_at",),
+        )
+        return trimmed
 
     @staticmethod
     def _normalize_violation_record(
@@ -825,6 +946,14 @@ class QQGroupAdmin(Star):
         setter = getattr(self, "put_kv_data", None)
         if setter is None:
             return
+        # Bound legacy/direct writes before serializing the KV payload.
+        if (
+            self._uid_binding_index_source is not self._uid_bindings
+            or self._uid_binding_index_size != len(self._uid_bindings)
+        ):
+            self._rebuild_uid_binding_index()
+        self._trim_uid_bindings()
+        self._trim_suspicious_members()
         async with self._state_lock:
             await setter(
                 STATE_KEY,
@@ -1134,18 +1263,29 @@ class QQGroupAdmin(Star):
             "bound_at": current.get("bound_at") or int(time.time()),
             "last_seen_at": int(time.time()),
         }
+        self._index_uid_binding(uid, self._uid_bindings[uid])
+        self._trim_uid_bindings()
         await self._save_state()
 
     def _uid_for_member(self, group_openid: str, member_openid: str) -> str:
-        for uid, binding in self._uid_bindings.items():
-            members = binding.get("members")
-            if isinstance(members, dict) and members.get(group_openid) == member_openid:
+        if (
+            self._uid_binding_index_source is not self._uid_bindings
+            or self._uid_binding_index_size != len(self._uid_bindings)
+        ):
+            self._rebuild_uid_binding_index()
+        key = (str(group_openid or ""), str(member_openid or ""))
+        uid = self._uid_binding_members.get(key, "")
+        if uid and uid in self._uid_bindings:
+            binding = self._uid_bindings.get(uid)
+            if key in dict(self._binding_member_pairs(uid, binding)):
                 return uid
-            if binding.get("member_openid") == member_openid and group_openid in (
-                binding.get("groups") or []
-            ):
-                return uid
-        return ""
+            self._rebuild_uid_binding_index()
+            return self._uid_binding_members.get(key, "")
+        # Legacy integrations may mutate a nested binding without changing the
+        # outer dictionary size. Rebuild only after a miss; normal lookups stay
+        # O(1) while compatibility writes remain discoverable.
+        self._rebuild_uid_binding_index()
+        return self._uid_binding_members.get(key, "")
 
     async def _record_uid_violation(
         self,
@@ -1255,6 +1395,7 @@ class QQGroupAdmin(Star):
             "reason": reason,
             "created_at": int(time.time()),
         }
+        self._trim_suspicious_members()
         await self._save_state()
 
     async def _clear_suspicious(
@@ -6562,8 +6703,12 @@ class QQGroupAdmin(Star):
         raise LookupError("找不到该违规记录")
 
     async def web_delete_binding(self, uid: str) -> dict[str, str]:
+        uid = str(uid or "").strip()
         if self._uid_bindings.pop(uid, None) is None:
             raise LookupError("找不到该 UID 绑定")
+        for key, mapped_uid in tuple(self._uid_binding_members.items()):
+            if mapped_uid == uid:
+                self._uid_binding_members.pop(key, None)
         await self._save_state()
         return {"uid": uid}
 
