@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
+from html import escape as html_escape
 import re
 import secrets
 import time
@@ -11,7 +12,6 @@ from functools import wraps
 from io import BytesIO
 from pathlib import Path
 from typing import Any
-from xml.sax.saxutils import quoteattr
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
@@ -1210,7 +1210,10 @@ class QQGroupAdmin(Star):
 
     @staticmethod
     def _mention(member_openid: str) -> str:
-        return f"<qqbot-at-user id={quoteattr(member_openid)} />"
+        # QQ group Markdown recognizes the compact <@OpenID> form.  The
+        # former qqbot-at-user XML-like tag is rendered literally by clients.
+        value = str(member_openid or "").strip()
+        return f"<@{html_escape(value, quote=False)}>" if value else ""
 
     async def _send_group_text(
         self,
@@ -1646,14 +1649,19 @@ class QQGroupAdmin(Star):
                 }
             )
         prompt = (
-            "真人验证：请点击下方正确答案；如果看不到按钮，请直接发送正确数字。"
-            "答对后即可正常发言；验证前发送的消息会被撤回。"
+            "真人验证：请点击下方正确答案按钮。\n"
+            "如果看不到按钮，请直接发送正确数字；答对后即可正常发言。\n"
+            "验证前发送的消息会被撤回。"
         )
-        # Keep the purpose and numeric fallback in the same message as the
-        # keyboard.  Some QQ clients hide an immediately preceding text
-        # message when the Markdown keyboard arrives.
-        challenge = f"# 真人验证\n{prompt}\n\n**{left} + {right} = ?**"
+        # QQ clients do not render every Markdown paragraph when a custom
+        # keyboard is attached.  Send the stable plain-text instruction first
+        # and keep the card focused on the equation/buttons.
+        challenge = f"# 真人验证\n**{left} + {right} = ?**"
         try:
+            try:
+                await self._send_group_text(client, group_openid, prompt)
+            except Exception as prompt_exc:  # noqa: BLE001 - optional notice
+                self.logger.debug("真人验证文字提示发送失败，继续发送按钮：%s", prompt_exc)
             await self._send_group_markdown(
                 client,
                 group_openid,
@@ -1665,10 +1673,11 @@ class QQGroupAdmin(Star):
             # Keep the token when buttons are unavailable; plain text answers
             # are handled by _consume_verification_answer.
             try:
+                fallback = f"{prompt}\n算式：{left} + {right} = ?"
                 await self._send_group_text(
                     client,
                     group_openid,
-                    f"{prompt} 算式：{left} + {right} = ?",
+                    fallback,
                     message_id=message_id,
                 )
             except Exception:  # noqa: BLE001 - plain fallback can also fail

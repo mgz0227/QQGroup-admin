@@ -1791,9 +1791,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(event.stopped)
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
-        message = next(
-            item for item in client.api.messages if item.get("keyboard")
-        )
+        prompt = client.api.messages[0]
+        self.assertEqual(prompt["msg_type"], 0)
+        self.assertIn("真人验证", prompt["content"])
+        self.assertIn("如果看不到按钮", prompt["content"])
+        message = next(item for item in client.api.messages if item.get("keyboard"))
         self.assertEqual(message["msg_type"], 2)
         buttons = message["keyboard"]["content"]["rows"][0]["buttons"]
         self.assertTrue(all(button["render_data"]["style"] == 1 for button in buttons))
@@ -1804,11 +1806,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 for button in buttons
             )
         )
-        self.assertIn("真人验证", message["markdown"]["content"])
-        self.assertIn("如果看不到按钮", message["markdown"]["content"])
+        self.assertIn("真人验证", prompt["content"])
+        self.assertNotIn("如果看不到按钮", message["markdown"]["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
-        self.assertFalse(
-            any(item.get("msg_type") == 0 for item in client.api.messages)
+        self.assertEqual(
+            [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
         )
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
@@ -2137,7 +2139,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            '<qqbot-at-user id="admin-1" /> 这条消息已撤回。',
+            '<@admin-1> 这条消息已撤回。',
         )
 
     async def test_empty_recall_reply_can_disable_notice_when_mention_is_off(self):
@@ -2167,7 +2169,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            '<qqbot-at-user id="admin-1" />',
+            '<@admin-1>',
         )
 
     async def test_global_image_keyword_has_separate_reply_and_mention_setting(self):
@@ -2893,11 +2895,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            '已禁言 45 秒：<qqbot-at-user id="member-1" />',
+            '已禁言 45 秒：<@member-1>',
         )
         self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertIn(
-            '<qqbot-at-user id="member-1" />',
+            '<@member-1>',
             client.api.messages[-1]["markdown"]["content"],
         )
 
@@ -2919,7 +2921,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertTrue(
             client.api.messages[-1]["markdown"]["content"].startswith(
-                '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
+                '<@member-1> 已设置禁言，至 '
             )
         )
 
@@ -2957,12 +2959,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         content = client.api.messages[-1]["markdown"]["content"]
         self.assertLessEqual(len(content), 4000)
-        self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
+        self.assertTrue(content.endswith('<@member-1>'))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
         content = client.api.messages[-1]["markdown"]["content"]
-        mention = '<qqbot-at-user id="member-1" />'
+        mention = '<@member-1>'
         self.assertEqual(content, mention * 40)
 
     async def test_web_batch_save_and_sync(self):
@@ -4438,7 +4440,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["msg_type"], 2)
         self.assertIn("欢迎 新人 加入 测试群", message["markdown"]["content"])
         self.assertIn("UID=188144093", message["markdown"]["content"])
-        self.assertIn('qqbot-at-user id="member-1"', message["markdown"]["content"])
+        self.assertIn('<@member-1>', message["markdown"]["content"])
 
     async def test_button_approval_sends_welcome_with_request_context(self):
         plugin, client = self.plugin()
