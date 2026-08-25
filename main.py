@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import copy
 import re
 import secrets
 import time
@@ -174,6 +175,13 @@ SETTINGS_ACTIONS = {
     "bili_live_off",
 }
 STATE_KEY = "qqgroup_admin_state_v1"
+CONFIG_BACKUP_KEY = "qqgroup_admin_config_backup_v1"
+# The plugin directory is replaced during an AstrBot update.  Keep a bounded
+# copy of user-owned join settings in the durable plugin KV state so a missing
+# config file can be restored on the next load.
+CONFIG_BACKUP_GROUP_LIMIT = 1_000
+CONFIG_BACKUP_PROFILE_LIMIT = 100
+CONFIG_BACKUP_WELCOME_LIMIT = 100
 # Keep identity state bounded so a busy deployment cannot grow its KV payload
 # or make every WebUI query increasingly expensive.
 MAX_UID_BINDINGS = 20_000
@@ -493,6 +501,18 @@ class QQGroupAdmin(Star):
             "live": {},
             "dynamic": {},
         }
+        raw_group_config = self.config.get("auto_review_groups")
+        self._config_reset_candidate = bool(
+            getattr(self.config, "first_deploy", False)
+            or "auto_review_groups" not in self.config
+            or raw_group_config is None
+            or not isinstance(raw_group_config, list)
+        )
+        self._config_full_reset_candidate = bool(
+            getattr(self.config, "first_deploy", False)
+        )
+        self._config_backup: dict[str, Any] = {}
+        self._config_backup_task: asyncio.Task[None] | None = None
         self._moderation = ModerationWindows()
         self._ai_semaphore = asyncio.Semaphore(2)
         # Keep local OCR and image decoding from competing with the host for CPU.
@@ -632,7 +652,7 @@ class QQGroupAdmin(Star):
             changed = True
         if not isinstance(entries, list):
             if changed:
-                self.config.save_config()
+                self._save_config()
             return
         for entry in entries:
             if not isinstance(entry, dict):
@@ -697,10 +717,94 @@ class QQGroupAdmin(Star):
                     entry[key] = default
                     changed = True
         if changed:
-            self.config.save_config()
+            self._save_config()
+
+    def _save_config(self) -> None:
+        """Save config and schedule a durable, bounded join-config snapshot."""
+
+        self.config.save_config()
+        self._schedule_config_backup()
+
+    def _config_backup_payload(self) -> dict[str, Any] | None:
+        entries = self.config.get("auto_review_groups")
+        if not isinstance(entries, list):
+            return None
+        payload: dict[str, Any] = {
+            "auto_review_groups": copy.deepcopy(
+                entries[:CONFIG_BACKUP_GROUP_LIMIT]
+            ),
+        }
+        welcome = self.config.get(WELCOME_RULES_KEY)
+        if isinstance(welcome, list):
+            payload[WELCOME_RULES_KEY] = copy.deepcopy(
+                welcome[:CONFIG_BACKUP_WELCOME_LIMIT]
+            )
+        profiles = self.config.get(GLOBAL_POLICIES_KEY)
+        if isinstance(profiles, list):
+            payload[GLOBAL_POLICIES_KEY] = copy.deepcopy(
+                profiles[:CONFIG_BACKUP_PROFILE_LIMIT]
+            )
+        return payload
+
+    def _schedule_config_backup(self) -> None:
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            return
+        task = self._config_backup_task
+        if task is not None and not task.done():
+            return
+        self._config_backup_task = loop.create_task(
+            self._save_config_backup_later(),
+            name="qqgroup-admin-config-backup",
+        )
+
+    async def _save_config_backup_later(self) -> None:
+        # ponytail: coalesce bursty WebUI/whitelist saves into one bounded KV write.
+        await asyncio.sleep(0.2)
+        await self._save_config_backup()
+
+    async def _save_config_backup(self) -> None:
+        payload = self._config_backup_payload()
+        if payload is None:
+            return
+        self._config_backup = payload
+        try:
+            setter = getattr(self, "put_kv_data", None)
+            if setter is not None:
+                await setter(CONFIG_BACKUP_KEY, payload)
+        except Exception as exc:  # noqa: BLE001 - backup must not break config saves
+            self.logger.warning("保存入群审核配置快照失败：%s", exc)
+
+    async def _restore_config_backup(self) -> bool:
+        if not self._config_reset_candidate:
+            return False
+        entries = self._config_backup.get("auto_review_groups")
+        if not isinstance(entries, list) or not entries:
+            return False
+        self.config["auto_review_groups"] = copy.deepcopy(
+            entries[:CONFIG_BACKUP_GROUP_LIMIT]
+        )
+        if self._config_full_reset_candidate:
+            for key, limit in (
+                (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
+                (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
+            ):
+                value = self._config_backup.get(key)
+                if isinstance(value, list):
+                    self.config[key] = copy.deepcopy(value[:limit])
+        self.config.save_config()
+        self._config_reset_candidate = False
+        self.logger.warning(
+            "检测到插件配置被重建，已从持久快照恢复 %d 个入群审核群配置",
+            len(self.config["auto_review_groups"]),
+        )
+        return True
 
     async def initialize(self) -> None:
         await self._load_state()
+        await self._restore_config_backup()
+        await self._save_config_backup()
         self._web.register_routes()
         self._patch_qq_clients()
         if self._review_task is None or self._review_task.done():
@@ -751,6 +855,13 @@ class QQGroupAdmin(Star):
                 await self._save_state()
             except Exception as exc:  # noqa: BLE001 - shutdown must continue
                 self.logger.warning("退出时保存违规记录失败：%s", exc)
+        backup_task = self._config_backup_task
+        if backup_task is not None and not backup_task.done():
+            with suppress(asyncio.CancelledError):
+                await backup_task
+        elif backup_task is None or backup_task.cancelled() or backup_task.exception():
+            await self._save_config_backup()
+        self._config_backup_task = None
         for client, previous in self._patched_clients.items():
             handler = getattr(client, "on_interaction_create", None)
             if getattr(handler, "__qqgroup_admin_owner__", None) is self:
@@ -797,6 +908,26 @@ class QQGroupAdmin(Star):
                 "live": valid_state_dict(bili.get("live")),
                 "dynamic": valid_state_dict(bili.get("dynamic")),
             }
+        backup = value.get("config_backup")
+        if getter:
+            durable_backup = await getter(CONFIG_BACKUP_KEY, None)
+            if isinstance(durable_backup, dict):
+                backup = durable_backup
+        if isinstance(backup, dict):
+            entries = backup.get("auto_review_groups")
+            if isinstance(entries, list):
+                self._config_backup = {
+                    "auto_review_groups": copy.deepcopy(
+                        entries[:CONFIG_BACKUP_GROUP_LIMIT]
+                    )
+                }
+                for key, limit in (
+                    (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
+                    (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
+                ):
+                    item = backup.get(key)
+                    if isinstance(item, list):
+                        self._config_backup[key] = copy.deepcopy(item[:limit])
         if self._violation_state_dirty:
             await self._save_state()
 
@@ -1944,7 +2075,7 @@ class QQGroupAdmin(Star):
         else:
             entry["group_name"] = group_name
             entry["platform_id"] = platform_id
-        self.config.save_config()
+        self._save_config()
         return entry
 
     @staticmethod
@@ -3654,11 +3785,15 @@ class QQGroupAdmin(Star):
                 if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
                     self.logger.debug("跳过不兼容视觉模型的 GIF 图片")
                     continue
-                normalized = await self._bounded_media_thread(
-                    normalize_vision_image_ref,
-                    url,
-                    timeout=min(3, remaining),
-                )
+                try:
+                    normalized = await self._bounded_media_thread(
+                        normalize_vision_image_ref,
+                        url,
+                        timeout=min(3, remaining),
+                    )
+                except Exception as exc:  # noqa: BLE001 - one bad image is fail-open
+                    self.logger.debug("图片视觉引用规范化失败，跳过该图片：%s", exc)
+                    normalized = None
                 if normalized:
                     vision_urls.append(normalized)
                 else:
@@ -4535,7 +4670,7 @@ class QQGroupAdmin(Star):
         value = ",".join(users)
         entry["managed_strategy_id"] = strategy_id
         entry["applied_whitelist"] = value
-        self.config.save_config()
+        self._save_config()
 
     def _record_whitelist_change(
         self,
@@ -4569,7 +4704,7 @@ class QQGroupAdmin(Star):
         entry["enabled"] = True
         entry["managed_strategy_id"] = strategy_id
         entry["applied_whitelist"] = ",".join(applied)
-        self.config.save_config()
+        self._save_config()
 
     def _clear_group_config(self, group_openid: str) -> None:
         entry = self._group_config(group_openid)
@@ -4578,7 +4713,7 @@ class QQGroupAdmin(Star):
         entry["enabled"] = False
         entry["managed_strategy_id"] = ""
         entry["applied_whitelist"] = ""
-        self.config.save_config()
+        self._save_config()
 
     def _results(self, event: AstrMessageEvent, text: str):
         for chunk in split_message(text):
@@ -5676,7 +5811,7 @@ class QQGroupAdmin(Star):
                 await api.delete_strategy(strategy_id)
             entry["managed_strategy_id"] = ""
             entry["applied_whitelist"] = ""
-            self.config.save_config()
+            self._save_config()
             return (
                 "条件审核已启用。"
                 if uid_enabled
@@ -5767,7 +5902,7 @@ class QQGroupAdmin(Star):
                 entry["uid_exists_auto_approve"] = False
             elif action == "direct_on":
                 entry["uid_check_enabled"] = True
-            self.config.save_config()
+            self._save_config()
             return
         if action in {"image_on", "image_off", "repeat_on", "repeat_off"}:
             policy_keys = {
@@ -5778,13 +5913,13 @@ class QQGroupAdmin(Star):
             }
             key, value = policy_keys[action]
             self._set_global_policy_value_for_group(group_openid, key, value)
-            self.config.save_config()
+            self._save_config()
             return
         if action in {"ai_on", "ai_off"}:
             self._set_global_policy_value_for_group(
                 group_openid, GLOBAL_AI_ENABLED_KEY, action == "ai_on"
             )
-            self.config.save_config()
+            self._save_config()
             return
         if action in {"uid", "conditional"}:
             await self._sync_group_config(
@@ -5944,7 +6079,7 @@ class QQGroupAdmin(Star):
             selected = [item for item in self._welcome_rule_groups(rule) if item in allowed]
             rule["group_openids"] = list(dict.fromkeys(selected))
         self.config[WELCOME_RULES_KEY] = rules
-        self.config.save_config()
+        self._save_config()
         return await self.web_welcome_rules()
 
     async def web_global_keyword_replies(self) -> dict[str, Any]:
@@ -6001,7 +6136,7 @@ class QQGroupAdmin(Star):
             self.config["keyword_reply_recall_seconds"] = int(
                 settings["keyword_reply_recall_seconds"]
             )
-        self.config.save_config()
+        self._save_config()
         return await self.web_global_keyword_replies()
 
     def _global_policy_profiles_for_web(self) -> list[dict[str, Any]]:
@@ -6147,7 +6282,7 @@ class QQGroupAdmin(Star):
         if profiles:
             for key in GLOBAL_POLICY_DEFAULTS:
                 self.config[key] = profiles[0].get(key, GLOBAL_POLICY_DEFAULTS[key])
-        self.config.save_config()
+        self._save_config()
         return await self.web_global_policies()
 
     async def web_runtime_settings(self) -> dict[str, Any]:
@@ -6374,7 +6509,7 @@ class QQGroupAdmin(Star):
                     )
                 )
         self.config.update(settings)
-        self.config.save_config()
+        self._save_config()
         return await self.web_runtime_settings()
 
     @staticmethod
@@ -6416,7 +6551,7 @@ class QQGroupAdmin(Star):
         status, cookie = await asyncio.to_thread(poll_qr_login, login)
         if status == "confirmed":
             self.config["bilibili_cookie"] = cookie
-            self.config.save_config()
+            self._save_config()
             self._bilibili_logins.pop(qrcode_key, None)
         elif status == "expired":
             self._bilibili_logins.pop(qrcode_key, None)
@@ -6426,7 +6561,7 @@ class QQGroupAdmin(Star):
         group_openid = str(payload["group_openid"])
         entry = self._group_config(group_openid, required=True)
         self._update_web_group(entry, payload)
-        self.config.save_config()
+        self._save_config()
         return self._web_group(entry)
 
     @staticmethod
@@ -6742,7 +6877,7 @@ class QQGroupAdmin(Star):
         ]
         for entry, payload in zip(entries, payloads, strict=True):
             self._update_web_group(entry, payload)
-        self.config.save_config()
+        self._save_config()
         return [str(payload["group_openid"]) for payload in payloads]
 
     async def web_sync_group(self, group_openid: str) -> dict[str, Any]:
@@ -6799,7 +6934,7 @@ class QQGroupAdmin(Star):
         self.config["auto_review_groups"] = [
             item for item in entries if item is not entry
         ]
-        self.config.save_config()
+        self._save_config()
         return {"group_openid": group_openid}
 
     @qq_admin_command("自动审核状态")
@@ -6975,7 +7110,7 @@ class QQGroupAdmin(Star):
         entry = self._group_config(group_openid)
         if entry and entry.get("platform_id"):
             entry["platform_id"] = ""
-            self.config.save_config()
+            self._save_config()
         condition_enabled = self._condition_settings(entry)["enabled"]
         yield event.plain_result(
             "QQ 号码白名单策略及名单已删除。"

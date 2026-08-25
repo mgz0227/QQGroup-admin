@@ -147,6 +147,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .global-group-scope legend { padding: 0 5px; color: #344054; font-size: 13px; font-weight: 600; }
 .group-choice-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; max-height: 260px; margin-top: 10px; overflow-y: auto; }
 .group-choice { min-width: 0; padding: 9px; border: 1px solid #e1e6eb; border-radius: 6px; background: #fff; }
+.unbound-group-choice { border-color: #f0c36d; background: #fff8e6; color: #795b16; }
 .group-choice span { min-width: 0; overflow-wrap: anywhere; line-height: 1.4; }
 .scope-empty { margin: 10px 0 0; color: #87909d; font-size: 13px; }
 .runtime-view { margin-top: 28px; border-top: 1px solid #dce2e8; background: #fff; }
@@ -269,6 +270,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .keyword-rule-summary:hover { background: #252c35; }
   .keyword-rule-summary-name { color: #f4f6f8; }
   .group-choice { border-color: #46515e; background: #20262e; }
+  .unbound-group-choice { border-color: #8c6b2d; background: #332b1b; color: #f1d28a; }
   .global-keyword-row label, .global-group-scope legend, .global-keyword-defaults label { color: #c3ccd7; }
   .runtime-grid label { color: #c3ccd7; }
   .runtime-grid label small, .config-note { color: #9ca7b5; }

@@ -208,6 +208,24 @@
     return group && group.group_name ? group.group_name : (groupOpenid || "未知群");
   }
 
+  function appendUnboundGroupChoices(choices, selectedIds, knownIds, inputClass) {
+    selectedIds.forEach(function (groupOpenid) {
+      if (knownIds.has(groupOpenid)) return;
+      var label = document.createElement("label");
+      label.className = "checkbox group-choice unbound-group-choice";
+      var checkbox = document.createElement("input");
+      checkbox.type = "checkbox";
+      if (inputClass) checkbox.className = inputClass;
+      checkbox.value = groupOpenid;
+      checkbox.checked = true;
+      var text = document.createElement("span");
+      text.textContent = "未绑定群：" + groupOpenid;
+      text.title = groupOpenid;
+      label.append(checkbox, text);
+      choices.appendChild(label);
+    });
+  }
+
   function recordGroupLabel(record) {
     return record && (record.group_name || record.group) || groupLabel(record && record.group_openid);
   }
@@ -583,7 +601,9 @@
     var choices = document.createElement("div");
     choices.className = "group-choice-grid";
     var boundGroups = Array.isArray(globalKeywordConfig.groups) ? globalKeywordConfig.groups : [];
+    var knownGroupIds = new Set();
     boundGroups.forEach(function (group) {
+      knownGroupIds.add(group.group_openid);
       var label = document.createElement("label");
       label.className = "checkbox group-choice";
       var checkbox = document.createElement("input");
@@ -598,7 +618,8 @@
       label.append(checkbox, text);
       choices.appendChild(label);
     });
-    if (boundGroups.length) scope.appendChild(choices);
+    appendUnboundGroupChoices(choices, targets, knownGroupIds, "global-rule-group");
+    if (boundGroups.length || targets.size) scope.appendChild(choices);
     else {
       var noGroups = document.createElement("p");
       noGroups.className = "scope-empty";
@@ -731,7 +752,9 @@
     var choices = document.createElement("div");
     choices.className = "group-choice-grid";
     var boundGroups = Array.isArray(welcomeConfig.groups) ? welcomeConfig.groups : [];
+    var knownGroupIds = new Set();
     boundGroups.forEach(function (group) {
+      knownGroupIds.add(group.group_openid);
       var label = document.createElement("label");
       label.className = "checkbox group-choice";
       var checkbox = document.createElement("input");
@@ -746,7 +769,8 @@
       label.append(checkbox, text);
       choices.appendChild(label);
     });
-    if (boundGroups.length) scope.appendChild(choices);
+    appendUnboundGroupChoices(choices, targets, knownGroupIds, "welcome-rule-group");
+    if (boundGroups.length || targets.size) scope.appendChild(choices);
     else {
       var noGroups = document.createElement("p");
       noGroups.className = "scope-empty";
@@ -1041,7 +1065,9 @@
     var policyGroups = Array.isArray(runtimeSettings.global_policy_groups)
       ? runtimeSettings.global_policy_groups
       : [];
+    var knownGroupIds = new Set();
     policyGroups.forEach(function (group) {
+      knownGroupIds.add(group.group_openid);
       var label = document.createElement("label");
       label.className = "checkbox group-choice";
       var checkbox = document.createElement("input");
@@ -1055,6 +1081,7 @@
       label.append(checkbox, text);
       list.appendChild(label);
     });
+    appendUnboundGroupChoices(list, selectedIds, knownGroupIds);
     all.onchange = function () {
       list.querySelectorAll("input").forEach(function (input) { input.disabled = all.checked; });
     };
@@ -1062,10 +1089,12 @@
 
   function readRuntimePolicy() {
     var all = element("runtime-policy-all-groups").checked;
+    var selectedGroups = Array.from(element("runtime-policy-groups").querySelectorAll("input:checked")).map(function (input) { return input.value; });
+    if (!all && !selectedGroups.length) throw new Error("请选择至少一个覆盖群，或选择全部已绑定群");
     return Object.assign({}, runtimePolicies[runtimePolicyIndex], {
       name: element("runtime-policy-name").value.trim(),
       enabled: element("runtime-policy-enabled").checked,
-      group_openids: all ? [] : Array.from(element("runtime-policy-groups").querySelectorAll("input:checked")).map(function (input) { return input.value; }),
+      group_openids: all ? [] : selectedGroups,
       settings_command_enabled: element("runtime-settings-command").checked,
       settings_panel_auto_recall: element("runtime-panel-recall").checked,
       mute_success_message: element("runtime-mute-message").value,

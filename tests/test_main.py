@@ -3028,6 +3028,55 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             module.AI_REVIEW_MAX_IMAGES,
         )
 
+    async def test_ai_image_review_skips_image_when_normalization_fails(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant", completion_text="ALLOW confidence=99 reason=正常"
+            )
+        )
+
+        with patch.object(
+            plugin,
+            "_bounded_media_thread",
+            AsyncMock(side_effect=RuntimeError("invalid image")),
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/bad.png"],
+                "primary",
+                image_review_enabled=True,
+            )
+
+        self.assertFalse(blocked)
+        plugin.context.llm_generate.assert_awaited_once()
+        self.assertIsNone(
+            plugin.context.llm_generate.await_args.kwargs["image_urls"]
+        )
+
+    async def test_join_config_backup_restores_missing_entries(self):
+        plugin, _client = self.plugin()
+        await plugin._save_config_backup()
+        backup = plugin._config_backup
+        plugin.config.pop("auto_review_groups")
+        plugin._config_reset_candidate = True
+
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertEqual(
+            plugin.config["auto_review_groups"],
+            backup["auto_review_groups"],
+        )
+
+    async def test_join_config_backup_does_not_restore_intentional_empty_list(self):
+        plugin, _client = self.plugin()
+        await plugin._save_config_backup()
+        plugin.config["auto_review_groups"] = []
+        plugin._config_reset_candidate = False
+
+        self.assertFalse(await plugin._restore_config_backup())
+        self.assertEqual(plugin.config["auto_review_groups"], [])
+
     async def test_ai_confirmation_allow_overrides_primary_block(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "待审核")
@@ -3876,6 +3925,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIn("if (requestId !== loadGeneration) return;", script)
         self.assertIn("loadIdentities(true)", script)
+        self.assertIn("appendUnboundGroupChoices", script)
+        self.assertIn("if (!all && !selectedGroups.length) throw", script)
         self.assertIn(".sub-list-header { display: flex;", styles)
         self.assertIn(
             ".sub-list-header { align-items: stretch; flex-direction: column;",
