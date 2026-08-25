@@ -240,6 +240,40 @@ GLOBAL_MEDIA_POLICY_KEYS = (
     "global_repeat_at_member",
 )
 
+# Older scoped profiles predate global AI/OCR settings.  Inherit only these
+# non-media fields from the top-level configuration; media spam/repeat values
+# still need the legacy per-group compatibility path below.
+GLOBAL_INHERIT_POLICY_KEYS = (
+    "global_reject_keywords",
+    "global_message_reject_keywords",
+    "global_message_reject_reply",
+    "global_message_reject_at_member",
+    "global_member_blacklist",
+    "global_member_whitelist",
+    "global_blacklist_reply",
+    "global_blacklist_at_member",
+    GLOBAL_AI_ENABLED_KEY,
+    GLOBAL_AI_PROVIDER_KEY,
+    GLOBAL_AI_FALLBACKS_KEY,
+    GLOBAL_AI_CONFIRM_PROVIDER_KEY,
+    GLOBAL_AI_TIMEOUT_KEY,
+    GLOBAL_AI_IMAGES_KEY,
+    GLOBAL_AI_BLOCK_THRESHOLD_KEY,
+    GLOBAL_AI_ACTION_KEY,
+    "global_ai_reject_reply",
+    "global_ai_reject_at_member",
+    GLOBAL_IMAGE_KEYWORDS_KEY,
+    "global_image_reject_reply",
+    "global_image_reject_at_member",
+    GLOBAL_IMAGE_OCR_ENABLED_KEY,
+    GLOBAL_IMAGE_OCR_PROVIDER_KEY,
+    GLOBAL_IMAGE_OCR_TIMEOUT_KEY,
+    GLOBAL_IMAGE_OCR_MAX_IMAGES_KEY,
+    "keyword_reply_cooldown_seconds",
+    "keyword_reply_recall_seconds",
+)
+AI_REVIEW_MAX_IMAGES = 3
+
 
 def normalize_provider_ids(
     value: Any, *, limit: int = MAX_AI_FALLBACK_PROVIDERS
@@ -440,6 +474,9 @@ class QQGroupAdmin(Star):
         }
         self._moderation = ModerationWindows()
         self._ai_semaphore = asyncio.Semaphore(2)
+        # Keep local OCR and image decoding from competing with the host for CPU.
+        # Overload is deliberately fail-open: text rules and AI text review still run.
+        self._media_semaphore = asyncio.Semaphore(1)
         self._ai_warning_at = 0.0
         self._migrate_config()
         self._web = GroupAdminWeb(self, context)
@@ -1764,7 +1801,18 @@ class QQGroupAdmin(Star):
                 continue
             groups = self._policy_group_openids(policy)
             if not groups or group_openid in groups:
-                return policy
+                # A profile saved by an older version may contain only media
+                # fields.  Preserve the configured top-level AI/keyword
+                # behavior instead of silently turning it off for that group.
+                inherited = self._legacy_global_policy()
+                return {
+                    **{
+                        key: (list(value) if isinstance(value, list) else value)
+                        for key, value in inherited.items()
+                        if key in GLOBAL_INHERIT_POLICY_KEYS and key not in policy
+                    },
+                    **policy,
+                }
         return {}
 
     def _set_global_policy_value_for_group(
@@ -3060,11 +3108,17 @@ class QQGroupAdmin(Star):
 
         values = [embedded_image_text(event)]
         urls = list(dict.fromkeys(image_urls))[: max(1, min(3, max_images))]
+        deadline = time.monotonic() + max(2.0, float(timeout_seconds))
         for url in urls:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0.5:
+                break
             try:
-                value = await asyncio.wait_for(
-                    asyncio.to_thread(ocr_image_url, url, float(timeout_seconds)),
-                    timeout=float(timeout_seconds) + 1,
+                value = await self._bounded_media_thread(
+                    ocr_image_url,
+                    url,
+                    float(timeout_seconds),
+                    timeout=min(float(timeout_seconds) + 1, remaining),
                 )
             except Exception as exc:  # noqa: BLE001 - OCR is fail-open
                 self.logger.debug("本地图片 OCR 失败：%s", exc)
@@ -3077,17 +3131,29 @@ class QQGroupAdmin(Star):
         vision_urls = []
         if provider_id and urls:
             for url in urls:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.5:
+                    break
                 if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
                     self.logger.debug("跳过不兼容视觉模型的 GIF 图片")
                     continue
-                normalized = await asyncio.to_thread(normalize_vision_image_ref, url)
+                normalized = await self._bounded_media_thread(
+                    normalize_vision_image_ref,
+                    url,
+                    timeout=min(3, remaining),
+                )
                 if normalized:
                     vision_urls.append(normalized)
                 else:
                     self.logger.debug("跳过无法安全转换的 GIF 图片")
         if provider_id and vision_urls:
             try:
-                async with asyncio.timeout(max(2, timeout_seconds)):
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.5:
+                    return "\n".join(
+                        dict.fromkeys(value for value in values if value)
+                    )[:8000]
+                async with asyncio.timeout(remaining):
                     async with self._ai_semaphore:
                         response = await self.context.llm_generate(
                             chat_provider_id=provider_id,
@@ -3105,6 +3171,26 @@ class QQGroupAdmin(Star):
             except Exception as exc:  # noqa: BLE001 - OCR is fail-open
                 self.logger.debug("视觉模型图片 OCR 失败：%s", exc)
         return "\n".join(dict.fromkeys(value for value in values if value))[:8000]
+
+    async def _bounded_media_thread(
+        self,
+        function: Any,
+        *args: Any,
+        timeout: float,
+    ) -> Any:
+        """Run one CPU/network media helper without queueing unbounded work."""
+
+        if self._media_semaphore.locked():
+            self.logger.debug("媒体处理繁忙，跳过本条图片 OCR/转换")
+            return None
+        await self._media_semaphore.acquire()
+        try:
+            return await asyncio.wait_for(
+                asyncio.to_thread(function, *args),
+                timeout=max(0.5, float(timeout)),
+            )
+        finally:
+            self._media_semaphore.release()
 
     @staticmethod
     def _ai_decision_details(value: str) -> tuple[str, int | None, str]:
@@ -3197,13 +3283,24 @@ class QQGroupAdmin(Star):
         result: dict[str, Any] | None = None,
     ) -> bool:
         review_text = self._ai_message_text(event, text)
+        total_timeout = self._bounded_int(
+            timeout_seconds, AI_REVIEW_TOTAL_TIMEOUT_SECONDS, 5, 120
+        )
+        deadline = time.monotonic() + total_timeout
         vision_urls = []
         if image_review_enabled:
-            for url in dict.fromkeys(image_urls):
+            for url in list(dict.fromkeys(image_urls))[:AI_REVIEW_MAX_IMAGES]:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0.5:
+                    break
                 if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
                     self.logger.debug("跳过不兼容视觉模型的 GIF 图片")
                     continue
-                normalized = await asyncio.to_thread(normalize_vision_image_ref, url)
+                normalized = await self._bounded_media_thread(
+                    normalize_vision_image_ref,
+                    url,
+                    timeout=min(3, remaining),
+                )
                 if normalized:
                     vision_urls.append(normalized)
                 else:
@@ -3232,10 +3329,6 @@ class QQGroupAdmin(Star):
                 self.logger.debug("读取当前 AI 审核模型失败：%s", exc)
         providers.extend(normalize_provider_ids(fallback_provider_ids))
         errors = []
-        total_timeout = self._bounded_int(
-            timeout_seconds, AI_REVIEW_TOTAL_TIMEOUT_SECONDS, 5, 120
-        )
-        deadline = time.monotonic() + total_timeout
         candidates = list(
             dict.fromkeys(str(value or "").strip() for value in providers if value)
         )
@@ -5537,6 +5630,7 @@ class QQGroupAdmin(Star):
             "global_repeat_reply": "repeat_reply",
             "global_repeat_at_member": "repeat_at_member",
         }
+        legacy_global = self._legacy_global_policy()
         profiles = []
         for index, raw in enumerate(configured, 1):
             profile = {
@@ -5555,6 +5649,10 @@ class QQGroupAdmin(Star):
                     if key in GLOBAL_POLICY_DEFAULTS
                 }
             )
+            for key in GLOBAL_INHERIT_POLICY_KEYS:
+                if key not in raw and key in legacy_global:
+                    value = legacy_global[key]
+                    profile[key] = list(value) if isinstance(value, list) else value
             profile["profile_id"] = str(
                 raw.get("profile_id") or ("default" if index == 1 else f"profile-{index}")
             ).strip()[:64]
@@ -6022,9 +6120,11 @@ class QQGroupAdmin(Star):
                 ]
                 items.append(item)
 
-            def uid_key(item: dict[str, Any]) -> tuple[int, int | str]:
+            def uid_key(item: dict[str, Any]) -> tuple[int, int, str]:
                 uid = str(item.get("uid") or "")
-                return (0, int(uid)) if uid.isdigit() else (1, uid)
+                # Length + lexical order avoids converting attacker-controlled
+                # arbitrary-length digits through Python's integer parser.
+                return (0, len(uid), uid) if uid.isdigit() else (1, 0, uid)
 
             items.sort(key=uid_key)
             return items
@@ -6066,6 +6166,7 @@ class QQGroupAdmin(Star):
             "member_name",
             "identity",
             "member_openid",
+            "action_member_openid",
             "qq_openid",
             "openid",
             "union_openid",
@@ -6210,6 +6311,15 @@ class QQGroupAdmin(Star):
         key = self._member_state_key(group_openid, member_openid)
         if self._suspicious_members.pop(key, None) is None:
             raise LookupError("找不到该待验证成员")
+        self._verification_tokens = {
+            token: data
+            for token, data in self._verification_tokens.items()
+            if not (
+                len(data) >= 3
+                and str(data[1]) == group_openid
+                and str(data[2]) == member_openid
+            )
+        }
         await self._save_state()
         return {"group_openid": group_openid, "member_openid": member_openid}
 

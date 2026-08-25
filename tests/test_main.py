@@ -1201,6 +1201,34 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         second = plugin._moderation_settings(entry)
         self.assertEqual(second["global_keywords"], ["默认"])
 
+    def test_old_global_profile_inherits_top_level_ai_settings(self):
+        plugin, _ = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary",
+            global_ai_review_fallback_provider_ids=["fallback-1", "fallback-2"],
+            global_ai_review_timeout_seconds=42,
+        )
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "legacy-ai",
+                "name": "旧策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+            }
+        ]
+        entry = plugin.config["auto_review_groups"][0]
+        settings = plugin._moderation_settings(entry)
+        self.assertTrue(settings["ai_enabled"])
+        self.assertEqual(settings["ai_provider_id"], "primary")
+        self.assertEqual(
+            settings["ai_fallback_provider_ids"], ["fallback-1", "fallback-2"]
+        )
+        self.assertEqual(settings["ai_timeout"], 42)
+        displayed = plugin._global_policy_profiles_for_web()[0]
+        self.assertTrue(displayed["global_ai_review_enabled"])
+        self.assertEqual(displayed["global_ai_review_provider_id"], "primary")
+
     def test_global_policy_web_validation_rejects_duplicate_or_unknown_scope(self):
         profile = {
             "profile_id": "p1",
@@ -1946,6 +1974,24 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         image_ocr.assert_not_awaited()
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
         self.assertEqual(client.api.messages[-1]["content"], "表情文字违规，已撤回。")
+
+    async def test_media_processing_skips_when_cpu_gate_is_busy(self):
+        plugin, _client = self.plugin()
+        await plugin._media_semaphore.acquire()
+        try:
+            with patch.object(
+                module.asyncio,
+                "to_thread",
+                AsyncMock(return_value="should not run"),
+            ) as worker:
+                result = await plugin._bounded_media_thread(
+                    lambda: "unused",
+                    timeout=1,
+                )
+            self.assertIsNone(result)
+            worker.assert_not_awaited()
+        finally:
+            plugin._media_semaphore.release()
 
     async def test_global_member_blacklist_overrides_disabled_group_audit(self):
         plugin, client = self.plugin()
@@ -2724,6 +2770,33 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin.context.llm_generate.assert_awaited_once()
 
+    async def test_ai_image_review_caps_preprocessing_images(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant", completion_text="ALLOW confidence=99 reason=正常"
+            )
+        )
+
+        async def bounded(_function, value, *, timeout):
+            return value
+
+        with patch.object(plugin, "_bounded_media_thread", side_effect=bounded) as media:
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片"),
+                "图片",
+                [f"https://example.test/{index}.png" for index in range(10)],
+                "primary",
+                image_review_enabled=True,
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(media.await_count, module.AI_REVIEW_MAX_IMAGES)
+        self.assertEqual(
+            len(plugin.context.llm_generate.await_args.kwargs["image_urls"]),
+            module.AI_REVIEW_MAX_IMAGES,
+        )
+
     async def test_ai_confirmation_allow_overrides_primary_block(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "待审核")
@@ -3399,15 +3472,47 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_identity_bindings_use_numeric_uid_order(self):
         plugin, _ = self.plugin()
+        huge_uid = "9" * 5000
         plugin._uid_bindings = {
-            uid: {"uid": uid, "groups": []} for uid in ("10", "2", "invalid")
+            uid: {"uid": uid, "groups": []}
+            for uid in ("10", "2", huge_uid, "invalid")
         }
 
         page = await plugin.web_identity_page("bindings", "", 1, 10)
 
         self.assertEqual(
-            [item["uid"] for item in page["items"]], ["2", "10", "invalid"]
+            [item["uid"] for item in page["items"]], ["2", "10", huge_uid, "invalid"]
         )
+
+    async def test_identity_search_includes_action_member_openid(self):
+        plugin, _ = self.plugin()
+        plugin._violation_records = [
+            {
+                "record_id": "record-1",
+                "created_at": 1,
+                "action_member_openid": "target-openid",
+                "content": "复读",
+            }
+        ]
+        page = await plugin.web_identity_page(
+            "violations", "target-openid", 1, 10
+        )
+        self.assertEqual(page["total"], 1)
+
+    async def test_clear_suspicious_invalidates_verification_tokens(self):
+        plugin, _ = self.plugin()
+        plugin._suspicious_members["group-1:member-1"] = {
+            "group_openid": "group-1",
+            "member_openid": "member-1",
+        }
+        plugin._verification_tokens["stale"] = (
+            9999999999.0,
+            "group-1",
+            "member-1",
+            7,
+        )
+        await plugin.web_clear_suspicious("group-1", "member-1")
+        self.assertNotIn("stale", plugin._verification_tokens)
 
     async def test_identity_page_ignores_malformed_timestamps(self):
         plugin, _ = self.plugin()
