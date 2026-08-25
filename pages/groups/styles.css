@@ -77,6 +77,8 @@ input, select { min-height: 40px; padding: 8px 11px; }
 textarea { resize: vertical; padding: 10px 11px; line-height: 1.5; }
 input:focus, select:focus, textarea:focus { border-color: #1769aa; box-shadow: 0 0 0 3px rgba(23, 105, 170, .13); }
 input[readonly] { background: #eef1f4; color: #667085; }
+.fallback-model-picker { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: start; }
+.fallback-model-actions { display: flex; flex-direction: column; gap: 6px; }
 
 .table-wrap { overflow-x: auto; }
 table { width: 100%; min-width: 840px; border-collapse: collapse; }
@@ -216,6 +218,8 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .empty { display: grid; min-height: 120px; place-items: center; }
   .form-grid { grid-template-columns: 1fr; padding: 18px; }
   .form-grid .wide { grid-column: auto; }
+  .fallback-model-picker { grid-template-columns: 1fr; }
+  .fallback-model-actions { flex-direction: row; }
   .keyword-reply-body, .welcome-rule-body { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
   .keyword-reply-body .wide, .welcome-rule-body .wide { grid-column: 1 / -1; }
   .keyword-rule-summary { align-items: flex-start; flex-wrap: wrap; gap: 8px; }

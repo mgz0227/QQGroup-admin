@@ -3864,10 +3864,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
         script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
         self.assertIn('id="runtime-ai-confirm-provider"', html)
+        self.assertIn('id="runtime-ai-fallback-up"', html)
+        self.assertIn('id="runtime-ai-fallback-down"', html)
         self.assertIn(
             'global_ai_review_confirm_provider_id: element("runtime-ai-confirm-provider").value',
             script,
         )
+        self.assertIn("function moveSelectedOptions", script)
+        self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", -1)', script)
+        self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", 1)', script)
         self.assertGreaterEqual(script.count('"runtime-ai-confirm-provider"'), 3)
 
     def test_ai_decision_requires_confidence_and_is_conservative(self):

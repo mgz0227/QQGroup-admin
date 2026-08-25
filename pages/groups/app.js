@@ -887,7 +887,24 @@
     var providers = Array.isArray(runtimeSettings.providers) ? runtimeSettings.providers : [];
     var selected = Array.isArray(selectedValues) ? selectedValues : [];
     select.replaceChildren();
+    var providerById = new Map();
     providers.forEach(function (provider) {
+      if (provider && provider.id) providerById.set(provider.id, provider);
+    });
+    var orderedIds = [];
+    selected.forEach(function (providerId) {
+      if (providerById.has(providerId) && orderedIds.indexOf(providerId) < 0) {
+        orderedIds.push(providerId);
+      }
+    });
+    providers.forEach(function (provider) {
+      if (provider && provider.id && orderedIds.indexOf(provider.id) < 0) {
+        orderedIds.push(provider.id);
+      }
+    });
+    orderedIds.forEach(function (providerId) {
+      var provider = providerById.get(providerId);
+      if (!provider) return;
       if (!provider || !provider.id) return;
       var option = document.createElement("option");
       option.value = provider.id;
@@ -903,6 +920,24 @@
       missing.selected = true;
       select.appendChild(missing);
     });
+  }
+
+  function moveSelectedOptions(id, direction) {
+    var select = element(id);
+    if (!select || select.disabled) return;
+    if (direction < 0) {
+      for (var index = 1; index < select.options.length; index += 1) {
+        var option = select.options[index];
+        var previous = select.options[index - 1];
+        if (option.selected && !previous.selected) select.insertBefore(option, previous);
+      }
+      return;
+    }
+    for (var index = select.options.length - 2; index >= 0; index -= 1) {
+      var option = select.options[index];
+      var next = select.options[index + 1];
+      if (option.selected && !next.selected) select.insertBefore(next, option);
+    }
   }
 
   function selectedValues(id) {
@@ -1047,6 +1082,8 @@
     element("runtime-ai-provider").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-fallback-providers").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-ai-confirm-provider").disabled = !element("runtime-ai-enabled").checked;
+    element("runtime-ai-fallback-up").disabled = !element("runtime-ai-enabled").checked;
+    element("runtime-ai-fallback-down").disabled = !element("runtime-ai-enabled").checked;
     element("runtime-image-ocr-provider").disabled = !element("runtime-image-ocr-enabled").checked;
   }
 
@@ -1857,6 +1894,14 @@
     element("runtime-ai-provider").disabled = !event.target.checked;
     element("runtime-ai-fallback-providers").disabled = !event.target.checked;
     element("runtime-ai-confirm-provider").disabled = !event.target.checked;
+    element("runtime-ai-fallback-up").disabled = !event.target.checked;
+    element("runtime-ai-fallback-down").disabled = !event.target.checked;
+  });
+  element("runtime-ai-fallback-up").addEventListener("click", function () {
+    moveSelectedOptions("runtime-ai-fallback-providers", -1);
+  });
+  element("runtime-ai-fallback-down").addEventListener("click", function () {
+    moveSelectedOptions("runtime-ai-fallback-providers", 1);
   });
   element("runtime-image-ocr-enabled").addEventListener("change", function (event) {
     element("runtime-image-ocr-provider").disabled = !event.target.checked;
