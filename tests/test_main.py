@@ -4053,6 +4053,43 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         with self.assertRaisesRegex(ValueError, "分页参数"):
             await plugin.web_identity_page("bindings", "", 1, 100)
 
+    async def test_legacy_binding_members_map_restores_group_scope_for_search(self):
+        plugin, _ = self.plugin()
+        plugin.config["auto_review_groups"][0]["group_name"] = "旧版审核群"
+        plugin._uid_bindings = {
+            "123": {
+                "uid": "123",
+                "username": "旧版成员",
+                "members": {"group-1": "member-1"},
+            }
+        }
+
+        page = await plugin.web_identity_page("bindings", "group-1", 1, 10)
+
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["groups"], ["group-1"])
+        self.assertEqual(page["items"][0]["group_names"], ["旧版审核群"])
+
+    async def test_legacy_violation_metadata_is_flushed_after_identity_read(self):
+        plugin, _ = self.plugin()
+        plugin._violation_records = [
+            {"group_openid": "group-1", "content": "旧版记录"}
+        ]
+        plugin._last_violation_state_save_at = module.time.monotonic() - 4.98
+
+        page = await plugin.web_identity_page("violations", "旧版记录", 1, 10)
+        record_id = page["items"][0]["record_id"]
+        self.assertTrue(plugin._violation_state_dirty)
+
+        await module.asyncio.sleep(0.08)
+        saved_id = plugin._kv[module.STATE_KEY]["violation_records"][0]["record_id"]
+        self.assertEqual(saved_id, record_id)
+
+        restored, _ = self.plugin()
+        restored._kv = plugin._kv
+        await restored._load_state()
+        self.assertEqual(restored._violation_records[0]["record_id"], record_id)
+
     async def test_identity_bindings_use_numeric_uid_order(self):
         plugin, _ = self.plugin()
         huge_uid = "9" * 5000

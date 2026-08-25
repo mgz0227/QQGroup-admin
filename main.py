@@ -1147,6 +1147,21 @@ class QQGroupAdmin(Star):
         finally:
             self._violation_flush_task = None
 
+    def _schedule_violation_state_flush(self) -> None:
+        if (
+            self._violation_flush_task is not None
+            and not self._violation_flush_task.done()
+        ):
+            return
+        delay = max(
+            0.05,
+            5 - (time.monotonic() - self._last_violation_state_save_at),
+        )
+        self._violation_flush_task = asyncio.create_task(
+            self._flush_violation_state_later(delay),
+            name="qqgroup-admin-violation-flush",
+        )
+
     @filter.on_platform_loaded()
     async def on_platform_loaded(self) -> None:
         self._patch_qq_clients()
@@ -1541,13 +1556,8 @@ class QQGroupAdmin(Star):
         if binding or now_monotonic - self._last_violation_state_save_at >= 5:
             await self._save_state()
             self._last_violation_state_save_at = now_monotonic
-        elif self._violation_flush_task is None or self._violation_flush_task.done():
-            self._violation_flush_task = asyncio.create_task(
-                self._flush_violation_state_later(
-                    5 - (now_monotonic - self._last_violation_state_save_at)
-                ),
-                name="qqgroup-admin-violation-flush",
-            )
+        else:
+            self._schedule_violation_state_flush()
 
     async def _mark_suspicious(
         self,
@@ -6755,9 +6765,21 @@ class QQGroupAdmin(Star):
             items = []
             for binding in self._uid_bindings.values():
                 item = dict(binding)
+                groups = [str(value) for value in item.get("groups") or [] if value]
+                members = item.get("members")
+                if isinstance(members, dict):
+                    # Older snapshots stored only the group -> member map.
+                    # Rebuild the scope for display/search without rewriting
+                    # the live binding until the normal state flush.
+                    groups = list(
+                        dict.fromkeys(
+                            groups + [str(value) for value in members if value]
+                        )
+                    )
+                item["groups"] = groups
                 item["group_names"] = [
                     groups_by_id.get(str(group_id), str(group_id))
-                    for group_id in item.get("groups") or []
+                    for group_id in groups
                 ]
                 items.append(item)
 
@@ -6786,14 +6808,21 @@ class QQGroupAdmin(Star):
         if kind == "violations":
             items = []
             seen_ids: set[str] = set()
+            normalized_changed = False
             for record in self._violation_records:
-                self._normalize_violation_record(record, seen_ids)
+                normalized_changed = (
+                    self._normalize_violation_record(record, seen_ids)
+                    or normalized_changed
+                )
                 item = dict(record)
                 item["group_name"] = item.get("group_name") or groups_by_id.get(
                     str(item.get("group_openid") or ""), ""
                 )
                 items.append(item)
             items.sort(key=created_at, reverse=True)
+            if normalized_changed:
+                self._violation_state_dirty = True
+                self._schedule_violation_state_flush()
             return items
         raise ValueError("身份记录类型无效")
 
