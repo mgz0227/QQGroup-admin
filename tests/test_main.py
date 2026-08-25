@@ -3094,6 +3094,38 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             plugin.context.llm_generate.await_args.kwargs["image_urls"]
         )
 
+    async def test_ai_image_provider_error_retries_text_only(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                RuntimeError("provider does not support vision"),
+                SimpleNamespace(
+                    role="assistant", completion_text="ALLOW confidence=99 reason=正常"
+                ),
+            ]
+        )
+
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "deepseek",
+                image_review_enabled=True,
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(plugin.context.llm_generate.await_count, 2)
+        calls = plugin.context.llm_generate.await_args_list
+        self.assertEqual(calls[0].kwargs["image_urls"], ["vision-ref"])
+        self.assertIsNone(calls[1].kwargs["image_urls"])
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in calls],
+            ["deepseek", "deepseek"],
+        )
+
     async def test_ai_image_preprocessing_does_not_consume_provider_timeout(self):
         plugin, client = self.plugin()
         clock = [0.0]

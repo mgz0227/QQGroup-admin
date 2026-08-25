@@ -3863,6 +3863,68 @@ class QQGroupAdmin(Star):
             "BLOCK confidence=0-100 reason=...。\n消息："
             + (review_text if review_text else "[仅图片]")
         )
+
+        async def generate_review(
+            current_provider_id: str,
+            system_prompt: str,
+            call_timeout: float,
+        ) -> Any:
+            """Call one provider, retrying text-only when its vision input fails."""
+
+            call_deadline = time.monotonic() + max(0.001, call_timeout)
+            current_images = vision_urls or None
+            retried_text_only = False
+            while True:
+                remaining_call = call_deadline - time.monotonic()
+                if remaining_call <= 0:
+                    raise asyncio.TimeoutError
+                try:
+                    async with asyncio.timeout(remaining_call):
+                        if self._ai_semaphore.locked():
+                            raise RuntimeError("AI 审核并发繁忙")
+                        async with self._ai_semaphore:
+                            response = await self.context.llm_generate(
+                                chat_provider_id=current_provider_id,
+                                prompt=prompt,
+                                image_urls=current_images,
+                                system_prompt=system_prompt,
+                            )
+                    if str(self._ai_response_field(response, "role") or "") == "err":
+                        raise RuntimeError(
+                            f"模型返回错误响应：{self._ai_response_error(response)}"
+                        )
+                    return response
+                except Exception as exc:  # noqa: BLE001 - provider compatibility
+                    error_text = str(exc).lower()
+                    vision_error = any(
+                        marker in error_text
+                        for marker in (
+                            "vision",
+                            "multimodal",
+                            "image",
+                            "attachment",
+                            "media",
+                            "图片",
+                            "图像",
+                            "视觉",
+                        )
+                    )
+                    if (
+                        current_images
+                        and review_text
+                        and not retried_text_only
+                        and vision_error
+                        and str(exc) != "AI 审核并发繁忙"
+                    ):
+                        retried_text_only = True
+                        current_images = None
+                        self.logger.debug(
+                            "AI 视觉输入失败，改用同一模型文字审核：provider=%s",
+                            current_provider_id,
+                        )
+                        continue
+                    raise
+
         providers = []
         if provider_id:
             providers.append(provider_id)
@@ -3895,23 +3957,14 @@ class QQGroupAdmin(Star):
                 min(30.0, remaining / max(1, remaining_candidates)),
             )
             try:
-                async with asyncio.timeout(min(provider_timeout, remaining)):
-                    if self._ai_semaphore.locked():
-                        raise RuntimeError("AI 审核并发繁忙")
-                    async with self._ai_semaphore:
-                        response = await self.context.llm_generate(
-                            chat_provider_id=current_provider_id,
-                            prompt=prompt,
-                            image_urls=vision_urls or None,
-                            system_prompt=(
-                                "你是保守的群消息审核器，宁可放行不确定内容，"
-                                "不得把普通聊天或游戏截图判为违规。"
-                            ),
-                        )
-                if str(self._ai_response_field(response, "role") or "") == "err":
-                    raise RuntimeError(
-                        f"模型返回错误响应：{self._ai_response_error(response)}"
-                    )
+                response = await generate_review(
+                    current_provider_id,
+                    (
+                        "你是保守的群消息审核器，宁可放行不确定内容，"
+                        "不得把普通聊天或游戏截图判为违规。"
+                    ),
+                    min(provider_timeout, remaining),
+                )
                 raw_decision = str(
                     self._ai_response_field(response, "completion_text") or ""
                 )
@@ -3969,26 +4022,14 @@ class QQGroupAdmin(Star):
                 if confirm_remaining <= 0:
                     return confirmation_failed("达到 AI 审核总超时")
                 try:
-                    async with asyncio.timeout(min(30.0, confirm_remaining)):
-                        if self._ai_semaphore.locked():
-                            raise RuntimeError("AI 审核并发繁忙")
-                        async with self._ai_semaphore:
-                            confirm_response = await self.context.llm_generate(
-                                chat_provider_id=confirm_provider,
-                                prompt=prompt,
-                                image_urls=vision_urls or None,
-                                system_prompt=(
-                                    "你是独立的群消息复核器，宁可放行不确定内容。"
-                                    "只按消息本身判断，不得扩大违规范围。"
-                                ),
-                            )
-                    if (
-                        str(self._ai_response_field(confirm_response, "role") or "")
-                        == "err"
-                    ):
-                        raise RuntimeError(
-                            f"模型返回错误响应：{self._ai_response_error(confirm_response)}"
-                        )
+                    confirm_response = await generate_review(
+                        confirm_provider,
+                        (
+                            "你是独立的群消息复核器，宁可放行不确定内容。"
+                            "只按消息本身判断，不得扩大违规范围。"
+                        ),
+                        min(30.0, confirm_remaining),
+                    )
                     raw_confirm = str(
                         self._ai_response_field(confirm_response, "completion_text")
                         or ""
