@@ -1879,12 +1879,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIn("真人验证", prompt["content"])
+        self.assertIn("验证前发送的消息会被撤回", prompt["content"])
+        self.assertEqual(prompt.get("msg_id"), "message-1")
         self.assertIn("如果看不到按钮", message["markdown"]["content"])
-        self.assertIn("验证前发送的消息会被撤回", message["markdown"]["content"])
+        self.assertNotIn("msg_id", message)
         self.assertIn("算式：", prompt["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
         self.assertEqual(
-            [item["msg_type"] for item in client.api.messages[:2]], [2, 0]
+            [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
         )
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
@@ -2347,6 +2349,26 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             plugin._ai_semaphore.release()
         self.assertEqual(result, "")
         plugin.context.llm_generate.assert_not_awaited()
+
+    async def test_image_ocr_accepts_mapping_provider_response(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            return_value={"role": "assistant", "completion_text": "图片文字"}
+        )
+        with patch.object(
+            plugin,
+            "_bounded_media_thread",
+            AsyncMock(side_effect=["", "vision-ref"]),
+        ):
+            result = await plugin._image_ocr_text(
+                FakeEvent(client),
+                ["https://example.test/image.png"],
+                "vision",
+                2,
+                1,
+            )
+        self.assertEqual(result, "图片文字")
+        plugin.context.llm_generate.assert_awaited_once()
 
     async def test_media_timeout_keeps_cpu_gate_until_worker_finishes(self):
         plugin, _client = self.plugin()
@@ -4721,8 +4743,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         content = card["markdown"]["content"]
         self.assertIn("请点击下方正确答案按钮", content)
         self.assertIn("请直接发送正确数字", content)
-        self.assertIn("验证前发送的消息会被撤回", content)
-        self.assertIn("**真人验证：请点击下方正确答案按钮。**", content)
+        self.assertIn("**真人验证**", content)
+        self.assertRegex(content, r"\d+ \+ \d+ = \?")
+        self.assertNotIn("msg_id", card)
 
     async def test_verification_rejects_prefixed_answer(self):
         plugin, client = self.plugin()
