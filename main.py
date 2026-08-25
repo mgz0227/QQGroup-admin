@@ -1617,12 +1617,22 @@ class QQGroupAdmin(Star):
                     },
                 }
             )
-        challenge = (
-            "# 真人验证\n"
-            f"请点击正确答案完成验证：{left} + {right} = ?\n"
-            "验证通过后即可正常发言；未完成验证前发送的消息会被撤回。"
+        prompt = (
+            "真人验证：请点击下方正确答案；如果看不到按钮，请直接发送正确数字。"
+            "答对后即可正常发言；验证前发送的消息会被撤回。"
         )
+        challenge = f"# 算式\n**{left} + {right} = ?**"
         try:
+            # QQ 客户端对“Markdown + 内嵌键盘”的多行正文展示不一致。
+            # 先发纯文本提示，确保用途和回退方式在所有客户端可见。
+            prompt_sent = False
+            try:
+                await self._send_group_text(client, group_openid, prompt)
+                prompt_sent = True
+            except Exception as prompt_exc:  # noqa: BLE001 - optional notice
+                self.logger.debug("真人验证提示发送失败，继续发送按钮：%s", prompt_exc)
+            if not prompt_sent:
+                challenge = f"# 真人验证\n{prompt}\n**{left} + {right} = ?**"
             await self._send_group_markdown(
                 client,
                 group_openid,
@@ -1637,7 +1647,7 @@ class QQGroupAdmin(Star):
                 await self._send_group_text(
                     client,
                     group_openid,
-                    challenge.replace("# ", "", 1),
+                    f"{prompt} 算式：{left} + {right} = ?",
                     message_id=message_id,
                 )
             except Exception:  # noqa: BLE001 - plain fallback can also fail

@@ -1720,7 +1720,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(event.stopped)
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
-        message = client.api.messages[-1]
+        message = next(
+            item for item in client.api.messages if item.get("keyboard")
+        )
         self.assertEqual(message["msg_type"], 2)
         buttons = message["keyboard"]["content"]["rows"][0]["buttons"]
         self.assertTrue(all(button["render_data"]["style"] == 1 for button in buttons))
@@ -1731,6 +1733,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 for button in buttons
             )
         )
+        self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
+        prompt = next(
+            item for item in client.api.messages if item.get("msg_type") == 0
+        )
+        self.assertIn("真人验证", prompt["content"])
+        self.assertIn("如果看不到按钮", prompt["content"])
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
         interaction = SimpleNamespace(
@@ -4392,9 +4400,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         token_data = next(iter(plugin._verification_tokens.values()))
-        self.assertIn("真人验证", client.api.messages[-1]["content"])
-        self.assertIn("请点击正确答案完成验证：3 + 4 = ?", client.api.messages[-1]["content"])
-        self.assertIn("未完成验证前发送的消息会被撤回", client.api.messages[-1]["content"])
+        fallback = client.api.messages[-1]
+        self.assertIn("真人验证", fallback["content"])
+        self.assertIn("请直接发送正确数字", fallback["content"])
+        self.assertIn("3 + 4 = ?", fallback["content"])
+        self.assertIn("消息会被撤回", fallback["content"])
         self.assertTrue(
             await plugin._consume_verification_answer(
                 client,
