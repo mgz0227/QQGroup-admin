@@ -1319,6 +1319,10 @@ class QQGroupAdmin(Star):
         group_name: str = "",
         request: dict[str, Any] | None = None,
     ) -> None:
+        # A stored rule may outlive a temporary unbound state; do not execute
+        # it until the group is configured again.
+        if self._group_config(group_openid) is None:
+            return
         rules = self._welcome_rules_for_group(group_openid)
         if not rules:
             return
@@ -1613,11 +1617,16 @@ class QQGroupAdmin(Star):
                     },
                 }
             )
+        challenge = (
+            "# 真人验证\n"
+            f"请点击正确答案完成验证：{left} + {right} = ?\n"
+            "验证通过后即可正常发言；未完成验证前发送的消息会被撤回。"
+        )
         try:
             await self._send_group_markdown(
                 client,
                 group_openid,
-                f"# {left} + {right} = ?",
+                challenge,
                 message_id=message_id,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
             )
@@ -1628,7 +1637,7 @@ class QQGroupAdmin(Star):
                 await self._send_group_text(
                     client,
                     group_openid,
-                    f"{left} + {right} = ?",
+                    challenge.replace("# ", "", 1),
                     message_id=message_id,
                 )
             except Exception:  # noqa: BLE001 - plain fallback can also fail
@@ -3810,11 +3819,11 @@ class QQGroupAdmin(Star):
         total_timeout = self._bounded_int(
             timeout_seconds, AI_REVIEW_TOTAL_TIMEOUT_SECONDS, 5, 120
         )
-        deadline = time.monotonic() + total_timeout
         vision_urls = []
         if image_review_enabled:
+            preprocess_deadline = time.monotonic() + 3 * AI_REVIEW_MAX_IMAGES
             for url in list(dict.fromkeys(image_urls))[:AI_REVIEW_MAX_IMAGES]:
-                remaining = deadline - time.monotonic()
+                remaining = preprocess_deadline - time.monotonic()
                 if remaining <= 0.5:
                     break
                 if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
@@ -3835,6 +3844,7 @@ class QQGroupAdmin(Star):
                     self.logger.debug("跳过无法安全转换的 GIF 图片")
         if not review_text and not vision_urls:
             return False
+        deadline = time.monotonic() + total_timeout
         prompt = (
             "审核以下 QQ 群消息。只有在明确的色情、暴力威胁、违法交易、诈骗引流、"
             "严重人身攻击/隐私泄露，或明确煽动自伤他伤时才拦截。普通吐槽、轻度脏话、"

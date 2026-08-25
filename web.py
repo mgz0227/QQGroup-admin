@@ -1303,6 +1303,28 @@ class GroupAdminWeb:
             raise TypeError("群配置格式错误")
         return groups
 
+    async def _scope_group_openids(self, current: Any) -> set[str]:
+        """Keep stored scopes round-trippable while a group is temporarily unbound."""
+        known = {
+            str(group.get("group_openid") or "").strip()
+            for group in await self._groups()
+            if isinstance(group, dict) and str(group.get("group_openid") or "").strip()
+        }
+        if not isinstance(current, dict):
+            return known
+        entries = current.get("rules", current.get("profiles", []))
+        if not isinstance(entries, list):
+            return known
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            values = entry.get("group_openids", entry.get("groups", []))
+            if isinstance(values, str):
+                values = re.split(r"[\s,，;；]+", values.strip())
+            if isinstance(values, list):
+                known.update(str(value).strip() for value in values if str(value).strip())
+        return known
+
     async def page_overview(self) -> Any:
         groups = await self._groups()
         return self._response(
@@ -1352,14 +1374,11 @@ class GroupAdminWeb:
         payload = await self._payload()
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
-        bound_group_openids = {
-            str(group["group_openid"])
-            for group in await self._groups()
-            if group.get("bound")
-        }
+        current = await self.plugin.web_global_keyword_replies()
+        allowed_group_openids = await self._scope_group_openids(current)
         settings = {
             "rules": self._global_keyword_replies(
-                payload.get("rules"), bound_group_openids
+                payload.get("rules"), allowed_group_openids
             ),
         }
         if "keyword_reply_cooldown_seconds" in payload:
@@ -1408,14 +1427,11 @@ class GroupAdminWeb:
         payload = await self._payload()
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
-        bound_group_openids = {
-            str(group["group_openid"])
-            for group in await self._groups()
-            if group.get("bound")
-        }
+        current = await self.plugin.web_welcome_rules()
+        allowed_group_openids = await self._scope_group_openids(current)
         settings = {
             "rules": self._welcome_rules(
-                payload.get("rules"), bound_group_openids
+                payload.get("rules"), allowed_group_openids
             )
         }
         return self._response(
@@ -1441,13 +1457,10 @@ class GroupAdminWeb:
         payload = await self._payload()
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
-        bound_group_openids = {
-            str(group["group_openid"])
-            for group in await self._groups()
-            if group.get("bound")
-        }
+        current = await self.plugin.web_global_policies()
+        allowed_group_openids = await self._scope_group_openids(current)
         profiles = self._global_policy_profiles(
-            payload.get("profiles"), bound_group_openids
+            payload.get("profiles"), allowed_group_openids
         )
         if not profiles:
             raise ValueError("至少保留一套全局群策略")

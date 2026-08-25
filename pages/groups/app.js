@@ -1148,10 +1148,20 @@
     });
   }
 
-  function saveRuntimePolicies() {
+  function commitCurrentRuntimePolicy() {
     var current = readRuntimePolicy();
-    if (!current.name) { toast("策略名称不能为空", true); return; }
+    if (!current.name) throw new Error("策略名称不能为空");
     runtimePolicies[runtimePolicyIndex] = current;
+    return current;
+  }
+
+  function saveRuntimePolicies() {
+    try {
+      commitCurrentRuntimePolicy();
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
     var button = element("runtime-policy-save");
     button.disabled = true;
     apiPost("global-policies/save", { profiles: runtimePolicies })
@@ -1176,6 +1186,12 @@
       toast("最多配置 50 套全局策略", true);
       return;
     }
+    try {
+      commitCurrentRuntimePolicy();
+    } catch (error) {
+      toast(error.message, true);
+      return;
+    }
     var source = runtimePolicies[runtimePolicyIndex] || {};
     runtimePolicies.push(Object.assign({}, source, {
       profile_id: "profile-" + Date.now(),
@@ -1192,6 +1208,12 @@
   function deleteRuntimePolicy() {
     if (runtimePolicies.length <= 1) {
       toast("至少保留一套全局策略", true);
+      return;
+    }
+    try {
+      commitCurrentRuntimePolicy();
+    } catch (error) {
+      toast(error.message, true);
       return;
     }
     runtimePolicies.splice(runtimePolicyIndex, 1);
@@ -1211,8 +1233,7 @@
     };
     var current;
     try {
-      current = readRuntimePolicy();
-      if (!current.name) throw new Error("策略名称不能为空");
+      current = commitCurrentRuntimePolicy();
     } catch (error) {
       toast(error.message, true);
       return;
@@ -1801,6 +1822,14 @@
   element("save-welcome-rules").addEventListener("click", saveWelcomeRules);
   element("runtime-form").addEventListener("submit", saveRuntime);
   element("runtime-policy-select").addEventListener("change", function (event) {
+    var previousIndex = runtimePolicyIndex;
+    try {
+      commitCurrentRuntimePolicy();
+    } catch (error) {
+      event.target.value = String(previousIndex);
+      toast(error.message, true);
+      return;
+    }
     runtimePolicyIndex = Math.max(0, Math.min(runtimePolicies.length - 1, Number(event.target.value) || 0));
     fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
     fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);

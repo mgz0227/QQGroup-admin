@@ -1205,6 +1205,40 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(runtime["global_image_reject_at_member"])
         self.assertEqual(runtime["global_ai_review_action"], "record_only")
 
+    async def test_web_scope_save_keeps_existing_unbound_group(self):
+        plugin, _client = self.plugin()
+        plugin.config["auto_review_groups"].append(
+            {"group_openid": "group-2", "group_name": "暂未绑定群"}
+        )
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "欢迎",
+                "message": "欢迎 {username}",
+                "group_openids": ["group-2"],
+            }
+        ]
+        web = module.GroupAdminWeb(plugin, plugin.context)
+        web_module = sys.modules[module.GroupAdminWeb.__module__]
+        payload = {
+            "rules": [
+                {
+                    "name": "欢迎",
+                    "message": "欢迎 {username}",
+                    "group_openids": ["group-2"],
+                }
+            ]
+        }
+        with patch.object(
+            web_module.request, "json", AsyncMock(return_value=payload), create=True
+        ):
+            await web.page_welcome_rules_save()
+        self.assertEqual(plugin.config["welcome_rules"][0]["group_openids"], ["group-2"])
+
+        scope = await web._scope_group_openids(
+            {"rules": [{"group_openids": ["group-2"]}]}
+        )
+        self.assertIn("group-2", scope)
+
     def test_runtime_validation_keeps_new_fields_partial_for_cached_pages(self):
         runtime = module.GroupAdminWeb._runtime_settings(
             {
@@ -3055,6 +3089,43 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             plugin.context.llm_generate.await_args.kwargs["image_urls"]
         )
 
+    async def test_ai_image_preprocessing_does_not_consume_provider_timeout(self):
+        plugin, client = self.plugin()
+        clock = [0.0]
+        calls = []
+
+        async def normalize(_function, value, *, timeout):
+            clock[0] += 4.9
+            return value
+
+        async def provider_call(**kwargs):
+            calls.append(kwargs["chat_provider_id"])
+            if len(calls) == 1:
+                clock[0] += 0.2
+                raise RuntimeError("primary unavailable")
+            return SimpleNamespace(
+                role="assistant",
+                completion_text="ALLOW confidence=99 reason=正常",
+            )
+
+        plugin.context.llm_generate = provider_call
+        with (
+            patch.object(plugin, "_bounded_media_thread", side_effect=normalize),
+            patch.object(module.time, "monotonic", side_effect=lambda: clock[0]),
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "primary",
+                ["fallback"],
+                timeout_seconds=5,
+                image_review_enabled=True,
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(calls, ["primary", "fallback"])
+
     async def test_join_config_backup_restores_missing_entries(self):
         plugin, _client = self.plugin()
         await plugin._save_config_backup()
@@ -4324,7 +4395,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         token_data = next(iter(plugin._verification_tokens.values()))
-        self.assertEqual(client.api.messages[-1]["content"], "3 + 4 = ?")
+        self.assertIn("真人验证", client.api.messages[-1]["content"])
+        self.assertIn("请点击正确答案完成验证：3 + 4 = ?", client.api.messages[-1]["content"])
+        self.assertIn("未完成验证前发送的消息会被撤回", client.api.messages[-1]["content"])
         self.assertTrue(
             await plugin._consume_verification_answer(
                 client,
