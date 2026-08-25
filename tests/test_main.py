@@ -151,6 +151,11 @@ class FakeEvent:
 
 
 class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
+    def test_permission_error_40011030_has_actionable_hint(self):
+        error = module.QQAPIError(err_code=40011030, trace_id="trace-1")
+        self.assertIn("入群申请接口判定机器人不是群管理员", str(error))
+        self.assertIn("trace-1", str(error))
+
     def plugin(self):
         client = FakeClient()
         platform = SimpleNamespace(get_client=lambda: client)
@@ -1993,6 +1998,32 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         finally:
             plugin._media_semaphore.release()
 
+    async def test_media_timeout_keeps_cpu_gate_until_worker_finishes(self):
+        plugin, _client = self.plugin()
+        started = module.asyncio.Event()
+        finish = module.asyncio.Event()
+
+        async def slow_to_thread(_function, *_args):
+            started.set()
+            await finish.wait()
+            return "done"
+
+        with patch.object(module.asyncio, "to_thread", slow_to_thread):
+            task = module.asyncio.create_task(
+                plugin._bounded_media_thread(lambda: None, timeout=0.5)
+            )
+            await module.asyncio.wait_for(started.wait(), timeout=1)
+            with self.assertRaises(module.asyncio.TimeoutError):
+                await task
+            self.assertTrue(plugin._media_semaphore.locked())
+            self.assertIsNone(
+                await plugin._bounded_media_thread(lambda: None, timeout=0.5)
+            )
+            finish.set()
+            await module.asyncio.sleep(0)
+            await module.asyncio.sleep(0)
+            self.assertFalse(plugin._media_semaphore.locked())
+
     async def test_global_member_blacklist_overrides_disabled_group_audit(self):
         plugin, client = self.plugin()
         plugin.config.update(
@@ -3191,6 +3222,30 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["primary", "confirm"],
         )
 
+    async def test_ai_review_fails_fast_when_concurrency_gate_is_busy(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock()
+        await plugin._ai_semaphore.acquire()
+        await plugin._ai_semaphore.acquire()
+        try:
+            result = {}
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "待审核"),
+                "待审核",
+                [],
+                "primary",
+                ["fallback"],
+                timeout_seconds=5,
+                result=result,
+            )
+        finally:
+            plugin._ai_semaphore.release()
+            plugin._ai_semaphore.release()
+
+        self.assertFalse(blocked)
+        plugin.context.llm_generate.assert_not_awaited()
+        self.assertIn("并发繁忙", result["reason"])
+
     def test_runtime_global_ai_validation_accepts_multiple_fallbacks(self):
         runtime = module.GroupAdminWeb._runtime_settings(
             {
@@ -3351,6 +3406,27 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(record["record_id"])
         self.assertEqual(record["review_status"], "pending")
         self.assertEqual(record["reviewed_at"], 0)
+
+    async def test_throttled_violation_records_flush_without_waiting_for_shutdown(self):
+        plugin, _ = self.plugin()
+        await plugin._record_uid_violation(
+            "",
+            "group-1",
+            "member-1",
+            "第一条",
+            content="一",
+        )
+        plugin._last_violation_state_save_at = module.time.monotonic() - 4.98
+        await plugin._record_uid_violation(
+            "",
+            "group-1",
+            "member-2",
+            "第二条",
+            content="二",
+        )
+        await module.asyncio.sleep(0.08)
+        saved = plugin._kv[module.STATE_KEY]["violation_records"]
+        self.assertEqual([record["content"] for record in saved], ["一", "二"])
 
     async def test_violation_state_migrates_ids_and_review_statuses(self):
         plugin, _ = self.plugin()

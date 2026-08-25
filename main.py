@@ -468,6 +468,7 @@ class QQGroupAdmin(Star):
         self._violation_records: list[dict[str, Any]] = []
         self._last_violation_state_save_at = 0.0
         self._violation_state_dirty = False
+        self._violation_flush_task: asyncio.Task[None] | None = None
         self._bilibili_state: dict[str, dict[str, Any]] = {
             "live": {},
             "dynamic": {},
@@ -477,6 +478,7 @@ class QQGroupAdmin(Star):
         # Keep local OCR and image decoding from competing with the host for CPU.
         # Overload is deliberately fail-open: text rules and AI text review still run.
         self._media_semaphore = asyncio.Semaphore(1)
+        self._media_tasks: set[asyncio.Task[Any]] = set()
         self._ai_warning_at = 0.0
         self._migrate_config()
         self._web = GroupAdminWeb(self, context)
@@ -709,10 +711,21 @@ class QQGroupAdmin(Star):
         if recall_tasks:
             await asyncio.gather(*recall_tasks, return_exceptions=True)
         self._recall_tasks.clear()
+        media_tasks = tuple(self._media_tasks)
+        for task in media_tasks:
+            task.cancel()
+        if media_tasks:
+            await asyncio.gather(*media_tasks, return_exceptions=True)
+        self._media_tasks.clear()
         self._bilibili_logins.clear()
         self._keyword_reply_ready_at.clear()
         self._approval_contexts.clear()
         self._welcome_sent_at.clear()
+        if self._violation_flush_task:
+            self._violation_flush_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self._violation_flush_task
+            self._violation_flush_task = None
         if self._violation_state_dirty:
             try:
                 await self._save_state()
@@ -811,6 +824,21 @@ class QQGroupAdmin(Star):
                 },
             )
             self._violation_state_dirty = False
+
+    async def _flush_violation_state_later(self, delay: float) -> None:
+        """Flush throttled violation records without writing on every message."""
+
+        try:
+            await asyncio.sleep(max(0.05, float(delay)))
+            if self._violation_state_dirty:
+                await self._save_state()
+                self._last_violation_state_save_at = time.monotonic()
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - moderation remains fail-open
+            self.logger.warning("延迟保存违规记录失败：%s", exc)
+        finally:
+            self._violation_flush_task = None
 
     @filter.on_platform_loaded()
     async def on_platform_loaded(self) -> None:
@@ -1191,6 +1219,13 @@ class QQGroupAdmin(Star):
         if binding or now_monotonic - self._last_violation_state_save_at >= 5:
             await self._save_state()
             self._last_violation_state_save_at = now_monotonic
+        elif self._violation_flush_task is None or self._violation_flush_task.done():
+            self._violation_flush_task = asyncio.create_task(
+                self._flush_violation_state_later(
+                    5 - (now_monotonic - self._last_violation_state_save_at)
+                ),
+                name="qqgroup-admin-violation-flush",
+            )
 
     async def _mark_suspicious(
         self,
@@ -3184,13 +3219,50 @@ class QQGroupAdmin(Star):
             self.logger.debug("媒体处理繁忙，跳过本条图片 OCR/转换")
             return None
         await self._media_semaphore.acquire()
+
+        runner: asyncio.Task[Any] | None = None
+        released = False
+
+        def release_after_worker(worker: asyncio.Task[Any]) -> None:
+            nonlocal released
+            if not released:
+                released = True
+                if runner is not None:
+                    self._media_tasks.discard(runner)
+                self._media_semaphore.release()
+            if not worker.cancelled():
+                worker.exception()
+
+        async def run_worker() -> Any:
+            worker = asyncio.create_task(
+                asyncio.to_thread(function, *args),
+                name="qqgroup-admin-media-worker",
+            )
+            worker.add_done_callback(release_after_worker)
+            return await asyncio.shield(worker)
+
+        runner = asyncio.create_task(
+            run_worker(),
+            name="qqgroup-admin-media-runner",
+        )
+        self._media_tasks.add(runner)
         try:
             return await asyncio.wait_for(
-                asyncio.to_thread(function, *args),
+                asyncio.shield(runner),
                 timeout=max(0.5, float(timeout)),
             )
-        finally:
-            self._media_semaphore.release()
+        except asyncio.CancelledError:
+            # The worker is shielded; its callback releases the gate after it
+            # really exits, even when the plugin stops waiting early.
+            raise
+        except asyncio.TimeoutError:
+            raise
+        except Exception:
+            if not released:
+                released = True
+                self._media_tasks.discard(runner)
+                self._media_semaphore.release()
+            raise
 
     @staticmethod
     def _ai_decision_details(value: str) -> tuple[str, int | None, str]:
@@ -3348,6 +3420,8 @@ class QQGroupAdmin(Star):
             )
             try:
                 async with asyncio.timeout(min(provider_timeout, remaining)):
+                    if self._ai_semaphore.locked():
+                        raise RuntimeError("AI 审核并发繁忙")
                     async with self._ai_semaphore:
                         response = await self.context.llm_generate(
                             chat_provider_id=current_provider_id,
@@ -3416,6 +3490,8 @@ class QQGroupAdmin(Star):
                     return confirmation_failed("达到 AI 审核总超时")
                 try:
                     async with asyncio.timeout(min(30.0, confirm_remaining)):
+                        if self._ai_semaphore.locked():
+                            raise RuntimeError("AI 审核并发繁忙")
                         async with self._ai_semaphore:
                             confirm_response = await self.context.llm_generate(
                                 chat_provider_id=confirm_provider,
