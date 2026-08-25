@@ -4088,26 +4088,25 @@ class QQGroupAdmin(Star):
                 reason = "图片文字命中本群禁止关键词，已撤回。"
                 warn_text = settings["image_keyword_reply"]
                 warn_at_member = settings["image_keyword_at"]
-        if not reason and global_rate_enabled and not bool(
-            getattr(event, "is_at_or_wake_command", False)
-        ):
-            rate_ids = self._moderation.add_rate(
-                group_openid,
-                member_openid,
-                message_id,
-                threshold=settings["rate_count"],
-                window=settings["rate_window"],
-                recall_limit=settings["rate_recall_count"],
-            )
-            if rate_ids:
-                reason = "消息发送过于频繁，相关消息已撤回。"
-                warn_text = settings["rate_reply"]
-                warn_at_member = settings["rate_at"]
-                recall_ids = rate_ids
-                self._moderation.break_image_chain(group_openid, member_openid)
-                self._moderation.break_repeat(group_openid)
-        elif reason and global_rate_enabled:
-            self._moderation.break_rate(group_openid, member_openid)
+        if global_rate_enabled:
+            if reason or bool(getattr(event, "is_at_or_wake_command", False)):
+                self._moderation.break_rate(group_openid, member_openid)
+            else:
+                rate_ids = self._moderation.add_rate(
+                    group_openid,
+                    member_openid,
+                    message_id,
+                    threshold=settings["rate_count"],
+                    window=settings["rate_window"],
+                    recall_limit=settings["rate_recall_count"],
+                )
+                if rate_ids:
+                    reason = "消息发送过于频繁，相关消息已撤回。"
+                    warn_text = settings["rate_reply"]
+                    warn_at_member = settings["rate_at"]
+                    recall_ids = rate_ids
+                    self._moderation.break_image_chain(group_openid, member_openid)
+                    self._moderation.break_repeat(group_openid)
         if not reason and global_image_spam_enabled:
             image_recall_ids = self._moderation.add_images(
                 group_openid,

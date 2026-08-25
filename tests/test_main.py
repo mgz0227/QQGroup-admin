@@ -1932,6 +1932,41 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(client.api.messages[-1]["content"], "请稍后再发")
 
+    async def test_command_clears_global_rate_window(self):
+        plugin, client = self.plugin()
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = False
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "rate",
+                "name": "消息频率",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "global_rate_limit_enabled": True,
+                "global_rate_limit_count": 2,
+                "global_rate_limit_window_seconds": 30,
+                "global_rate_limit_recall_count": 2,
+            }
+        ]
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        first = FakeEvent(client, "普通消息")
+        first.is_at_or_wake_command = False
+        first.message_obj.message_id = "rate-first"
+        await plugin.audit_group_message(first)
+
+        command = FakeEvent(client, "/设置")
+        command.message_obj.message_id = "rate-command"
+        await plugin.audit_group_message(command)
+
+        after_command = FakeEvent(client, "普通消息")
+        after_command.is_at_or_wake_command = False
+        after_command.message_obj.message_id = "rate-after-command"
+        await plugin.audit_group_message(after_command)
+
+        self.assertFalse(after_command.stopped)
+        api.recall_group_message.assert_not_awaited()
+
     async def test_recall_reply_variable_overrides_disabled_auto_mention(self):
         plugin, client = self.plugin()
         plugin.config.update(
