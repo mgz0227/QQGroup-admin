@@ -519,6 +519,49 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         created = plugin.config["global_policy_profiles"][-1]
         self.assertEqual(created["group_openids"], ["group-1"])
         self.assertTrue(created["global_repeat_review_enabled"])
+        self.assertEqual(plugin.config["global_policy_profiles"][0]["group_openids"], ["group-2"])
+
+    async def test_settings_button_splits_shared_policy_before_changing_one_group(self):
+        plugin, _client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "shared",
+                "name": "共享媒体策略",
+                "enabled": True,
+                "group_openids": ["group-1", "group-2"],
+                "global_repeat_review_enabled": False,
+            }
+        ]
+        plugin._set_global_policy_value_for_group(
+            "group-1", "global_repeat_review_enabled", True
+        )
+        profiles = plugin.config["global_policy_profiles"]
+        self.assertEqual(profiles[0]["group_openids"], ["group-1"])
+        self.assertTrue(profiles[0]["global_repeat_review_enabled"])
+        self.assertEqual(profiles[1]["group_openids"], ["group-2"])
+        self.assertFalse(profiles[1]["global_repeat_review_enabled"])
+
+    def test_global_policy_scope_warnings_report_ordered_overlap(self):
+        plugin, _client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "specific",
+                "name": "专用群策略",
+                "enabled": True,
+                "group_openids": ["group-1"],
+            },
+            {
+                "profile_id": "fallback",
+                "name": "全部群兜底",
+                "enabled": True,
+                "group_openids": [],
+            },
+        ]
+        warnings = plugin._global_policy_scope_warnings({"group-1", "group-2"})
+        self.assertEqual(len(warnings), 1)
+        self.assertEqual(warnings[0]["first_name"], "专用群策略")
+        self.assertEqual(warnings[0]["second_name"], "全部群兜底")
+        self.assertEqual(warnings[0]["group_openids"], ["group-1"])
 
     async def test_uncovered_group_does_not_fall_back_to_legacy_media_policy(self):
         plugin, _client = self.plugin()
@@ -2922,6 +2965,42 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         plugin.context.llm_generate.assert_awaited_once()
 
+    async def test_ai_error_response_keeps_detail_and_tries_fallback(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "待审核")
+        error_response = SimpleNamespace(
+            role="err",
+            completion_text="",
+            result_chain=SimpleNamespace(
+                get_plain_text=lambda: "provider unavailable: quota exhausted"
+            ),
+        )
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                error_response,
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=96 reason=明确违规",
+                ),
+            ]
+        )
+
+        with self.assertLogs(plugin.logger, level="DEBUG") as captured:
+            blocked = await plugin._ai_blocks_message(
+                event,
+                "待审核",
+                [],
+                "primary",
+                ["fallback"],
+            )
+
+        self.assertTrue(blocked)
+        self.assertIn("quota exhausted", "\n".join(captured.output))
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
+            ["primary", "fallback"],
+        )
+
     async def test_ai_image_review_caps_preprocessing_images(self):
         plugin, client = self.plugin()
         plugin.context.llm_generate = AsyncMock(
@@ -3264,6 +3343,16 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
             ["primary", "fallback-1", "fallback-2"],
         )
+
+    def test_ai_error_response_extracts_and_redacts_provider_detail(self):
+        response = {
+            "role": "err",
+            "error": {"message": "401 token=sk-test-secret request https://api.invalid/x"},
+        }
+        detail = module.QQGroupAdmin._ai_response_error(response)
+        self.assertIn("401", detail)
+        self.assertNotIn("sk-test-secret", detail)
+        self.assertNotIn("https://api.invalid/x", detail)
 
     async def test_ai_total_timeout_reserves_time_for_fallbacks(self):
         plugin, client = self.plugin()

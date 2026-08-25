@@ -181,6 +181,7 @@
               <div class="group-choice-grid" id="runtime-policy-groups"></div>
             </fieldset>
             <p class="config-note wide">策略按列表顺序匹配；同一群命中第一套启用策略。每套策略可独立设置入群关键词、黑白名单、AI 主备模型、图片 OCR、回复和冷却。运行轮询间隔、B站登录账号等平台级参数仍保持单份。</p>
+            <div class="config-note config-warning wide" id="runtime-policy-warnings" role="status" hidden></div>
             <div class="section-title wide">入群审核</div>
             <label><span>审核轮询间隔（秒）</span><input id="runtime-review-interval" type="number" min="15" max="600" required></label>
             <label class="checkbox runtime-toggle"><input id="runtime-settings-command" type="checkbox"><span>启用群内审核设置命令</span></label>

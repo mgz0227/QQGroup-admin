@@ -918,6 +918,30 @@
     element("runtime-live-interval").value = runtimeSettings.bilibili_live_interval_seconds || 60;
     element("runtime-dynamic-interval").value = runtimeSettings.bilibili_dynamic_interval_seconds || 180;
     element("bilibili-login-status").textContent = runtimeSettings.bilibili_logged_in ? "已登录" : "未登录";
+    renderRuntimePolicyWarnings();
+  }
+
+  function renderRuntimePolicyWarnings() {
+    var box = element("runtime-policy-warnings");
+    if (!box) return;
+    var warnings = Array.isArray(runtimeSettings.global_policy_warnings)
+      ? runtimeSettings.global_policy_warnings : [];
+    if (!warnings.length) {
+      box.hidden = true;
+      box.textContent = "";
+      return;
+    }
+    var names = new Map((runtimeSettings.global_policy_groups || []).map(function (group) {
+      return [group.group_openid, group.group_name || group.group_openid];
+    }));
+    box.textContent = warnings.slice(0, 5).map(function (warning) {
+      var groups = (warning.group_openids || []).map(function (id) {
+        return names.get(id) || id;
+      });
+      var suffix = groups.length ? "：" + groups.slice(0, 3).join("、") + (groups.length > 3 ? " 等" : "") : "";
+      return "策略“" + warning.first_name + "”与“" + warning.second_name + "”覆盖范围重叠，按列表顺序以前者生效" + suffix + "。";
+    }).join("\n");
+    box.hidden = false;
   }
 
   function fillRuntimePolicyFields(policy) {
@@ -1104,9 +1128,14 @@
     apiPost("global-policies/save", { profiles: runtimePolicies })
       .then(function (saved) {
         runtimePolicies = (saved && Array.isArray(saved.profiles)) ? saved.profiles : runtimePolicies;
+        if (saved) {
+          runtimeSettings.global_policy_warnings = Array.isArray(saved.warnings) ? saved.warnings : [];
+          runtimeSettings.global_policy_groups = Array.isArray(saved.groups) ? saved.groups : runtimeSettings.global_policy_groups;
+        }
         fillRuntimePolicySelector();
         fillRuntimePolicy(runtimePolicies[runtimePolicyIndex]);
         fillRuntimePolicyFields(runtimePolicies[runtimePolicyIndex]);
+        renderRuntimePolicyWarnings();
         toast("全局群策略已保存");
       })
       .catch(function (error) { toast("保存策略失败：" + error.message, true); })

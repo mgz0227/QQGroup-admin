@@ -1869,12 +1869,56 @@ class QQGroupAdmin(Star):
         if not policies:
             self.config[key] = value
             return
-        for policy in policies:
+        def profile_id_for_group() -> str:
+            base = re.sub(r"[^A-Za-z0-9._:-]", "-", group_openid)[:48]
+            base = f"group-{base or 'default'}"
+            used_ids = {str(item.get("profile_id") or "") for item in policies}
+            candidate = base
+            suffix = 2
+            while candidate in used_ids:
+                candidate = f"{base}-{suffix}"
+                suffix += 1
+            return candidate
+
+        def clone_for_group(template: dict[str, Any]) -> dict[str, Any]:
+            created = {
+                key_name: (list(item) if isinstance(item, list) else item)
+                for key_name, item in template.items()
+                if key_name in GLOBAL_POLICY_DEFAULTS
+            }
+            created.update(
+                {
+                    "__template_key": "global_policy",
+                    "profile_id": profile_id_for_group(),
+                    "name": f"群内设置策略 {group_openid[:8]}",
+                    "enabled": True,
+                    "group_openids": [group_openid],
+                    key: value,
+                }
+            )
+            for media_key in GLOBAL_MEDIA_POLICY_KEYS:
+                created.setdefault(media_key, GLOBAL_POLICY_DEFAULTS[media_key])
+            return created
+
+        for index, policy in enumerate(policies):
             if not bool(policy.get("enabled", True)):
                 continue
             groups = self._policy_group_openids(policy)
             if not groups or group_openid in groups:
-                policy[key] = value
+                # A button is scoped to one group. Split a shared or all-group
+                # profile so changing it cannot silently affect other groups.
+                if groups == [group_openid]:
+                    policy[key] = value
+                    return
+                if len(policies) >= 50:
+                    raise ValueError("全局策略已达到 50 套上限，请先在 WebUI 合并策略")
+                created = clone_for_group(policy)
+                if groups:
+                    policy["group_openids"] = [
+                        item for item in groups if item != group_openid
+                    ]
+                policies.insert(index, created)
+                self.config[GLOBAL_POLICIES_KEY] = policies
                 return
         if len(policies) >= 50:
             raise ValueError("全局策略已达到 50 套上限，请先在 WebUI 合并策略")
@@ -1882,35 +1926,48 @@ class QQGroupAdmin(Star):
             (policy for policy in policies if bool(policy.get("enabled", True))),
             policies[0] if policies else {},
         )
-        profile_id = re.sub(r"[^A-Za-z0-9._:-]", "-", group_openid)[:48]
-        profile_id = f"group-{profile_id or 'default'}"
-        used_ids = {
-            str(policy.get("profile_id") or "") for policy in policies
-        }
-        suffix = 2
-        candidate = profile_id
-        while candidate in used_ids:
-            candidate = f"{profile_id}-{suffix}"
-            suffix += 1
-        created = {
-            key_name: (list(item) if isinstance(item, list) else item)
-            for key_name, item in template.items()
-            if key_name in GLOBAL_POLICY_DEFAULTS
-        }
-        created.update(
-            {
-                "__template_key": "global_policy",
-                "profile_id": candidate,
-                "name": f"群内设置策略 {group_openid[:8]}",
-                "enabled": True,
-                "group_openids": [group_openid],
-                key: value,
-            }
-        )
-        for media_key in GLOBAL_MEDIA_POLICY_KEYS:
-            created.setdefault(media_key, GLOBAL_POLICY_DEFAULTS[media_key])
+        created = clone_for_group(template)
         policies.append(created)
         self.config[GLOBAL_POLICIES_KEY] = policies
+
+    def _global_policy_scope_warnings(
+        self, bound_group_openids: set[str] | list[str]
+    ) -> list[dict[str, Any]]:
+        """Describe overlapping enabled scopes without rejecting list-order rules."""
+        bound = {str(item).strip() for item in bound_group_openids if str(item).strip()}
+        scoped: list[tuple[str, str, set[str], bool]] = []
+        for index, policy in enumerate(self._configured_global_policies(), 1):
+            if not bool(policy.get("enabled", True)):
+                continue
+            raw_groups = set(self._policy_group_openids(policy))
+            effective = raw_groups or bound
+            if not effective:
+                continue
+            scoped.append(
+                (
+                    str(policy.get("profile_id") or f"profile-{index}"),
+                    str(policy.get("name") or f"全局策略 {index}"),
+                    effective,
+                    not raw_groups,
+                )
+            )
+        warnings: list[dict[str, Any]] = []
+        for index, first in enumerate(scoped):
+            for second in scoped[index + 1 :]:
+                overlap = sorted(first[2] & second[2])
+                if not overlap:
+                    continue
+                warnings.append(
+                    {
+                        "first_profile_id": first[0],
+                        "first_name": first[1],
+                        "second_profile_id": second[0],
+                        "second_name": second[1],
+                        "group_openids": overlap[:50],
+                        "all_groups_overlap": first[3] or second[3],
+                    }
+                )
+        return warnings[:100]
 
     @staticmethod
     def _policy_value(policy: dict[str, Any], key: str) -> Any:
@@ -3389,6 +3446,46 @@ class QQGroupAdmin(Star):
         text = re.sub(r"\bsk-[A-Za-z0-9][A-Za-z0-9_-]{7,}\b", "<redacted>", text)
         return text[:120] or "模型调用失败"
 
+    @staticmethod
+    def _ai_response_field(response: Any, name: str) -> Any:
+        """Read provider responses across AstrBot versions and test doubles."""
+
+        if isinstance(response, dict):
+            return response.get(name)
+        return getattr(response, name, None)
+
+    @classmethod
+    def _ai_response_error(cls, response: Any) -> str:
+        """Extract a useful, redacted error from ``role=err`` responses."""
+
+        values: list[str] = []
+
+        def collect(value: Any) -> None:
+            if value is None:
+                return
+            if isinstance(value, dict):
+                for key in ("message", "detail", "error", "code", "type"):
+                    if key in value:
+                        collect(value[key])
+                return
+            value = str(value).strip()
+            if value:
+                values.append(value)
+
+        for field in ("completion_text", "error", "error_message", "message", "detail"):
+            collect(cls._ai_response_field(response, field))
+        chain = cls._ai_response_field(response, "result_chain")
+        if chain is not None:
+            try:
+                collect(chain.get_plain_text())
+            except Exception:  # noqa: BLE001 - provider compatibility
+                pass
+        for value in values:
+            safe = cls._safe_ai_error(value)
+            if safe and safe != "模型调用失败":
+                return safe
+        return "模型返回错误响应"
+
     async def _ai_blocks_message(
         self,
         event: AstrMessageEvent,
@@ -3480,9 +3577,13 @@ class QQGroupAdmin(Star):
                                 "不得把普通聊天或游戏截图判为违规。"
                             ),
                         )
-                if str(getattr(response, "role", "")) == "err":
-                    raise RuntimeError("模型返回错误响应")
-                raw_decision = str(getattr(response, "completion_text", "") or "")
+                if str(self._ai_response_field(response, "role") or "") == "err":
+                    raise RuntimeError(
+                        f"模型返回错误响应：{self._ai_response_error(response)}"
+                    )
+                raw_decision = str(
+                    self._ai_response_field(response, "completion_text") or ""
+                )
                 decision = self._ai_decision(raw_decision, block_threshold)
                 if decision is None:
                     raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
@@ -3550,10 +3651,16 @@ class QQGroupAdmin(Star):
                                     "只按消息本身判断，不得扩大违规范围。"
                                 ),
                             )
-                    if str(getattr(confirm_response, "role", "")) == "err":
-                        raise RuntimeError("模型返回错误响应")
+                    if (
+                        str(self._ai_response_field(confirm_response, "role") or "")
+                        == "err"
+                    ):
+                        raise RuntimeError(
+                            f"模型返回错误响应：{self._ai_response_error(confirm_response)}"
+                        )
                     raw_confirm = str(
-                        getattr(confirm_response, "completion_text", "") or ""
+                        self._ai_response_field(confirm_response, "completion_text")
+                        or ""
                     )
                     confirmed = self._ai_decision(raw_confirm, block_threshold)
                     if confirmed is None:
@@ -3582,10 +3689,9 @@ class QQGroupAdmin(Star):
                 except Exception as exc:  # noqa: BLE001 - downgrade to record-only
                     if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                         detail = "模型超时"
-                    elif str(exc) in {
-                        "模型返回错误响应",
-                        "模型未返回带置信度的 ALLOW/BLOCK",
-                    }:
+                    elif str(exc).startswith("模型返回错误响应") or str(exc) == (
+                        "模型未返回带置信度的 ALLOW/BLOCK"
+                    ):
                         detail = str(exc)
                     else:
                         detail = "模型调用失败"
@@ -5847,16 +5953,19 @@ class QQGroupAdmin(Star):
 
     async def web_global_policies(self) -> dict[str, Any]:
         groups = await self.web_groups()
+        bound_groups = [group for group in groups if group.get("bound")]
         return {
             "groups": [
                 {
                     "group_name": group["group_name"],
                     "group_openid": group["group_openid"],
                 }
-                for group in groups
-                if group.get("bound")
+                for group in bound_groups
             ],
             "profiles": self._global_policy_profiles_for_web(),
+            "warnings": self._global_policy_scope_warnings(
+                {str(group["group_openid"]) for group in bound_groups}
+            ),
         }
 
     async def web_save_global_policies(
@@ -5926,6 +6035,7 @@ class QQGroupAdmin(Star):
                 )
             except Exception as exc:  # noqa: BLE001 - skip malformed providers
                 self.logger.debug("忽略无法读取的 AI 提供商：%s", exc)
+        bound_groups = [group for group in await self.web_groups() if group.get("bound")]
         return {
             "uid_review_interval_seconds": self._bounded_int(
                 self.config.get("uid_review_interval_seconds"), 60, 15, 600
@@ -6049,13 +6159,15 @@ class QQGroupAdmin(Star):
             "bilibili_logged_in": "SESSDATA=" in cookie and "bili_jct=" in cookie,
             "providers": providers,
             "global_policies": self._global_policy_profiles_for_web(),
+            "global_policy_warnings": self._global_policy_scope_warnings(
+                {str(group["group_openid"]) for group in bound_groups}
+            ),
             "global_policy_groups": [
                 {
                     "group_name": group["group_name"],
                     "group_openid": group["group_openid"],
                 }
-                for group in await self.web_groups()
-                if group.get("bound")
+                for group in bound_groups
             ],
         }
 

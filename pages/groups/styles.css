@@ -163,6 +163,7 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
 .welcome-editor .rule-list-header p { margin: 6px 0 0; color: #697386; font-size: 12px; font-weight: 400; line-height: 1.5; }
 .welcome-editor .keyword-reply-list { padding: 14px 0 0; }
 .config-note { grid-column: 1 / -1; margin: 0; padding: 10px 12px; border: 1px solid #dce2e8; border-radius: 6px; background: #f7f9fb; }
+.config-warning { white-space: pre-line; border-color: #f0c36d; background: #fff8e6; color: #795b16; }
 .runtime-grid .wide { grid-column: 1 / -1; }
 .runtime-toggle { align-self: end; min-height: 40px; }
 .bilibili-login { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 14px; padding: 16px; border: 1px solid #dce2e8; border-radius: 6px; }
