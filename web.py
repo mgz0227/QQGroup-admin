@@ -580,7 +580,12 @@ class GroupAdminWeb:
         return profiles
 
     @classmethod
-    def _runtime_settings(cls, payload: Any) -> dict[str, Any]:
+    def _runtime_settings(
+        cls,
+        payload: Any,
+        *,
+        partial: bool = False,
+    ) -> dict[str, Any]:
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
         settings = {
@@ -973,6 +978,31 @@ class GroupAdminWeb:
         ):
             if key not in payload:
                 settings.pop(key, None)
+        if partial:
+            # Canonicalize legacy AI aliases while keeping every omitted
+            # setting out of the update payload.
+            aliases = {
+                "global_ai_review_enabled": {
+                    "global_ai_review_enabled",
+                    "ai_review_enabled",
+                },
+                "global_ai_review_provider_id": {
+                    "global_ai_review_provider_id",
+                    "ai_review_provider_id",
+                },
+                "global_ai_review_fallback_provider_ids": {
+                    "global_ai_review_fallback_provider_ids",
+                    "ai_review_fallback_provider_ids",
+                    "ai_review_fallback_provider_id",
+                },
+            }
+            present = set(payload)
+            settings = {
+                key: value
+                for key, value in settings.items()
+                if key in present
+                or bool(aliases.get(key, set()).intersection(present))
+            }
         return settings
 
     @classmethod
@@ -1459,9 +1489,15 @@ class GroupAdminWeb:
         return self._response(await self.plugin.web_runtime_settings())
 
     async def page_runtime_save(self) -> Any:
+        payload = await self._payload()
+        if not isinstance(payload, dict):
+            raise TypeError("请求内容必须是 JSON 对象")
+        # The interval form is intentionally a partial update.  Validate only
+        # what the request carries so a stale/compact page cannot replace
+        # existing global moderation rules with validator defaults.
         return self._response(
             await self.plugin.web_save_runtime_settings(
-                self._runtime_settings(await self._payload())
+                self._runtime_settings(payload, partial=True)
             ),
             message="全局运行配置已保存",
         )

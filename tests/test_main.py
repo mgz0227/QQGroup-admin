@@ -903,6 +903,43 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("secret", repr(confirmed))
 
+    async def test_runtime_interval_only_save_preserves_global_rules(self):
+        plugin, _client = self.plugin()
+        plugin.config.update(
+            global_reject_keywords="广告\n引流",
+            global_message_reject_keywords="刷屏",
+            global_image_reject_keywords="水印",
+            keyword_reply_cooldown_seconds=45,
+            keyword_reply_recall_seconds=12,
+            global_image_spam_reply="图片规则回复",
+            global_repeat_reply="复读规则回复",
+        )
+        web = module.GroupAdminWeb(plugin, plugin.context)
+        web_module = sys.modules[module.GroupAdminWeb.__module__]
+        with patch.object(
+            web_module.request,
+            "json",
+            AsyncMock(
+                return_value={
+                    "uid_review_interval_seconds": 45,
+                    "bilibili_live_interval_seconds": 90,
+                    "bilibili_dynamic_interval_seconds": 240,
+                }
+            ),
+            create=True,
+        ):
+            response = await web.page_runtime_save()
+
+        self.assertTrue(response["ok"])
+        self.assertEqual(plugin.config["global_reject_keywords"], "广告\n引流")
+        self.assertEqual(plugin.config["global_message_reject_keywords"], "刷屏")
+        self.assertEqual(plugin.config["global_image_reject_keywords"], "水印")
+        self.assertEqual(plugin.config["keyword_reply_cooldown_seconds"], 45)
+        self.assertEqual(plugin.config["keyword_reply_recall_seconds"], 12)
+        self.assertEqual(plugin.config["global_image_spam_reply"], "图片规则回复")
+        self.assertEqual(plugin.config["global_repeat_reply"], "复读规则回复")
+        self.assertEqual(plugin.config["uid_review_interval_seconds"], 45)
+
     async def test_uid_button_does_not_take_over_unmanaged_strategy(self):
         plugin, client = self.plugin()
         entry = plugin.config["auto_review_groups"][0]

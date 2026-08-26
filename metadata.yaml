@@ -7,7 +7,7 @@ desc: >-
   兜底动作组成的多群自动审核；同时提供群消息审查、真人验证、UID 身份绑定、
   入群欢迎消息、B 站动态与直播推送、群文件 URL 发送、关键词回复、最近消息撤回、全局 AI 主备及二次确认审核、跨成员刷图与连续复读检测、
   全局与单群成员黑白名单、消息频率限制、QQ 原生群指令面板、群内设置按钮和独立 WebUI 管理页面。
-version: 2.20.23
+version: 2.20.24
 author: mgz0227
 repo: https://github.com/mgz0227/QQGroup-admin
 astrbot_version: ">=4.27.3,<5"
