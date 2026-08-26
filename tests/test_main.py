@@ -1972,7 +1972,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("算式：", prompt["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
         self.assertEqual(
-            [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
+            [item["msg_type"] for item in client.api.messages[:2]], [2, 0]
         )
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
@@ -5022,7 +5022,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         token_data = next(iter(plugin._verification_tokens.values()))
         fallback = client.api.messages[-1]
         self.assertIn("真人验证", fallback["content"])
-        self.assertIn("请直接发送正确数字", fallback["content"])
+        self.assertIn("直接发送正确数字", fallback["content"])
         self.assertIn("3 + 4 = ?", fallback["content"])
         self.assertIn("消息会被撤回", fallback["content"])
         self.assertTrue(
@@ -5051,12 +5051,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("算式：", content)
         self.assertIn("未完成验证前发送的消息会被撤回", content)
         self.assertRegex(content, r"\d+ \+ \d+ = \?")
+        self.assertNotIn("\n", content)
         self.assertNotIn("msg_id", card)
         self.assertIn("msg_seq", prompt)
         self.assertIn("msg_seq", card)
         self.assertNotEqual(prompt["msg_seq"], card["msg_seq"])
+        self.assertNotEqual(prompt["content"], content)
+        self.assertIn("真人验证提示", prompt["content"])
         self.assertEqual(
-            [message["msg_type"] for message in client.api.messages[:2]], [0, 2]
+            [message["msg_type"] for message in client.api.messages[:2]], [2, 0]
         )
 
     async def test_verification_rejects_prefixed_answer(self):

@@ -1832,21 +1832,37 @@ class QQGroupAdmin(Star):
                     },
                 }
             )
+        # Some QQ clients render only one line of a keyboard card. Keep every
+        # essential instruction on that line; the distinct text follow-up also
+        # prevents clients that deduplicate identical consecutive messages
+        # from hiding the explanation.
+        card_prompt = (
+            "真人验证：这是入群安全验证。请点击下方正确答案按钮；"
+            "如果看不到按钮，请直接发送正确数字；未完成验证前发送的消息会被撤回。"
+            f"算式：{left} + {right} = ?"
+        )
         prompt = (
-            "真人验证：这是入群安全验证，请完成后恢复发言。\n"
-            "请点击下方正确答案按钮；如果看不到按钮，请直接发送正确数字。\n"
-            f"算式：{left} + {right} = ?\n"
+            "真人验证提示：这是入群安全验证，请完成后恢复发言。"
+            f"算式：{left} + {right} = ?；"
+            "请点击下方正确答案按钮；如果看不到按钮，请直接发送正确数字；"
             "未完成验证前发送的消息会被撤回。"
         )
-        # Some QQ clients render only the last line of a keyboard card, and
-        # QQ may rate-limit the second message. Send the standalone prompt
-        # first so the purpose and fallback instructions are visible even when
-        # the keyboard card is collapsed or rejected.
         # Do not reuse the triggering message id: QQ treats it as an
         # idempotency/reply key on some clients and silently drops the prompt.
-        prompt_sent = False
         prompt_seq = self._next_outbound_message_seq()
         card_seq = self._next_outbound_message_seq()
+        card_sent = False
+        try:
+            await self._send_group_markdown(
+                client,
+                group_openid,
+                card_prompt,
+                keyboard={"content": {"rows": [{"buttons": buttons}]}},
+                msg_seq=card_seq,
+            )
+            card_sent = True
+        except Exception as card_exc:  # noqa: BLE001 - Markdown/keyboard boundary
+            self.logger.debug("真人验证按钮卡发送失败，将发送文字提示：%s", card_exc)
         try:
             await self._send_group_text(
                 client,
@@ -1854,24 +1870,13 @@ class QQGroupAdmin(Star):
                 prompt,
                 msg_seq=prompt_seq,
             )
-            prompt_sent = True
         except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
-            self.logger.debug("真人验证文字提示发送失败，将尝试按钮卡：%s", prompt_exc)
-        try:
-            await self._send_group_markdown(
-                client,
-                group_openid,
-                prompt,
-                keyboard={"content": {"rows": [{"buttons": buttons}]}},
-                msg_seq=card_seq,
-            )
-        except Exception as exc:  # noqa: BLE001 - Markdown/keyboard boundary
-            # Keep the token when either prompt form was delivered; numeric
-            # answers remain available when a client cannot render buttons.
-            if not prompt_sent:
+            # Keep the token when either form was delivered; numeric answers
+            # remain available when a client cannot render buttons.
+            if not card_sent:
                 self._verification_tokens.pop(token, None)
                 self._verification_tokens.update(previous)
-                raise exc
+                raise prompt_exc
 
     async def _consume_verification_answer(
         self,
