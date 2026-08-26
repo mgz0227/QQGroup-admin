@@ -3772,6 +3772,7 @@ class QQGroupAdmin(Star):
                     client = clients.get(platform_id)
                     if client is None:
                         continue
+                    polled.add((platform_id, group_openid))
                     try:
                         await self._poll_uid_group(
                             client,
@@ -3792,8 +3793,6 @@ class QQGroupAdmin(Star):
                             group_openid,
                             exc,
                         )
-                    else:
-                        polled.add((platform_id, group_openid))
                     await asyncio.sleep(2.1)
                 # Native QQ approval and manual approval have no member-add
                 # event in AstrBot.  Poll only groups with a welcome rule and
