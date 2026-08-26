@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import copy
-from html import escape as html_escape
+import json
 import re
 import secrets
 import time
@@ -12,6 +12,7 @@ from functools import wraps
 from io import BytesIO
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import quoteattr
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
@@ -1210,10 +1211,10 @@ class QQGroupAdmin(Star):
 
     @staticmethod
     def _mention(member_openid: str) -> str:
-        # QQ group Markdown recognizes the compact <@OpenID> form.  The
-        # former qqbot-at-user XML-like tag is rendered literally by clients.
         value = str(member_openid or "").strip()
-        return f"<@{html_escape(value, quote=False)}>" if value else ""
+        # QQ's current text-chain protocol uses this tag for group mentions;
+        # the older <@OpenID> form is deprecated and may render literally.
+        return f"<qqbot-at-user id={quoteattr(value)} />" if value else ""
 
     async def _send_group_text(
         self,
@@ -3819,6 +3820,54 @@ class QQGroupAdmin(Star):
                 decision = (
                     "ALLOW" if chinese.group(1) in {"允许", "通过"} else "BLOCK"
                 )
+        # Some providers follow the requested schema literally and return a
+        # JSON object instead of the one-line form.  Accept only a complete
+        # object with an explicit decision; prose containing JSON remains
+        # ambiguous and therefore fails open.
+        if not decision and text.startswith("{") and text.endswith("}"):
+            try:
+                payload = json.loads(text)
+            except (TypeError, ValueError):
+                payload = None
+            if isinstance(payload, dict):
+                raw_decision = next(
+                    (
+                        payload.get(key)
+                        for key in ("decision", "verdict", "action", "判定", "决定")
+                        if payload.get(key) is not None
+                    ),
+                    "",
+                )
+                normalized = str(raw_decision or "").strip().upper()
+                normalized = {
+                    "允许": "ALLOW",
+                    "通过": "ALLOW",
+                    "拦截": "BLOCK",
+                    "拒绝": "BLOCK",
+                }.get(normalized, normalized)
+                if normalized in {"ALLOW", "BLOCK"}:
+                    decision = normalized
+                    confidence_value = next(
+                        (
+                            payload.get(key)
+                            for key in ("confidence", "score", "置信度", "分数")
+                            if payload.get(key) is not None
+                        ),
+                        None,
+                    )
+                    reason_value = next(
+                        (
+                            payload.get(key)
+                            for key in ("reason", "理由", "原因")
+                            if payload.get(key) is not None
+                        ),
+                        "",
+                    )
+                    # Reuse the existing bounded regex parsing below.
+                    text = (
+                        f"{normalized} CONFIDENCE={confidence_value} "
+                        f"REASON={reason_value}"
+                    )
         confidence_match = (
             re.search(
                 r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})",
@@ -7020,6 +7069,8 @@ class QQGroupAdmin(Star):
             str(item.get("group_openid") or ""): str(item.get("group_name") or "")
             for item in (self.config.get("auto_review_groups") or [])
             if isinstance(item, dict)
+            and str(item.get("group_openid") or "").strip()
+            and str(item.get("group_name") or "").strip()
         }
         for binding in self._uid_bindings.values():
             raw_group_names = binding.get("group_names_by_id")
@@ -7028,18 +7079,18 @@ class QQGroupAdmin(Star):
             for group_openid, group_name in raw_group_names.items():
                 group_openid = str(group_openid or "").strip()
                 group_name = str(group_name or "").strip()
-                if group_openid and group_name:
-                    groups.setdefault(group_openid, group_name)
+                if group_openid and group_name and not groups.get(group_openid):
+                    groups[group_openid] = group_name
         for record in self._suspicious_members.values():
             group_openid = str(record.get("group_openid") or "").strip()
             group_name = str(record.get("group_name") or "").strip()
-            if group_openid and group_name:
-                groups.setdefault(group_openid, group_name)
+            if group_openid and group_name and not groups.get(group_openid):
+                groups[group_openid] = group_name
         for record in self._violation_records:
             group_openid = str(record.get("group_openid") or "").strip()
             group_name = str(record.get("group_name") or "").strip()
-            if group_openid and group_name:
-                groups.setdefault(group_openid, group_name)
+            if group_openid and group_name and not groups.get(group_openid):
+                groups[group_openid] = group_name
         return groups
 
     async def web_identities(self) -> dict[str, list[dict[str, Any]]]:

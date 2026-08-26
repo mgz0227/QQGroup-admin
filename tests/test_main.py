@@ -2215,7 +2215,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            '<@admin-1> 这条消息已撤回。',
+            '<qqbot-at-user id="admin-1" /> 这条消息已撤回。',
         )
 
     async def test_empty_recall_reply_can_disable_notice_when_mention_is_off(self):
@@ -2245,7 +2245,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            '<@admin-1>',
+            '<qqbot-at-user id="admin-1" />',
         )
 
     async def test_global_image_keyword_has_separate_reply_and_mention_setting(self):
@@ -2991,11 +2991,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            '已禁言 45 秒：<@member-1>',
+            '已禁言 45 秒：<qqbot-at-user id="member-1" />',
         )
         self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertIn(
-            '<@member-1>',
+            '<qqbot-at-user id="member-1" />',
             client.api.messages[-1]["markdown"]["content"],
         )
 
@@ -3017,7 +3017,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertTrue(
             client.api.messages[-1]["markdown"]["content"].startswith(
-                '<@member-1> 已设置禁言，至 '
+                '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
             )
         )
 
@@ -3055,12 +3055,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         content = client.api.messages[-1]["markdown"]["content"]
         self.assertLessEqual(len(content), 4000)
-        self.assertTrue(content.endswith('<@member-1>'))
+        self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
         content = client.api.messages[-1]["markdown"]["content"]
-        mention = '<@member-1>'
+        mention = '<qqbot-at-user id="member-1" />'
         self.assertEqual(content, mention * 40)
 
     async def test_web_batch_save_and_sync(self):
@@ -3208,6 +3208,27 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
             ["primary", "fallback"],
         )
+
+    async def test_ai_empty_exceptions_log_useful_details(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[RuntimeError(), TimeoutError()]
+        )
+
+        with self.assertLogs(plugin.logger, level="WARNING") as captured:
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "待审核"),
+                "待审核",
+                [],
+                "primary",
+                ["fallback"],
+            )
+
+        self.assertFalse(blocked)
+        warning = "\n".join(captured.output)
+        self.assertIn("primary: RuntimeError", warning)
+        self.assertIn("fallback: 模型超时", warning)
+        self.assertNotIn("primary: ;", warning)
 
     async def test_ai_image_review_caps_preprocessing_images(self):
         plugin, client = self.plugin()
@@ -4032,6 +4053,53 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(
             module.QQGroupAdmin._ai_decision("允许。置信度=99 原因=正常", 95)
         )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","confidence":99,"reason":"明确违规"}',
+                95,
+            )
+        )
+        self.assertFalse(
+            module.QQGroupAdmin._ai_decision(
+                '{"verdict":"ALLOW","score":99,"reason":"正常"}',
+                95,
+            )
+        )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision(
+                '{"判定":"拒绝","分数":99,"原因":"明确违规"}',
+                95,
+            )
+        )
+        self.assertIsNone(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","reason":"缺少置信度"}',
+                95,
+            )
+        )
+
+    async def test_ai_json_response_does_not_trigger_unneeded_fallback(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            return_value={
+                "role": "assistant",
+                "completion_text": (
+                    '{"decision":"BLOCK","confidence":96,'
+                    '"reason":"明确违规"}'
+                ),
+            }
+        )
+
+        blocked = await plugin._ai_blocks_message(
+            FakeEvent(client, "待审核"),
+            "待审核",
+            [],
+            "primary",
+            ["fallback"],
+        )
+
+        self.assertTrue(blocked)
+        plugin.context.llm_generate.assert_awaited_once()
 
     async def test_runtime_ai_save_checks_existing_fallbacks_when_provider_only_changes(self):
         plugin, _ = self.plugin()
@@ -4339,6 +4407,25 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         await restored._load_state()
         self.assertEqual(restored._violation_records[0]["record_id"], record_id)
 
+    async def test_identity_search_falls_back_to_history_when_group_name_is_empty(self):
+        plugin, _ = self.plugin()
+        plugin.config["auto_review_groups"][0]["group_name"] = ""
+        plugin._uid_bindings = {
+            "123": {
+                "uid": "123",
+                "groups": ["group-1"],
+                "group_names_by_id": {"group-1": "历史审核群"},
+            }
+        }
+        plugin._violation_records = [
+            {"group_openid": "group-1", "content": "旧版违规"}
+        ]
+
+        page = await plugin.web_identity_page("violations", "历史审核群", 1, 10)
+
+        self.assertEqual(page["total"], 1)
+        self.assertEqual(page["items"][0]["group_name"], "历史审核群")
+
     async def test_identity_bindings_use_numeric_uid_order(self):
         plugin, _ = self.plugin()
         huge_uid = "9" * 5000
@@ -4611,7 +4698,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["msg_type"], 2)
         self.assertIn("欢迎 新人 加入 测试群", message["markdown"]["content"])
         self.assertIn("UID=188144093", message["markdown"]["content"])
-        self.assertIn('<@member-1>', message["markdown"]["content"])
+        self.assertIn('<qqbot-at-user id="member-1" />', message["markdown"]["content"])
 
     async def test_button_approval_sends_welcome_with_request_context(self):
         plugin, client = self.plugin()
