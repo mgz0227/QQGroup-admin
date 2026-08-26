@@ -1693,11 +1693,12 @@ class QQGroupAdmin(Star):
             "验证前发送的消息会被撤回。"
         )
         # Some QQ clients collapse Markdown text when a custom keyboard is
-        # attached. Send the full instructions as plain text first so they
-        # remain visible even when the card renderer keeps only the equation.
+        # attached. Send the full instructions as a standalone message first.
+        # Do not reuse the triggering message id: QQ treats it as an
+        # idempotency/reply key on some clients and silently drops the prompt.
         challenge = (
-            "**真人验证**：请点击下方正确答案按钮；如果看不到按钮，请直接发送正确数字。 "
-            f"**{left} + {right} = ?**"
+            "真人验证：请点击下方正确答案按钮；如果看不到按钮，请直接发送正确数字。\n"
+            f"算式：{left} + {right} = ?"
         )
         prompt_sent = False
         try:
@@ -1705,7 +1706,6 @@ class QQGroupAdmin(Star):
                 client,
                 group_openid,
                 prompt,
-                message_id=message_id,
             )
             prompt_sent = True
         except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
