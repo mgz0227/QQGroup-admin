@@ -377,14 +377,26 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             ),
             "",
         )
+        dynamic_type = str(item.get("type") or "")
+        text_candidates = (
+            (
+                _clean_dynamic_text(card.get("desc")),
+                _clean_dynamic_text(card.get("description")),
+                _clean_dynamic_text(desc.get("text")),
+                _clean_dynamic_text(summary.get("text")),
+            )
+            if dynamic_type == "DYNAMIC_TYPE_AV"
+            else (
+                _clean_dynamic_text(desc.get("text")),
+                _clean_dynamic_text(summary.get("text")),
+                _clean_dynamic_text(card.get("desc")),
+                _clean_dynamic_text(card.get("description")),
+            )
+        )
         text = next(
             (
                 value
-                for value in (
-                    _clean_dynamic_text(desc.get("text")),
-                    _clean_dynamic_text(summary.get("text")),
-                    _clean_dynamic_text(card.get("desc")),
-                )
+                for value in text_candidates
                 if value and value != title
             ),
             "",
@@ -403,7 +415,7 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             pub_ts = 0
         parsed_item = {
             "id": dynamic_id,
-            "type": str(item.get("type") or ""),
+            "type": dynamic_type,
             "uid": str(author.get("mid") or ""),
             "author": str(author.get("name") or ""),
             "pub_ts": pub_ts,

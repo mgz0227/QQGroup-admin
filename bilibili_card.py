@@ -173,10 +173,29 @@ def _rounded_image(
         base_draw = ImageDraw.Draw(base)
         base_draw.rounded_rectangle(box, radius, fill="#f1f2f3")
         return
-    fitted = ImageOps.fit(image, (width, height), method=Image.Resampling.LANCZOS)
-    mask = Image.new("L", (width, height), 0)
-    ImageDraw.Draw(mask).rounded_rectangle((0, 0, width, height), radius, fill=255)
-    base.paste(fitted, (left, top), mask)
+    # Keep the full source image.  ``fit`` cropped portrait screenshots and
+    # made the notification card look like an unrelated fragment.
+    fitted = ImageOps.contain(image, (width, height), method=Image.Resampling.LANCZOS)
+    fitted_left = left + (width - fitted.width) // 2
+    fitted_top = top + (height - fitted.height) // 2
+    mask = Image.new("L", fitted.size, 0)
+    ImageDraw.Draw(mask).rounded_rectangle(
+        (0, 0, fitted.width, fitted.height),
+        min(radius, fitted.width // 2, fitted.height // 2),
+        fill=255,
+    )
+    base.paste(fitted, (fitted_left, fitted_top), mask)
+
+
+def _card_labels(kind: object) -> tuple[str, str, str]:
+    """Return brand, source and link labels for each notification type."""
+
+    normalized = str(kind or "").strip()
+    if normalized == "直播":
+        return "B站直播", "哔哩哔哩 · 直播推送", "进入直播间"
+    if normalized == "视频":
+        return "B站视频", "哔哩哔哩 · 视频推送", "查看视频"
+    return "B站动态", "哔哩哔哩 · 动态推送", "查看原动态"
 
 
 def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
@@ -196,6 +215,7 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     summary = str(card_data.get("summary") or "").strip()[:520]
     status = _plain(card_data.get("status"), 20)
     link = _plain(card_data.get("link"), 500)
+    brand, source, link_label = _card_labels(kind)
     avatar = _download_image(card_data.get("avatar"))
     cover = _download_image(card_data.get("cover"))
 
@@ -290,7 +310,6 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
             font=small,
             fill="#9499a0",
         )
-    brand = "B站动态"
     brand_w = draw.textlength(brand, font=small)
     draw.text((inner_right - brand_w, margin + 48), brand, font=small, fill="#00aeec")
     draw.line(
@@ -341,10 +360,10 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         (inner_left, footer_top, inner_right, footer_top), fill="#f0f1f2", width=1
     )
     draw.text(
-        (inner_left, footer_top + 23), "哔哩哔哩 · 动态推送", font=small, fill="#a6abb2"
+        (inner_left, footer_top + 23), source, font=small, fill="#a6abb2"
     )
     if link:
-        label = "查看原动态  →"
+        label = f"{link_label}  →"
         button_width = int(draw.textlength(label, font=button_font)) + 28
         button_left = inner_right - button_width
         draw.rounded_rectangle(
@@ -387,6 +406,7 @@ def build_bilibili_card(
     cover_url = _url(cover, bilibili_media=True)
     avatar_url = _url(avatar, bilibili_media=True)
     link_url = _url(link)
+    brand, source, link_label = _card_labels(kind)
 
     avatar_markup = (
         f'<img class="avatar" src="{avatar_url}" alt="">'
@@ -409,7 +429,7 @@ def build_bilibili_card(
         f'<div class="summary">{summary_html}</div>' if summary_html else ""
     )
     link_markup = (
-        f'<a class="open-link" href="{link_url}">查看原动态 <span>↗</span></a>'
+        f'<a class="open-link" href="{link_url}">{link_label} <span>↗</span></a>'
         if link_url
         else ""
     )
@@ -471,7 +491,7 @@ body {{
         <div class="author">{author_text}</div>
         <div class="meta"><span class="pill">{kind_text}</span>{timestamp_text}</div>
       </div>
-      <div class="brand">B站动态</div>
+      <div class="brand">{brand}</div>
     </div>
     <div class="content">
       {status_markup}
@@ -480,7 +500,7 @@ body {{
       {cover_markup}
     </div>
     <div class="footer">
-      <span class="source">B站动态推送</span>
+      <span class="source">{source}</span>
       {link_markup}
     </div>
   </div>

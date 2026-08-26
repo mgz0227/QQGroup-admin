@@ -109,6 +109,35 @@ class BilibiliTest(unittest.TestCase):
         self.assertEqual(parse_dynamic_items(payload)[0]["title"], "")
         self.assertEqual(parse_dynamic_items(payload)[0]["text"], "")
 
+    def test_video_parser_prefers_video_description_over_generic_dynamic_text(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "video-1",
+                        "type": "DYNAMIC_TYPE_AV",
+                        "modules": {
+                            "module_author": {"name": "UP"},
+                            "module_dynamic": {
+                                "desc": {"text": "发布了新动态"},
+                                "major": {
+                                    "archive": {
+                                        "title": "视频标题",
+                                        "desc": "这是视频简介",
+                                    }
+                                },
+                            },
+                        },
+                    }
+                ]
+            },
+        }
+
+        item = parse_dynamic_items(payload)[0]
+        self.assertEqual(item["title"], "视频标题")
+        self.assertEqual(item["text"], "这是视频简介")
+
     def test_live_transition_seeds_and_detects_changes(self):
         offline = {"live_status": 0, "live_time": 0}
         live = {"live_status": 1, "live_time": 100}

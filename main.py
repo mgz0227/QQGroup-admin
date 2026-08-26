@@ -3559,6 +3559,9 @@ class QQGroupAdmin(Star):
                             group_openid,
                             card_image,
                             link=str((card_data or {}).get("link") or ""),
+                            link_label=str(
+                                (card_data or {}).get("link_label") or "查看原动态"
+                            ),
                         )
                         continue
                     except Exception as card_exc:  # noqa: BLE001 - optional card
@@ -3639,6 +3642,7 @@ class QQGroupAdmin(Star):
         image: bytes,
         *,
         link: str = "",
+        link_label: str = "查看原动态",
     ) -> Any:
         media = await QQGroupAPI(client).upload_group_image(
             group_openid,
@@ -3653,7 +3657,7 @@ class QQGroupAdmin(Star):
         # preserves a usable action even though the rendered image itself is
         # not interactive.
         if link:
-            payload["content"] = f"查看原动态：{link}"
+            payload["content"] = f"{str(link_label or '查看原动态').strip()}：{link}"
         return await client.api.post_group_message(
             **payload,
         )
@@ -3729,6 +3733,7 @@ class QQGroupAdmin(Star):
                         "avatar": current.get("face") or current.get("avatar"),
                         "status": "正在直播" if transition == "start" else "直播结束",
                         "link": f"https://live.bilibili.com/{room_id}",
+                        "link_label": "进入直播间",
                     }
                     delivered = await self._push_bilibili_message(
                         subscriptions.get(uid, []),
@@ -3798,17 +3803,20 @@ class QQGroupAdmin(Star):
                 name = self._markdown_text(item.get("author") or f"UID {uid}")
                 raw_title = self._bilibili_display_text(item.get("title"))
                 raw_summary = self._bilibili_display_text(item.get("text"))
+                if raw_summary in {"新动态", "发布了新动态"}:
+                    raw_summary = ""
+                kind = self._bilibili_dynamic_type(item.get("type"))
+                is_video = kind == "视频"
                 title = (
                     self._markdown_text(raw_title, 300)
                     if raw_title and raw_title not in {"-", "新动态", "发布了新动态"}
                     else ""
                 )
                 summary = (
-                    self._markdown_text(raw_summary, 500)
+                    self._markdown_text(raw_summary, 360 if is_video else 240)
                     if raw_summary not in {"", "-", raw_title}
                     else ""
                 )
-                kind = self._bilibili_dynamic_type(item.get("type"))
                 pub_ts = self._bounded_int(
                     item.get("pub_ts"), 0, 0, 4_000_000_000
                 )
@@ -3816,7 +3824,7 @@ class QQGroupAdmin(Star):
                 if pub_ts:
                     meta += time.strftime(" · %m-%d %H:%M", time.localtime(pub_ts))
                 cover = self._bilibili_markdown_image(item.get("cover"))
-                sections = ["# B站动态", meta]
+                sections = ["# B站视频" if is_video else "# B站动态", meta]
                 if cover:
                     sections.append(cover)
                 if title:
@@ -3825,7 +3833,8 @@ class QQGroupAdmin(Star):
                     sections.append(summary)
                 if not cover and not title and not summary:
                     sections.append(f"**发布了一条{kind}动态**")
-                sections.append(f"[查看原动态 ↗]({item['url']})")
+                link_label = "查看视频" if is_video else "查看原动态"
+                sections.append(f"[{link_label} ↗]({item['url']})")
                 text = "\n\n".join(sections)
                 card_data = {
                     "author": item.get("author") or f"UID {uid}",
@@ -3838,11 +3847,16 @@ class QQGroupAdmin(Star):
                     "title": raw_title
                     if raw_title and raw_title not in {"新动态", "发布了新动态"}
                     else "",
-                    "summary": raw_summary if raw_summary != raw_title else "",
+                    "summary": (
+                        raw_summary[:360 if is_video else 240]
+                        if raw_summary != raw_title
+                        else ""
+                    ),
                     "cover": item.get("cover"),
                     "avatar": item.get("avatar"),
                     "status": "",
                     "link": item.get("url"),
+                    "link_label": link_label,
                 }
                 if not await self._push_bilibili_message(
                     targets,

@@ -48,6 +48,27 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertNotIn('class="cover-wrap">', html)
         self.assertNotIn('class="status">', html)
 
+    def test_card_uses_type_specific_brand_and_link_label(self):
+        video = build_bilibili_card(
+            author="UP",
+            kind="视频",
+            title="视频标题",
+            summary="视频简介",
+            link="https://www.bilibili.com/video/BV1xx",
+        )
+        live = build_bilibili_card(
+            author="UP",
+            kind="直播",
+            title="直播标题",
+            link="https://live.bilibili.com/123",
+        )
+
+        self.assertIn("B站视频", video)
+        self.assertIn("查看视频", video)
+        self.assertIn("视频简介", video)
+        self.assertIn("B站直播", live)
+        self.assertIn("进入直播间", live)
+
     def test_local_card_renders_useful_empty_dynamic(self):
         with patch("bilibili_card._download_image", return_value=None):
             image = render_bilibili_card(
