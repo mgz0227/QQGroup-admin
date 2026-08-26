@@ -119,6 +119,7 @@ GLOBAL_AI_ENABLED_KEY = "global_ai_review_enabled"
 GLOBAL_AI_PROVIDER_KEY = "global_ai_review_provider_id"
 GLOBAL_AI_FALLBACKS_KEY = "global_ai_review_fallback_provider_ids"
 GLOBAL_AI_CONFIRM_PROVIDER_KEY = "global_ai_review_confirm_provider_id"
+GLOBAL_AI_CONFIRM_FALLBACKS_KEY = "global_ai_review_confirm_fallback_provider_ids"
 GLOBAL_AI_TIMEOUT_KEY = "global_ai_review_timeout_seconds"
 GLOBAL_AI_IMAGES_KEY = "global_ai_review_images_enabled"
 GLOBAL_AI_BLOCK_THRESHOLD_KEY = "global_ai_review_block_threshold"
@@ -143,6 +144,7 @@ GLOBAL_AI_POLICY_KEYS = (
     GLOBAL_AI_PROVIDER_KEY,
     GLOBAL_AI_FALLBACKS_KEY,
     GLOBAL_AI_CONFIRM_PROVIDER_KEY,
+    GLOBAL_AI_CONFIRM_FALLBACKS_KEY,
     GLOBAL_AI_TIMEOUT_KEY,
     GLOBAL_AI_IMAGES_KEY,
     GLOBAL_AI_BLOCK_THRESHOLD_KEY,
@@ -227,6 +229,7 @@ GLOBAL_POLICY_DEFAULTS = {
     GLOBAL_AI_PROVIDER_KEY: "",
     GLOBAL_AI_FALLBACKS_KEY: [],
     GLOBAL_AI_CONFIRM_PROVIDER_KEY: "",
+    GLOBAL_AI_CONFIRM_FALLBACKS_KEY: [],
     GLOBAL_AI_TIMEOUT_KEY: AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
     GLOBAL_AI_IMAGES_KEY: False,
     GLOBAL_AI_BLOCK_THRESHOLD_KEY: AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
@@ -311,6 +314,7 @@ GLOBAL_INHERIT_POLICY_KEYS = (
     GLOBAL_AI_PROVIDER_KEY,
     GLOBAL_AI_FALLBACKS_KEY,
     GLOBAL_AI_CONFIRM_PROVIDER_KEY,
+    GLOBAL_AI_CONFIRM_FALLBACKS_KEY,
     GLOBAL_AI_TIMEOUT_KEY,
     GLOBAL_AI_IMAGES_KEY,
     GLOBAL_AI_BLOCK_THRESHOLD_KEY,
@@ -515,6 +519,9 @@ class QQGroupAdmin(Star):
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._verification_tokens: dict[str, tuple[Any, ...]] = {}
         self._verification_recall_tasks: dict[str, asyncio.Task[None]] = {}
+        # Serialize challenge creation so a join-poll event and the first
+        # blocked message cannot publish two prompts for the same member.
+        self._verification_send_lock = asyncio.Lock()
         # QQ may deduplicate active messages that reuse botpy's default seq=1.
         self._outbound_message_seq = int(time.time_ns() % MESSAGE_SEQ_MAX) or 1
         self._keyword_reply_ready_at: dict[str, float] = {}
@@ -652,11 +659,15 @@ class QQGroupAdmin(Star):
         if GLOBAL_AI_FALLBACKS_KEY not in self.config:
             self.config[GLOBAL_AI_FALLBACKS_KEY] = []
             changed = True
+        if GLOBAL_AI_CONFIRM_FALLBACKS_KEY not in self.config:
+            self.config[GLOBAL_AI_CONFIRM_FALLBACKS_KEY] = []
+            changed = True
         for key, default in (
             ("verification_message_recall_enabled", True),
             ("verification_message_timeout_seconds", 120),
             (GLOBAL_AI_TIMEOUT_KEY, AI_REVIEW_TOTAL_TIMEOUT_SECONDS),
             (GLOBAL_AI_CONFIRM_PROVIDER_KEY, ""),
+            (GLOBAL_AI_CONFIRM_FALLBACKS_KEY, []),
             (GLOBAL_AI_IMAGES_KEY, False),
             (GLOBAL_AI_BLOCK_THRESHOLD_KEY, AI_REVIEW_DEFAULT_BLOCK_THRESHOLD),
             (GLOBAL_AI_ACTION_KEY, "record_only"),
@@ -685,6 +696,14 @@ class QQGroupAdmin(Star):
         if normalized_fallbacks != self.config.get(GLOBAL_AI_FALLBACKS_KEY):
             self.config[GLOBAL_AI_FALLBACKS_KEY] = normalized_fallbacks
             changed = True
+        normalized_confirm_fallbacks = normalize_provider_ids(
+            self.config.get(GLOBAL_AI_CONFIRM_FALLBACKS_KEY)
+        )
+        if normalized_confirm_fallbacks != self.config.get(
+            GLOBAL_AI_CONFIRM_FALLBACKS_KEY
+        ):
+            self.config[GLOBAL_AI_CONFIRM_FALLBACKS_KEY] = normalized_confirm_fallbacks
+            changed = True
         for entry in legacy_ai_entries:
             for key in (
                 "ai_review_enabled",
@@ -704,6 +723,26 @@ class QQGroupAdmin(Star):
         ]
         if filtered_fallbacks != self.config.get(GLOBAL_AI_FALLBACKS_KEY):
             self.config[GLOBAL_AI_FALLBACKS_KEY] = filtered_fallbacks
+            changed = True
+        confirm_provider = str(
+            self.config.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
+        ).strip()
+        filtered_confirm_fallbacks = [
+            provider_id
+            for provider_id in normalize_provider_ids(
+                self.config.get(GLOBAL_AI_CONFIRM_FALLBACKS_KEY)
+            )
+            if provider_id
+            not in {
+                confirm_provider,
+                primary_provider,
+                *filtered_fallbacks,
+            }
+        ]
+        if filtered_confirm_fallbacks != self.config.get(
+            GLOBAL_AI_CONFIRM_FALLBACKS_KEY
+        ):
+            self.config[GLOBAL_AI_CONFIRM_FALLBACKS_KEY] = filtered_confirm_fallbacks
             changed = True
         if not isinstance(entries, list):
             if changed:
@@ -862,7 +901,7 @@ class QQGroupAdmin(Star):
                 else CONFIG_BACKUP_RUNTIME_DEFAULTS[key]
             )
             raw = value[key]
-            if key == GLOBAL_AI_FALLBACKS_KEY:
+            if key in {GLOBAL_AI_FALLBACKS_KEY, GLOBAL_AI_CONFIRM_FALLBACKS_KEY}:
                 result[key] = normalize_provider_ids(raw)
             elif isinstance(default, bool):
                 if isinstance(raw, bool):
@@ -891,7 +930,7 @@ class QQGroupAdmin(Star):
             if key in GLOBAL_POLICY_DEFAULTS
             else CONFIG_BACKUP_RUNTIME_DEFAULTS[key]
         )
-        if key == GLOBAL_AI_FALLBACKS_KEY:
+        if key in {GLOBAL_AI_FALLBACKS_KEY, GLOBAL_AI_CONFIRM_FALLBACKS_KEY}:
             return normalize_provider_ids(value) == normalize_provider_ids(default)
         if isinstance(default, bool):
             return not isinstance(value, bool) or value == default
@@ -1808,14 +1847,30 @@ class QQGroupAdmin(Star):
         *,
         message_id: str = "",
     ) -> None:
-        self._cleanup_tokens()
-        if any(
-            data[0] > time.monotonic()
-            and len(data) >= 3
-            and data[1:3] == (group_openid, member_openid)
-            for data in self._verification_tokens.values()
-        ):
-            return
+        async with self._verification_send_lock:
+            self._cleanup_tokens()
+            if any(
+                data[0] > time.monotonic()
+                and len(data) >= 3
+                and data[1:3] == (group_openid, member_openid)
+                for data in self._verification_tokens.values()
+            ):
+                return
+            await self._send_verification_challenge_once(
+                client,
+                group_openid,
+                member_openid,
+                message_id=message_id,
+            )
+
+    async def _send_verification_challenge_once(
+        self,
+        client: Any,
+        group_openid: str,
+        member_openid: str,
+        *,
+        message_id: str = "",
+    ) -> None:
         left = 2 + secrets.randbelow(8)
         right = 2 + secrets.randbelow(8)
         answer = left + right
@@ -1884,7 +1939,16 @@ class QQGroupAdmin(Star):
             if message_id_value:
                 sent_ids.append(str(message_id_value))
         except Exception as card_exc:  # noqa: BLE001 - Markdown/keyboard boundary
-            self.logger.debug("真人验证按钮卡发送失败，将发送文字提示：%s", card_exc)
+            # A transport timeout/reset is ambiguous: QQ may have accepted the
+            # card before the client raised. Sending a second message here is
+            # exactly what produces the duplicated card + text seen in QQ.
+            if not self._verification_card_failure_is_definitive(card_exc):
+                self.logger.warning(
+                    "真人验证按钮卡发送结果不确定，跳过文字兜底以避免重复：%s",
+                    self._plain_text(card_exc, 200),
+                )
+                return
+            self.logger.debug("真人验证按钮卡被明确拒绝，将发送文字提示：%s", card_exc)
             try:
                 sent = await self._send_group_text(
                     client,
@@ -1920,6 +1984,39 @@ class QQGroupAdmin(Star):
                     tuple(sent_ids),
                     timeout_seconds,
                 )
+
+    @staticmethod
+    def _verification_card_failure_is_definitive(exc: BaseException) -> bool:
+        """Return whether a button-card error proves the request was rejected."""
+
+        status = getattr(exc, "status", None)
+        if status is None:
+            status = getattr(exc, "status_code", None)
+        try:
+            if 400 <= int(status) < 500:
+                return True
+        except (TypeError, ValueError):
+            pass
+        detail = str(exc or "").casefold()
+        if not detail:
+            return False
+        # These errors are generated before delivery by QQ/botpy. Unknown
+        # transport errors remain ambiguous and must not trigger a second send.
+        return any(
+            marker in detail
+            for marker in (
+                "keyboard",
+                "markdown",
+                "permission",
+                "权限",
+                "按钮",
+                "不支持",
+                "unsupported",
+                "invalid argument",
+                "invalid parameter",
+                "参数",
+            )
+        )
 
     @staticmethod
     def _verification_message_ids(data: tuple[Any, ...]) -> tuple[str, ...]:
@@ -2822,6 +2919,9 @@ class QQGroupAdmin(Star):
             "ai_confirm_provider_id": str(
                 self._policy_value(ai_policy, GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
             ).strip(),
+            "ai_confirm_fallback_provider_ids": normalize_provider_ids(
+                self._policy_value(ai_policy, GLOBAL_AI_CONFIRM_FALLBACKS_KEY)
+            ),
             "ai_timeout": self._bounded_int(
                 self._policy_value(ai_policy, GLOBAL_AI_TIMEOUT_KEY),
                 AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
@@ -4305,6 +4405,8 @@ class QQGroupAdmin(Star):
         block_threshold: int = AI_REVIEW_DEFAULT_BLOCK_THRESHOLD,
         confirm_provider_id: str = "",
         result: dict[str, Any] | None = None,
+        *,
+        confirm_fallback_provider_ids: Any = "",
     ) -> bool:
         review_text = self._ai_message_text(event, text)
         total_timeout = self._bounded_int(
@@ -4502,14 +4604,21 @@ class QQGroupAdmin(Star):
                     current_provider_id,
                     "BLOCK" if decision else "ALLOW",
                 )
-                if not decision or not str(confirm_provider_id or "").strip():
+                confirm_candidates = list(
+                    dict.fromkeys(
+                        [str(confirm_provider_id or "").strip()]
+                        + normalize_provider_ids(confirm_fallback_provider_ids)
+                    )
+                )
+                confirm_candidates = [
+                    provider for provider in confirm_candidates if provider
+                ][: 1 + MAX_AI_FALLBACK_PROVIDERS]
+                if not decision or not confirm_candidates:
                     return decision
-
-                confirm_provider = str(confirm_provider_id).strip()
 
                 def confirmation_failed(
                     detail: str,
-                    provider: str = confirm_provider,
+                    provider: str,
                 ) -> bool:
                     safe_detail = self._safe_ai_error(detail)
                     if result is not None:
@@ -4529,69 +4638,95 @@ class QQGroupAdmin(Star):
                         )
                         self._ai_warning_at = time.monotonic() + 300
                     return True
-
-                if confirm_provider in candidates:
-                    return confirmation_failed("确认模型与初判候选模型重复")
-                if (
-                    vision_urls
-                    and self._provider_supports_image_input(confirm_provider) is False
-                ):
-                    return confirmation_failed("确认模型不支持图片输入")
-                confirm_remaining = deadline - time.monotonic()
-                if confirm_remaining <= 0:
-                    return confirmation_failed("达到 AI 审核总超时")
-                try:
-                    confirm_response = await generate_review(
-                        confirm_provider,
-                        (
-                            "你是独立的群消息复核器，宁可放行不确定内容。"
-                            "只按消息本身判断，不得扩大违规范围。"
-                        ),
-                        min(30.0, confirm_remaining),
-                    )
-                    raw_confirm = str(
-                        self._ai_response_field(confirm_response, "completion_text")
-                        or ""
-                    )
-                    confirmed = self._ai_decision(raw_confirm, block_threshold)
-                    if confirmed is None:
-                        raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
-                    _, confirm_confidence, confirm_reason = (
-                        self._ai_decision_details(raw_confirm)
-                    )
-                    if result is not None:
-                        result.update(
-                            {
-                                "confirm_provider": confirm_provider,
-                                "confirm_decision": (
-                                    "BLOCK" if confirmed else "ALLOW"
-                                ),
-                                "confirm_confidence": confirm_confidence,
-                                "confirm_reason": confirm_reason,
-                                "confirmation_failed": False,
-                            }
+                confirm_errors: list[tuple[str, str]] = []
+                for confirm_provider in confirm_candidates:
+                    if confirm_provider in candidates:
+                        confirm_errors.append(
+                            (confirm_provider, "确认模型与初判候选模型重复")
                         )
-                    self.logger.debug(
-                        "AI 群消息二次确认完成：provider=%s decision=%s",
-                        confirm_provider,
-                        "BLOCK" if confirmed else "ALLOW",
-                    )
-                    return confirmed
-                except Exception as exc:  # noqa: BLE001 - downgrade to record-only
-                    if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
-                        detail = "模型超时"
-                    elif str(exc).startswith("模型返回错误响应") or str(exc) == (
-                        "模型未返回带置信度的 ALLOW/BLOCK"
+                        continue
+                    if (
+                        vision_urls
+                        and self._provider_supports_image_input(confirm_provider)
+                        is False
                     ):
-                        detail = str(exc)
-                    else:
-                        detail = "模型调用失败"
-                    self.logger.debug(
-                        "AI 二次确认模型不可用：provider=%s error_type=%s",
-                        confirm_provider,
-                        type(exc).__name__,
-                    )
-                    return confirmation_failed(detail)
+                        confirm_errors.append(
+                            (confirm_provider, "确认模型不支持图片输入")
+                        )
+                        continue
+                    confirm_remaining = deadline - time.monotonic()
+                    if confirm_remaining <= 0:
+                        confirm_errors.append(
+                            (confirm_provider, "达到 AI 审核总超时")
+                        )
+                        break
+                    try:
+                        confirm_response = await generate_review(
+                            confirm_provider,
+                            (
+                                "你是独立的群消息复核器，宁可放行不确定内容。"
+                                "只按消息本身判断，不得扩大违规范围。"
+                            ),
+                            min(30.0, confirm_remaining),
+                        )
+                        raw_confirm = str(
+                            self._ai_response_field(
+                                confirm_response, "completion_text"
+                            )
+                            or ""
+                        )
+                        confirmed = self._ai_decision(raw_confirm, block_threshold)
+                        if confirmed is None:
+                            raise RuntimeError("模型未返回带置信度的 ALLOW/BLOCK")
+                        _, confirm_confidence, confirm_reason = (
+                            self._ai_decision_details(raw_confirm)
+                        )
+                        if result is not None:
+                            result.update(
+                                {
+                                    "confirm_provider": confirm_provider,
+                                    "confirm_decision": (
+                                        "BLOCK" if confirmed else "ALLOW"
+                                    ),
+                                    "confirm_confidence": confirm_confidence,
+                                    "confirm_reason": confirm_reason,
+                                    "confirmation_failed": False,
+                                }
+                            )
+                        self.logger.debug(
+                            "AI 群消息二次确认完成：provider=%s decision=%s",
+                            confirm_provider,
+                            "BLOCK" if confirmed else "ALLOW",
+                        )
+                        return confirmed
+                    except Exception as exc:  # noqa: BLE001 - try confirm fallback
+                        if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
+                            detail = "模型超时"
+                        elif str(exc).startswith("模型返回错误响应") or str(exc) == (
+                            "模型未返回带置信度的 ALLOW/BLOCK"
+                        ):
+                            detail = str(exc)
+                        else:
+                            detail = "模型调用失败"
+                        confirm_errors.append((confirm_provider, detail))
+                        self.logger.debug(
+                            "AI 二次确认模型不可用：provider=%s error_type=%s",
+                            confirm_provider,
+                            type(exc).__name__,
+                        )
+                failed_provider = (
+                    confirm_errors[-1][0]
+                    if confirm_errors
+                    else confirm_candidates[-1]
+                )
+                if len(confirm_candidates) == 1 and confirm_errors:
+                    failure_detail = confirm_errors[-1][1]
+                else:
+                    failure_detail = "; ".join(
+                        f"{provider}: {detail}"
+                        for provider, detail in confirm_errors
+                    ) or "没有可用确认模型"
+                return confirmation_failed(failure_detail[:200], failed_provider)
             except Exception as exc:  # noqa: BLE001 - try configured fallback
                 if isinstance(exc, (asyncio.TimeoutError, TimeoutError)):
                     detail = "模型超时"
@@ -5185,6 +5320,9 @@ class QQGroupAdmin(Star):
                 settings["ai_block_threshold"],
                 settings["ai_confirm_provider_id"],
                 result=ai_review,
+                confirm_fallback_provider_ids=settings[
+                    "ai_confirm_fallback_provider_ids"
+                ],
             )
         ):
             ai_record_only = settings["ai_action"] == "record_only" or bool(
@@ -6919,9 +7057,25 @@ class QQGroupAdmin(Star):
                 if isinstance(explicit_global_ai, dict)
                 else first_raw.get(key, self.config.get(key, GLOBAL_POLICY_DEFAULTS[key]))
             )
-            if key == GLOBAL_AI_FALLBACKS_KEY:
+            if key in {GLOBAL_AI_FALLBACKS_KEY, GLOBAL_AI_CONFIRM_FALLBACKS_KEY}:
                 value = normalize_provider_ids(value)
             global_ai_values[key] = list(value) if isinstance(value, list) else value
+        initial_ai_providers = {
+            str(global_ai_values.get(GLOBAL_AI_PROVIDER_KEY) or "").strip(),
+            *normalize_provider_ids(global_ai_values.get(GLOBAL_AI_FALLBACKS_KEY)),
+        }
+        confirm_provider = str(
+            global_ai_values.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
+        ).strip()
+        if confirm_provider and confirm_provider in initial_ai_providers:
+            raise ValueError("AI 二次确认模型不能与主模型或回退模型重复")
+        if any(
+            provider in initial_ai_providers or provider == confirm_provider
+            for provider in normalize_provider_ids(
+                global_ai_values.get(GLOBAL_AI_CONFIRM_FALLBACKS_KEY)
+            )
+        ):
+            raise ValueError("AI 二次确认模型不能与审核模型或确认回退模型重复")
         existing = {
             str(item.get("profile_id") or ""): item
             for item in self._configured_global_policies()
@@ -7050,6 +7204,9 @@ class QQGroupAdmin(Star):
             "global_ai_review_confirm_provider_id": str(
                 self.config.get(GLOBAL_AI_CONFIRM_PROVIDER_KEY) or ""
             ).strip(),
+            "global_ai_review_confirm_fallback_provider_ids": normalize_provider_ids(
+                self.config.get(GLOBAL_AI_CONFIRM_FALLBACKS_KEY)
+            ),
             "global_ai_review_timeout_seconds": self._bounded_int(
                 self.config.get(GLOBAL_AI_TIMEOUT_KEY),
                 AI_REVIEW_TOTAL_TIMEOUT_SECONDS,
@@ -7148,6 +7305,7 @@ class QQGroupAdmin(Star):
             "global_ai_review_provider_id",
             "global_ai_review_fallback_provider_ids",
             "global_ai_review_confirm_provider_id",
+            "global_ai_review_confirm_fallback_provider_ids",
             "ai_review_enabled",
             "ai_review_provider_id",
             "ai_review_fallback_provider_ids",
@@ -7184,15 +7342,29 @@ class QQGroupAdmin(Star):
                 )
                 or ""
             ).strip()
+            confirm_fallback_ids = normalize_provider_ids(
+                settings.get(
+                    "global_ai_review_confirm_fallback_provider_ids",
+                    self.config.get(GLOBAL_AI_CONFIRM_FALLBACKS_KEY),
+                )
+            )
             if primary in fallback_ids:
                 raise ValueError("AI 审核主模型不能出现在回退模型列表")
             if confirm_provider and (
                 confirm_provider == primary or confirm_provider in fallback_ids
             ):
                 raise ValueError("AI 二次确认模型不能与主模型或回退模型重复")
+            if any(
+                provider in {primary, *fallback_ids, confirm_provider}
+                for provider in confirm_fallback_ids
+            ):
+                raise ValueError("AI 二次确认回退模型不能重复使用审核模型")
             settings["global_ai_review_provider_id"] = primary
             settings["global_ai_review_fallback_provider_ids"] = fallback_ids
             settings["global_ai_review_confirm_provider_id"] = confirm_provider
+            settings[
+                "global_ai_review_confirm_fallback_provider_ids"
+            ] = confirm_fallback_ids
             if "global_ai_review_enabled" not in settings:
                 settings["global_ai_review_enabled"] = bool(
                     settings.get(

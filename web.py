@@ -40,6 +40,7 @@ GLOBAL_POLICY_FIELDS = (
     "global_ai_review_provider_id",
     "global_ai_review_fallback_provider_ids",
     "global_ai_review_confirm_provider_id",
+    "global_ai_review_confirm_fallback_provider_ids",
     "global_ai_review_timeout_seconds",
     "global_ai_review_images_enabled",
     "global_ai_review_block_threshold",
@@ -81,6 +82,7 @@ GLOBAL_AI_FIELDS = (
     "global_ai_review_provider_id",
     "global_ai_review_fallback_provider_ids",
     "global_ai_review_confirm_provider_id",
+    "global_ai_review_confirm_fallback_provider_ids",
     "global_ai_review_timeout_seconds",
     "global_ai_review_images_enabled",
     "global_ai_review_block_threshold",
@@ -830,6 +832,10 @@ class GroupAdminWeb:
                 "AI 二次确认模型",
                 256,
             )
+        if "global_ai_review_confirm_fallback_provider_ids" in payload:
+            settings["global_ai_review_confirm_fallback_provider_ids"] = cls._provider_ids(
+                payload["global_ai_review_confirm_fallback_provider_ids"]
+            )
         for key, default, minimum, maximum, label in (
             (
                 "global_ai_review_timeout_seconds",
@@ -949,12 +955,20 @@ class GroupAdminWeb:
         ):
             raise ValueError("AI 审核主模型不能出现在回退模型列表")
         confirm_provider = settings.get("global_ai_review_confirm_provider_id", "")
-        if confirm_provider and (
-            confirm_provider == settings.get("global_ai_review_provider_id")
-            or confirm_provider
-            in settings.get("global_ai_review_fallback_provider_ids", [])
-        ):
+        confirm_fallbacks = settings.get(
+            "global_ai_review_confirm_fallback_provider_ids", []
+        )
+        initial_providers = {
+            settings.get("global_ai_review_provider_id", ""),
+            *settings.get("global_ai_review_fallback_provider_ids", []),
+        }
+        if confirm_provider and confirm_provider in initial_providers:
             raise ValueError("AI 二次确认模型不能与主模型或回退模型重复")
+        if any(
+            provider in initial_providers or provider == confirm_provider
+            for provider in confirm_fallbacks
+        ):
+            raise ValueError("AI 二次确认模型不能与审核模型或确认回退模型重复")
         # Older cached WebUI bundles do not send the newer per-reason reply
         # fields.  Treat those keys as a partial update so a stale page cannot
         # erase values already configured in the current runtime settings.
@@ -994,6 +1008,10 @@ class GroupAdminWeb:
                     "global_ai_review_fallback_provider_ids",
                     "ai_review_fallback_provider_ids",
                     "ai_review_fallback_provider_id",
+                },
+                "global_ai_review_confirm_fallback_provider_ids": {
+                    "global_ai_review_confirm_fallback_provider_ids",
+                    "ai_review_confirm_fallback_provider_ids",
                 },
             }
             present = set(payload)

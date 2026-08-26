@@ -120,6 +120,11 @@
             "description": "AI 二次确认模型提供商 ID",
             "default": ""
           },
+          "global_ai_review_confirm_fallback_provider_ids": {
+            "type": "list",
+            "description": "AI 二次确认回退模型提供商 ID",
+            "default": []
+          },
           "global_ai_review_timeout_seconds": {
             "type": "int",
             "description": "AI 审核总超时（秒）",
@@ -455,6 +460,13 @@
     "hint": "可选；仅在初判 BLOCK 后独立复核。确认 ALLOW 时放行，确认失败时只记录、不撤回。不能与主模型或回退模型重复。",
     "_special": "select_provider",
     "default": "",
+    "invisible": true
+  },
+  "global_ai_review_confirm_fallback_provider_ids": {
+    "type": "list",
+    "description": "AI 二次确认回退模型",
+    "hint": "按顺序填写多个提供商 ID，最多 3 个；确认主模型失败、超时或无效时依次尝试。不能与初审模型重复。",
+    "default": [],
     "invisible": true
   },
   "global_ai_review_timeout_seconds": {

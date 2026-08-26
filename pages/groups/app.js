@@ -36,6 +36,7 @@
   var GLOBAL_AI_FIELDS = [
     "global_ai_review_enabled", "global_ai_review_provider_id",
     "global_ai_review_fallback_provider_ids", "global_ai_review_confirm_provider_id",
+    "global_ai_review_confirm_fallback_provider_ids",
     "global_ai_review_timeout_seconds", "global_ai_review_images_enabled",
     "global_ai_review_block_threshold", "global_ai_review_action",
     "global_ai_reject_reply", "global_ai_reject_at_member",
@@ -956,7 +957,7 @@
         "global_message_reject_at_member", "global_member_blacklist", "global_member_whitelist",
         "global_blacklist_reply", "global_blacklist_at_member", "global_ai_review_enabled",
         "global_ai_review_provider_id", "global_ai_review_fallback_provider_ids",
-        "global_ai_review_confirm_provider_id", "global_ai_review_timeout_seconds",
+        "global_ai_review_confirm_provider_id", "global_ai_review_confirm_fallback_provider_ids", "global_ai_review_timeout_seconds",
         "global_ai_review_images_enabled", "global_ai_review_block_threshold", "global_ai_review_action",
         "global_ai_reject_reply", "global_ai_reject_at_member", "global_image_reject_keywords",
         "global_image_reject_reply", "global_image_reject_at_member", "global_image_ocr_enabled",
@@ -1077,6 +1078,7 @@
     fillProviderSelect("runtime-ai-provider", "使用当前会话模型", settings.global_ai_review_provider_id || "");
     fillProviderMultiSelect("runtime-ai-fallback-providers", settings.global_ai_review_fallback_provider_ids || []);
     fillProviderSelect("runtime-ai-confirm-provider", "不进行二次确认", settings.global_ai_review_confirm_provider_id || "");
+    fillProviderMultiSelect("runtime-ai-confirm-fallback-providers", settings.global_ai_review_confirm_fallback_provider_ids || []);
     element("runtime-image-ocr-enabled").checked = settings.global_image_ocr_enabled === true;
     fillProviderSelect("runtime-image-ocr-provider", "不使用视觉 OCR 模型", settings.global_image_ocr_provider_id || "");
     element("runtime-image-ocr-timeout").value = settings.global_image_ocr_timeout_seconds || 4;
@@ -1085,8 +1087,11 @@
     element("runtime-ai-provider").disabled = !aiEnabled;
     element("runtime-ai-fallback-providers").disabled = !aiEnabled;
     element("runtime-ai-confirm-provider").disabled = !aiEnabled;
+    element("runtime-ai-confirm-fallback-providers").disabled = !aiEnabled;
     element("runtime-ai-fallback-up").disabled = !aiEnabled;
     element("runtime-ai-fallback-down").disabled = !aiEnabled;
+    element("runtime-ai-confirm-fallback-up").disabled = !aiEnabled;
+    element("runtime-ai-confirm-fallback-down").disabled = !aiEnabled;
     element("runtime-image-ocr-provider").disabled = !element("runtime-image-ocr-enabled").checked;
   }
 
@@ -1137,11 +1142,17 @@
   }
 
   function readGlobalAiFields() {
+    var fallbackProviders = selectedValues("runtime-ai-fallback-providers");
+    var confirmFallbackProviders = selectedValues("runtime-ai-confirm-fallback-providers");
+    if (fallbackProviders.length > 3 || confirmFallbackProviders.length > 3) {
+      throw new Error("每组 AI 回退模型最多选择 3 个");
+    }
     return {
       global_ai_review_enabled: element("runtime-ai-enabled").checked,
       global_ai_review_provider_id: element("runtime-ai-provider").value,
-      global_ai_review_fallback_provider_ids: selectedValues("runtime-ai-fallback-providers").slice(0, 3),
+      global_ai_review_fallback_provider_ids: fallbackProviders,
       global_ai_review_confirm_provider_id: element("runtime-ai-confirm-provider").value,
+      global_ai_review_confirm_fallback_provider_ids: confirmFallbackProviders,
       global_ai_review_timeout_seconds: Number(element("runtime-ai-timeout").value),
       global_ai_review_block_threshold: Number(element("runtime-ai-threshold").value),
       global_ai_review_action: element("runtime-ai-action").value,
@@ -1212,15 +1223,16 @@
   }
 
   function saveRuntimePolicies() {
+    var globalAi;
     try {
       commitCurrentRuntimePolicy();
+      globalAi = readGlobalAiFields();
     } catch (error) {
       toast(error.message, true);
       return;
     }
     var button = element("runtime-policy-save");
     button.disabled = true;
-    var globalAi = readGlobalAiFields();
     apiPost("global-policies/save", { profiles: runtimePolicies, global_ai: globalAi })
       .then(function (saved) {
         runtimePolicies = (saved && Array.isArray(saved.profiles)) ? saved.profiles : runtimePolicies;
@@ -1906,14 +1918,23 @@
     element("runtime-ai-provider").disabled = !event.target.checked;
     element("runtime-ai-fallback-providers").disabled = !event.target.checked;
     element("runtime-ai-confirm-provider").disabled = !event.target.checked;
+    element("runtime-ai-confirm-fallback-providers").disabled = !event.target.checked;
     element("runtime-ai-fallback-up").disabled = !event.target.checked;
     element("runtime-ai-fallback-down").disabled = !event.target.checked;
+    element("runtime-ai-confirm-fallback-up").disabled = !event.target.checked;
+    element("runtime-ai-confirm-fallback-down").disabled = !event.target.checked;
   });
   element("runtime-ai-fallback-up").addEventListener("click", function () {
     moveSelectedOptions("runtime-ai-fallback-providers", -1);
   });
   element("runtime-ai-fallback-down").addEventListener("click", function () {
     moveSelectedOptions("runtime-ai-fallback-providers", 1);
+  });
+  element("runtime-ai-confirm-fallback-up").addEventListener("click", function () {
+    moveSelectedOptions("runtime-ai-confirm-fallback-providers", -1);
+  });
+  element("runtime-ai-confirm-fallback-down").addEventListener("click", function () {
+    moveSelectedOptions("runtime-ai-confirm-fallback-providers", 1);
   });
   element("runtime-image-ocr-enabled").addEventListener("change", function (event) {
     element("runtime-image-ocr-provider").disabled = !event.target.checked;

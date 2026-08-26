@@ -3846,6 +3846,41 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["confirm_provider"], "confirm")
         self.assertEqual(result["confirm_decision"], "ALLOW")
 
+    async def test_ai_confirmation_uses_ordered_fallback_after_failure(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=疑似违规",
+                ),
+                RuntimeError("confirm unavailable"),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="ALLOW confidence=99 reason=正常聊天",
+                ),
+            ]
+        )
+        result = {}
+
+        blocked = await plugin._ai_blocks_message(
+            FakeEvent(client, "待审核"),
+            "待审核",
+            [],
+            "primary",
+            confirm_provider_id="confirm",
+            confirm_fallback_provider_ids=["confirm-fallback"],
+            result=result,
+        )
+
+        self.assertFalse(blocked)
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in plugin.context.llm_generate.await_args_list],
+            ["primary", "confirm", "confirm-fallback"],
+        )
+        self.assertEqual(result["confirm_provider"], "confirm-fallback")
+        self.assertFalse(result["confirmation_failed"])
+
     async def test_ai_confirmation_block_confirms_primary_block(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "待审核")
@@ -4288,6 +4323,19 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             runtime["global_ai_review_confirm_provider_id"],
             "confirm",
         )
+        runtime = module.GroupAdminWeb._runtime_settings(
+            {
+                "global_ai_review_confirm_provider_id": "confirm",
+                "global_ai_review_confirm_fallback_provider_ids": [
+                    "confirm-fallback",
+                    "confirm-fallback",
+                ],
+            }
+        )
+        self.assertEqual(
+            runtime["global_ai_review_confirm_fallback_provider_ids"],
+            ["confirm-fallback"],
+        )
         for settings in (
             {
                 "global_ai_review_provider_id": "same",
@@ -4296,6 +4344,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             {
                 "global_ai_review_fallback_provider_ids": ["same"],
                 "global_ai_review_confirm_provider_id": "same",
+            },
+            {
+                "global_ai_review_provider_id": "primary",
+                "global_ai_review_confirm_fallback_provider_ids": ["primary"],
             },
         ):
             with self.subTest(settings=settings), self.assertRaisesRegex(
@@ -4323,6 +4375,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
         script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
         self.assertIn('id="runtime-ai-confirm-provider"', html)
+        self.assertIn('id="runtime-ai-confirm-fallback-providers"', html)
         self.assertIn('id="runtime-ai-fallback-up"', html)
         self.assertIn('id="runtime-ai-fallback-down"', html)
         self.assertIn(
@@ -4333,6 +4386,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", -1)', script)
         self.assertIn('moveSelectedOptions("runtime-ai-fallback-providers", 1)', script)
         self.assertGreaterEqual(script.count('"runtime-ai-confirm-provider"'), 3)
+        self.assertIn(
+            'global_ai_review_confirm_fallback_provider_ids: confirmFallbackProviders',
+            script,
+        )
 
     def test_runtime_page_keeps_ai_controls_in_independent_panel(self):
         html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
@@ -5194,6 +5251,37 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.api.messages), 1)
         token = next(iter(plugin._verification_tokens))
         plugin._cancel_verification_recall(token)
+
+    async def test_verification_concurrent_requests_publish_one_prompt(self):
+        plugin, client = self.plugin()
+        original = plugin._send_group_markdown
+
+        async def delayed_markdown(*args, **kwargs):
+            await asyncio.sleep(0)
+            return await original(*args, **kwargs)
+
+        plugin._send_group_markdown = delayed_markdown
+        with patch.object(module.secrets, "randbelow", side_effect=[1, 2]):
+            await asyncio.gather(
+                plugin._send_verification_challenge(client, "group-1", "member-1"),
+                plugin._send_verification_challenge(client, "group-1", "member-1"),
+            )
+
+        self.assertEqual(len(client.api.messages), 1)
+        token = next(iter(plugin._verification_tokens))
+        plugin._cancel_verification_recall(token)
+
+    async def test_verification_does_not_send_text_after_ambiguous_card_error(self):
+        plugin, client = self.plugin()
+
+        async def ambiguous_send(*_args, **_kwargs):
+            raise TimeoutError()
+
+        plugin._send_group_markdown = ambiguous_send
+        await plugin._send_verification_challenge(client, "group-1", "member-1")
+
+        self.assertEqual(client.api.messages, [])
+        self.assertEqual(len(plugin._verification_tokens), 1)
 
     async def test_verification_timeout_recalls_prompt_and_requires_new_challenge(self):
         plugin, client = self.plugin()
