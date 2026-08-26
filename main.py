@@ -2322,32 +2322,43 @@ class QQGroupAdmin(Star):
                 existing = getattr(client, "on_interaction_create", None)
                 owner = getattr(existing, "__qqgroup_admin_owner__", None)
                 if owner is self:
-                    continue
-                if owner is not None:
-                    existing = getattr(
-                        existing,
-                        "__qqgroup_admin_previous__",
-                        existing,
+                    # The interaction wrapper is already ours.  Keep it
+                    # intact, but continue below so a missing member wrapper
+                    # can be restored after a client reconnect or reload.
+                    self._patched_clients.setdefault(
+                        client,
+                        getattr(
+                            existing,
+                            "__qqgroup_admin_previous__",
+                            None,
+                        ),
                     )
-                if hasattr(client, "intents"):
-                    client.intents |= INTERACTION_INTENT
+                else:
+                    if owner is not None:
+                        existing = getattr(
+                            existing,
+                            "__qqgroup_admin_previous__",
+                            existing,
+                        )
+                    if hasattr(client, "intents"):
+                        client.intents |= INTERACTION_INTENT
 
-                async def interaction_handler(
-                    interaction: Any,
-                    bound_client: Any = client,
-                    previous_handler: Any = existing,
-                ) -> None:
-                    handled = await self._handle_interaction(
-                        bound_client,
-                        interaction,
-                    )
-                    if not handled and previous_handler is not None:
-                        await previous_handler(interaction)
+                    async def interaction_handler(
+                        interaction: Any,
+                        bound_client: Any = client,
+                        previous_handler: Any = existing,
+                    ) -> None:
+                        handled = await self._handle_interaction(
+                            bound_client,
+                            interaction,
+                        )
+                        if not handled and previous_handler is not None:
+                            await previous_handler(interaction)
 
-                interaction_handler.__qqgroup_admin_owner__ = self
-                interaction_handler.__qqgroup_admin_previous__ = existing
-                client.on_interaction_create = interaction_handler
-                self._patched_clients[client] = existing
+                    interaction_handler.__qqgroup_admin_owner__ = self
+                    interaction_handler.__qqgroup_admin_previous__ = existing
+                    client.on_interaction_create = interaction_handler
+                    self._patched_clients[client] = existing
                 if self._install_group_member_event(client):
                     previous_member = getattr(client, "on_group_member_add", None)
                     owner = getattr(
@@ -3772,7 +3783,6 @@ class QQGroupAdmin(Star):
                     client = clients.get(platform_id)
                     if client is None:
                         continue
-                    polled.add((platform_id, group_openid))
                     try:
                         await self._poll_uid_group(
                             client,
@@ -3793,6 +3803,11 @@ class QQGroupAdmin(Star):
                             group_openid,
                             exc,
                         )
+                    else:
+                        # Only suppress the second request when the UID poll
+                        # actually completed.  A permission/network failure
+                        # must leave the welcome-only fallback eligible.
+                        polled.add((platform_id, group_openid))
                     await asyncio.sleep(2.1)
                 # Native QQ approval and manual approval have no member-add
                 # event in AstrBot.  Poll only groups with a welcome rule and

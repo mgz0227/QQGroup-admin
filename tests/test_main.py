@@ -278,6 +278,34 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         await plugin.terminate()
         self.assertIs(client.on_interaction_create, previous)
 
+    def test_member_handler_is_restored_when_interaction_wrapper_is_owned(self):
+        plugin, client = self.plugin()
+
+        async def interaction_handler(_interaction):
+            return None
+
+        interaction_handler.__qqgroup_admin_owner__ = plugin
+        interaction_handler.__qqgroup_admin_previous__ = None
+        client.on_interaction_create = interaction_handler
+        plugin._qq_platforms = lambda: [
+            SimpleNamespace(get_client=lambda: client)
+        ]
+        plugin._install_group_member_event = lambda _client: True
+
+        plugin._patch_qq_clients()
+
+        self.assertIs(client.on_interaction_create, interaction_handler)
+        member_handler = client.on_group_member_add
+        self.assertIs(
+            getattr(member_handler, "__qqgroup_admin_owner__", None),
+            plugin,
+        )
+
+        # A second patch remains idempotent and must not wrap the member
+        # handler repeatedly.
+        plugin._patch_qq_clients()
+        self.assertIs(client.on_group_member_add, member_handler)
+
     async def test_settings_button_binds_named_group_without_webui_entry(self):
         plugin, client = self.plugin()
         plugin.config["auto_review_groups"] = []
@@ -5193,6 +5221,42 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(client.api.messages), 1)
         self.assertIn("欢迎 新人", client.api.messages[0]["content"])
+
+    async def test_welcome_poll_runs_when_uid_poll_fails(self):
+        plugin, client = self.plugin()
+        plugin._uid_review_entries = lambda: [
+            ("platform-1", "group-1", {"uid_review_enabled": True})
+        ]
+        plugin._welcome_candidate_entries = lambda: [("platform-1", "group-1")]
+        plugin._platform_clients = lambda: {"platform-1": client}
+        plugin._poll_uid_group = AsyncMock(
+            side_effect=module.QQAPIError(status=429)
+        )
+        plugin._log_poll_failure = AsyncMock()
+        welcome_called = asyncio.Event()
+
+        async def poll_welcome(*_args, **_kwargs):
+            welcome_called.set()
+
+        plugin._poll_welcome_group = poll_welcome
+        plugin._review_interval = lambda: 3600
+        real_sleep = asyncio.sleep
+
+        async def fast_sleep(_delay):
+            await real_sleep(0)
+
+        task = None
+        with patch.object(module.asyncio, "sleep", fast_sleep):
+            task = asyncio.create_task(plugin._uid_review_loop())
+            try:
+                await asyncio.wait_for(welcome_called.wait(), 1)
+            finally:
+                task.cancel()
+                with self.assertRaises(asyncio.CancelledError):
+                    await task
+
+        plugin._poll_uid_group.assert_awaited_once()
+        plugin._log_poll_failure.assert_awaited_once()
 
     def test_group_member_event_parser_bridge_dispatches_official_payload(self):
         plugin, client = self.plugin()
