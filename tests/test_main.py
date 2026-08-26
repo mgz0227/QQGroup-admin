@@ -5118,6 +5118,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("算式：", content)
         self.assertIn("未完成验证前发送的消息会被撤回", content)
         self.assertRegex(content, r"\d+ \+ \d+ = \?")
+        self.assertLess(content.index("算式："), content.index("真人验证"))
+        self.assertTrue(content.endswith("未完成验证前发送的消息会被撤回。"))
         self.assertNotIn("\n", content)
         self.assertNotIn("msg_id", card)
         self.assertIn("msg_seq", prompt)

@@ -1837,9 +1837,9 @@ class QQGroupAdmin(Star):
         # prevents clients that deduplicate identical consecutive messages
         # from hiding the explanation.
         card_prompt = (
+            f"算式：{left} + {right} = ?；"
             "真人验证：这是入群安全验证。请点击下方正确答案按钮；"
             "如果看不到按钮，请直接发送正确数字；未完成验证前发送的消息会被撤回。"
-            f"算式：{left} + {right} = ?"
         )
         prompt = (
             "真人验证提示：这是入群安全验证，请完成后恢复发言。"
