@@ -48,6 +48,22 @@ class ImageOCRTest(unittest.TestCase):
 
         self.assertEqual(embedded_image_text(event), "龙年快乐")
 
+    def test_plain_caption_is_not_treated_as_image_text(self):
+        Plain = type("Plain", (), {})
+        ImageComponent = type("Image", (), {})
+        plain = Plain()
+        plain.text = "普通说明词"
+        image = ImageComponent()
+        image.alt = "图片元数据"
+        event = SimpleNamespace(
+            message_obj=SimpleNamespace(
+                message=[plain, image], raw_message=SimpleNamespace(raw_data={})
+            ),
+            get_message_str=lambda: "普通说明词 [图片]",
+        )
+
+        self.assertEqual(embedded_image_text(event), "图片元数据")
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -80,6 +80,10 @@ def embedded_image_text(event: Any) -> str:
     values: list[str] = []
     components = getattr(getattr(event, "message_obj", None), "message", None) or []
     for component in components:
+        # Only media components expose image/emoji metadata.  Plain text is
+        # checked by the normal keyword rule and must not be treated as OCR.
+        if type(component).__name__ not in {"Image", "Face"}:
+            continue
         for key in ("ocr_text", "text", "alt", "description", "caption", "name"):
             value = getattr(component, key, None)
             if isinstance(value, str) and value.strip():

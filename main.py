@@ -1729,12 +1729,22 @@ class QQGroupAdmin(Star):
             f"算式：{left} + {right} = ?\n"
             "未完成验证前发送的消息会被撤回。"
         )
-        # Some QQ clients render only the last line of a keyboard card. Put
-        # the same full prompt in the card and send it again as plain text
-        # after the card so the instructions remain visible on those clients.
+        # Some QQ clients render only the last line of a keyboard card, and
+        # QQ may rate-limit the second message. Send the standalone prompt
+        # first so the purpose and fallback instructions are visible even when
+        # the keyboard card is collapsed or rejected.
         # Do not reuse the triggering message id: QQ treats it as an
         # idempotency/reply key on some clients and silently drops the prompt.
-        keyboard_sent = False
+        prompt_sent = False
+        try:
+            await self._send_group_text(
+                client,
+                group_openid,
+                prompt,
+            )
+            prompt_sent = True
+        except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
+            self.logger.debug("真人验证文字提示发送失败，将尝试按钮卡：%s", prompt_exc)
         try:
             await self._send_group_markdown(
                 client,
@@ -1742,17 +1752,13 @@ class QQGroupAdmin(Star):
                 prompt,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
             )
-            keyboard_sent = True
         except Exception as exc:  # noqa: BLE001 - Markdown/keyboard boundary
-            self.logger.debug("真人验证按钮发送失败，将发送文字提示：%s", exc)
-        try:
-            await self._send_group_text(client, group_openid, prompt)
-        except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
-            self.logger.debug("真人验证文字提示发送失败：%s", prompt_exc)
-            if not keyboard_sent:
+            # Keep the token when either prompt form was delivered; numeric
+            # answers remain available when a client cannot render buttons.
+            if not prompt_sent:
                 self._verification_tokens.pop(token, None)
                 self._verification_tokens.update(previous)
-                raise prompt_exc
+                raise exc
 
     async def _consume_verification_answer(
         self,

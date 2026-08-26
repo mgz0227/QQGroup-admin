@@ -1934,7 +1934,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("算式：", prompt["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
         self.assertEqual(
-            [item["msg_type"] for item in client.api.messages[:2]], [2, 0]
+            [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
         )
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
@@ -4945,7 +4945,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertRegex(content, r"\d+ \+ \d+ = \?")
         self.assertNotIn("msg_id", card)
         self.assertEqual(
-            [message["msg_type"] for message in client.api.messages[:2]], [2, 0]
+            [message["msg_type"] for message in client.api.messages[:2]], [0, 2]
         )
 
     async def test_verification_rejects_prefixed_answer(self):
