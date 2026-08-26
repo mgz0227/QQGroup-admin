@@ -1027,6 +1027,8 @@
     policy = policy || {};
     element("runtime-settings-command").checked = policy.settings_command_enabled !== false;
     element("runtime-panel-recall").checked = policy.settings_panel_auto_recall !== false;
+    element("runtime-verification-recall").checked = policy.verification_message_recall_enabled !== false;
+    element("runtime-verification-timeout").value = Number(policy.verification_message_timeout_seconds || 120);
     element("runtime-global-reject-keywords").value = policy.global_reject_keywords || "";
     element("runtime-policy-keyword-cooldown").value = Number(policy.keyword_reply_cooldown_seconds || 0);
     element("runtime-policy-keyword-recall").value = Number(policy.keyword_reply_recall_seconds || 0);
@@ -1163,6 +1165,8 @@
       group_openids: all ? [] : selectedGroups,
       settings_command_enabled: element("runtime-settings-command").checked,
       settings_panel_auto_recall: element("runtime-panel-recall").checked,
+      verification_message_recall_enabled: element("runtime-verification-recall").checked,
+      verification_message_timeout_seconds: Number(element("runtime-verification-timeout").value),
       mute_success_message: element("runtime-mute-message").value,
       global_reject_keywords: element("runtime-global-reject-keywords").value,
       keyword_reply_cooldown_seconds: Number(element("runtime-policy-keyword-cooldown").value),

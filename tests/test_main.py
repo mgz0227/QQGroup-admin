@@ -3,6 +3,7 @@ import copy
 import json
 import logging
 import sys
+import time
 import types
 import unittest
 from importlib import util
@@ -1944,12 +1945,6 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(event.stopped)
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
-        prompt = next(
-            item for item in client.api.messages if item.get("msg_type") == 0
-        )
-        self.assertEqual(prompt["msg_type"], 0)
-        self.assertIn("真人验证", prompt["content"])
-        self.assertIn("如果看不到按钮", prompt["content"])
         message = next(item for item in client.api.messages if item.get("keyboard"))
         self.assertEqual(message["msg_type"], 2)
         buttons = message["keyboard"]["content"]["rows"][0]["buttons"]
@@ -1961,19 +1956,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 for button in buttons
             )
         )
-        self.assertIn("真人验证", prompt["content"])
-        self.assertIn("这是入群安全验证", prompt["content"])
-        self.assertIn("未完成验证前发送的消息会被撤回", prompt["content"])
-        self.assertNotIn("msg_id", prompt)
         self.assertIn("这是入群安全验证", message["markdown"]["content"])
         self.assertIn("如果看不到按钮", message["markdown"]["content"])
         self.assertIn("未完成验证前发送的消息会被撤回", message["markdown"]["content"])
         self.assertNotIn("msg_id", message)
-        self.assertIn("算式：", prompt["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
-        self.assertEqual(
-            [item["msg_type"] for item in client.api.messages[:2]], [2, 0]
-        )
+        self.assertEqual([item["msg_type"] for item in client.api.messages], [2])
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
         interaction = SimpleNamespace(
@@ -1986,9 +1974,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 resolved=SimpleNamespace(button_data=f"qqgv:{token}:{answer}")
             ),
         )
-        self.assertTrue(await plugin._handle_interaction(client, interaction))
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            self.assertTrue(await plugin._handle_interaction(client, interaction))
         self.assertNotIn("group-1:admin-1", plugin._suspicious_members)
         self.assertEqual(client.api.acks[-1], ("verify-1", 0))
+        self.assertEqual(
+            [call.args for call in api.recall_group_message.await_args_list],
+            [("group-1", "message-1"), ("group-1", "sent-1")],
+        )
 
     async def test_member_lists_are_checked_before_suspicious_challenge(self):
         plugin, client = self.plugin()
@@ -2057,6 +2050,46 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(client.api.messages[-1]["content"], "这条文字消息已撤回。")
+
+    async def test_voice_asr_text_is_reviewed_and_saved_in_violation_record(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_message_reject_keywords="语音违规",
+            global_message_reject_reply="语音消息已撤回。",
+            global_message_reject_at_member=False,
+        )
+        plugin.config["auto_review_groups"][0]["moderation_enabled"] = True
+        event = FakeEvent(client)
+        event.message_obj.raw_message.raw_data = {
+            "author": {"member_openid": "admin-1"},
+            "attachments": [
+                {
+                    "content_type": "voice",
+                    "asr_refer_text": "这是语音违规内容",
+                }
+            ],
+        }
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        plugin._api = lambda _event: api
+
+        self.assertIn("语音违规", plugin._ai_message_text(event, ""))
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant",
+                completion_text="ALLOW confidence=100 reason=测试放行",
+            )
+        )
+        self.assertFalse(await plugin._ai_blocks_message(event, "", [], "primary"))
+        self.assertIn(
+            "这是语音违规内容",
+            plugin.context.llm_generate.await_args.kwargs["prompt"],
+        )
+        await plugin.audit_group_message(event)
+
+        self.assertTrue(event.stopped)
+        api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
+        self.assertEqual(client.api.messages[-1]["content"], "语音消息已撤回。")
+        self.assertIn("这是语音违规内容", plugin._violation_records[-1]["content"])
 
     async def test_scoped_global_keyword_runs_when_group_audit_is_disabled(self):
         plugin, client = self.plugin()
@@ -3546,7 +3579,32 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertFalse(blocked)
-        self.assertEqual(calls, ["primary", "fallback"])
+        self.assertEqual(calls, ["primary"])
+
+    async def test_ai_image_transport_error_does_not_downgrade_to_text(self):
+        plugin, client = self.plugin()
+        calls = []
+
+        async def provider_call(**kwargs):
+            calls.append(kwargs)
+            raise RuntimeError("image download failed")
+
+        plugin.context.llm_generate = provider_call
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "primary",
+                timeout_seconds=5,
+                image_review_enabled=True,
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(len(calls), 1, calls)
+        self.assertEqual(calls[0]["image_urls"], ["vision-ref"])
 
     async def test_join_config_backup_restores_missing_entries(self):
         plugin, _client = self.plugin()
@@ -5109,7 +5167,6 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             await plugin._send_verification_challenge(client, "group-1", "member-1")
 
         card = next(message for message in client.api.messages if message["msg_type"] == 2)
-        prompt = next(message for message in client.api.messages if message["msg_type"] == 0)
         content = card["markdown"]["content"]
         self.assertIn("这是入群安全验证", content)
         self.assertIn("请点击下方正确答案按钮", content)
@@ -5122,14 +5179,37 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(content.endswith("未完成验证前发送的消息会被撤回。"))
         self.assertNotIn("\n", content)
         self.assertNotIn("msg_id", card)
-        self.assertIn("msg_seq", prompt)
         self.assertIn("msg_seq", card)
-        self.assertNotEqual(prompt["msg_seq"], card["msg_seq"])
-        self.assertNotEqual(prompt["content"], content)
-        self.assertIn("真人验证提示", prompt["content"])
-        self.assertEqual(
-            [message["msg_type"] for message in client.api.messages[:2]], [2, 0]
-        )
+        self.assertEqual([message["msg_type"] for message in client.api.messages], [2])
+        token = next(iter(plugin._verification_tokens))
+        self.assertEqual(plugin._verification_tokens[token][4], ("sent-1",))
+        plugin._cancel_verification_recall(token)
+
+    async def test_verification_reuses_active_challenge(self):
+        plugin, client = self.plugin()
+        with patch.object(module.secrets, "randbelow", side_effect=[1, 2]):
+            await plugin._send_verification_challenge(client, "group-1", "member-1")
+        await plugin._send_verification_challenge(client, "group-1", "member-1")
+
+        self.assertEqual(len(client.api.messages), 1)
+        token = next(iter(plugin._verification_tokens))
+        plugin._cancel_verification_recall(token)
+
+    async def test_verification_timeout_recalls_prompt_and_requires_new_challenge(self):
+        plugin, client = self.plugin()
+        token = "verification-token"
+        data = (time.monotonic() + 120, "group-1", "member-1", 4, ("sent-1",), True)
+        plugin._verification_tokens[token] = data
+        api = SimpleNamespace(recall_group_message=AsyncMock())
+        with (
+            patch.object(module.asyncio, "sleep", AsyncMock()),
+            patch.object(module, "QQGroupAPI", return_value=api),
+        ):
+            await plugin._recall_verification_after_timeout(
+                client, token, "group-1", ("sent-1",), 120
+            )
+        api.recall_group_message.assert_awaited_once_with("group-1", "sent-1")
+        self.assertNotIn(token, plugin._verification_tokens)
 
     async def test_verification_rejects_prefixed_answer(self):
         plugin, client = self.plugin()
@@ -5147,6 +5227,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 client, "group-1", "member-1", f"答案:{answer}"
             )
         )
+        plugin._cancel_verification_recall(next(iter(plugin._verification_tokens)))
 
 
 if __name__ == "__main__":

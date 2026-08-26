@@ -43,6 +43,17 @@
             "description": "设置面板自动撤回",
             "default": true
           },
+          "verification_message_recall_enabled": {
+            "type": "bool",
+            "description": "真人验证消息自动撤回",
+            "default": true
+          },
+          "verification_message_timeout_seconds": {
+            "type": "int",
+            "description": "真人验证超时（秒）",
+            "default": 120,
+            "slider": {"min": 15, "max": 600, "step": 15}
+          },
           "mute_success_message": {
             "type": "string",
             "description": "禁言成功回复",
@@ -338,6 +349,21 @@
     "description": "启用审核设置命令",
     "hint": "关闭后群内 /审核设置 不会发送设置面板；可在此配置中重新开启。",
     "default": true,
+    "invisible": true
+  },
+  "verification_message_recall_enabled": {
+    "type": "bool",
+    "description": "真人验证消息自动撤回",
+    "hint": "答对或超时后撤回验证消息；关闭后保留消息。",
+    "default": true,
+    "invisible": true
+  },
+  "verification_message_timeout_seconds": {
+    "type": "int",
+    "description": "真人验证超时（秒）",
+    "hint": "超时后撤回验证消息，下次发言重新出题。",
+    "default": 120,
+    "slider": {"min": 15, "max": 600, "step": 15},
     "invisible": true
   },
   "mute_reply_at_member": {

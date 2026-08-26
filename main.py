@@ -212,6 +212,8 @@ VIOLATION_REVIEW_STATUSES = frozenset({"pending", "confirmed", "false_positive"}
 GLOBAL_POLICY_DEFAULTS = {
     "settings_command_enabled": True,
     "settings_panel_auto_recall": True,
+    "verification_message_recall_enabled": True,
+    "verification_message_timeout_seconds": 120,
     "mute_success_message": "已设置禁言，至 {expire_at}。",
     "global_reject_keywords": "",
     "global_message_reject_keywords": "",
@@ -330,6 +332,8 @@ GLOBAL_INHERIT_POLICY_KEYS = (
     "global_rate_limit_at_member",
     "keyword_reply_cooldown_seconds",
     "keyword_reply_recall_seconds",
+    "verification_message_recall_enabled",
+    "verification_message_timeout_seconds",
 )
 AI_REVIEW_MAX_IMAGES = 3
 
@@ -509,7 +513,8 @@ class QQGroupAdmin(Star):
         self._approval_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._approval_contexts: dict[str, dict[str, Any]] = {}
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
-        self._verification_tokens: dict[str, tuple[float, str, str, int]] = {}
+        self._verification_tokens: dict[str, tuple[Any, ...]] = {}
+        self._verification_recall_tasks: dict[str, asyncio.Task[None]] = {}
         # QQ may deduplicate active messages that reuse botpy's default seq=1.
         self._outbound_message_seq = int(time.time_ns() % MESSAGE_SEQ_MAX) or 1
         self._keyword_reply_ready_at: dict[str, float] = {}
@@ -648,6 +653,8 @@ class QQGroupAdmin(Star):
             self.config[GLOBAL_AI_FALLBACKS_KEY] = []
             changed = True
         for key, default in (
+            ("verification_message_recall_enabled", True),
+            ("verification_message_timeout_seconds", 120),
             (GLOBAL_AI_TIMEOUT_KEY, AI_REVIEW_TOTAL_TIMEOUT_SECONDS),
             (GLOBAL_AI_CONFIRM_PROVIDER_KEY, ""),
             (GLOBAL_AI_IMAGES_KEY, False),
@@ -1009,6 +1016,7 @@ class QQGroupAdmin(Star):
         if recall_tasks:
             await asyncio.gather(*recall_tasks, return_exceptions=True)
         self._recall_tasks.clear()
+        self._verification_recall_tasks.clear()
         media_tasks = tuple(self._media_tasks)
         for task in media_tasks:
             task.cancel()
@@ -1800,17 +1808,27 @@ class QQGroupAdmin(Star):
         *,
         message_id: str = "",
     ) -> None:
+        self._cleanup_tokens()
+        if any(
+            data[0] > time.monotonic()
+            and len(data) >= 3
+            and data[1:3] == (group_openid, member_openid)
+            for data in self._verification_tokens.values()
+        ):
+            return
         left = 2 + secrets.randbelow(8)
         right = 2 + secrets.randbelow(8)
         answer = left + right
         options = [answer, answer - 2, answer - 1, answer + 1]
         secrets.SystemRandom().shuffle(options)
-        previous = {
-            key: value
-            for key, value in self._verification_tokens.items()
-            if value[1:3] == (group_openid, member_openid)
-        }
-        token = self._verification_token(group_openid, member_openid, answer)
+        recall_enabled, timeout_seconds = self._verification_policy(group_openid)
+        token = self._verification_token(
+            group_openid,
+            member_openid,
+            answer,
+            ttl_seconds=timeout_seconds,
+            recall_enabled=recall_enabled,
+        )
         buttons = []
         for index, value in enumerate(options):
             buttons.append(
@@ -1833,9 +1851,8 @@ class QQGroupAdmin(Star):
                 }
             )
         # Some QQ clients render only one line of a keyboard card. Keep every
-        # essential instruction on that line; the distinct text follow-up also
-        # prevents clients that deduplicate identical consecutive messages
-        # from hiding the explanation.
+        # essential instruction on that line. A text message is sent only when
+        # the keyboard request fails, avoiding two visible prompts.
         card_prompt = (
             f"算式：{left} + {right} = ?；"
             "真人验证：这是入群安全验证。请点击下方正确答案按钮；"
@@ -1849,34 +1866,132 @@ class QQGroupAdmin(Star):
         )
         # Do not reuse the triggering message id: QQ treats it as an
         # idempotency/reply key on some clients and silently drops the prompt.
-        prompt_seq = self._next_outbound_message_seq()
         card_seq = self._next_outbound_message_seq()
-        card_sent = False
+        sent_ids: list[str] = []
         try:
-            await self._send_group_markdown(
+            sent = await self._send_group_markdown(
                 client,
                 group_openid,
                 card_prompt,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
                 msg_seq=card_seq,
             )
-            card_sent = True
+            message_id_value = (
+                sent.get("id")
+                if isinstance(sent, dict)
+                else getattr(sent, "id", "")
+            )
+            if message_id_value:
+                sent_ids.append(str(message_id_value))
         except Exception as card_exc:  # noqa: BLE001 - Markdown/keyboard boundary
             self.logger.debug("真人验证按钮卡发送失败，将发送文字提示：%s", card_exc)
-        try:
-            await self._send_group_text(
-                client,
-                group_openid,
-                prompt,
-                msg_seq=prompt_seq,
-            )
-        except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
-            # Keep the token when either form was delivered; numeric answers
-            # remain available when a client cannot render buttons.
-            if not card_sent:
+            try:
+                sent = await self._send_group_text(
+                    client,
+                    group_openid,
+                    prompt,
+                    msg_seq=self._next_outbound_message_seq(),
+                )
+                message_id_value = (
+                    sent.get("id")
+                    if isinstance(sent, dict)
+                    else getattr(sent, "id", "")
+                )
+                if message_id_value:
+                    sent_ids.append(str(message_id_value))
+            except Exception:
                 self._verification_tokens.pop(token, None)
-                self._verification_tokens.update(previous)
-                raise prompt_exc
+                raise
+        if not sent_ids:
+            self._verification_tokens.pop(token, None)
+            raise RuntimeError("真人验证消息发送失败")
+        data = self._verification_tokens.get(token)
+        if data is not None:
+            self._verification_tokens[token] = (
+                *data[:4],
+                tuple(sent_ids),
+                recall_enabled,
+            )
+            if recall_enabled:
+                self._schedule_verification_recall(
+                    client,
+                    token,
+                    group_openid,
+                    tuple(sent_ids),
+                    timeout_seconds,
+                )
+
+    @staticmethod
+    def _verification_message_ids(data: tuple[Any, ...]) -> tuple[str, ...]:
+        if len(data) < 5 or not isinstance(data[4], (list, tuple)):
+            return ()
+        return tuple(str(item) for item in data[4] if str(item or "").strip())
+
+    @staticmethod
+    def _verification_recall_enabled(data: tuple[Any, ...]) -> bool:
+        return bool(data[5]) if len(data) > 5 else True
+
+    def _cancel_verification_recall(self, token: str) -> None:
+        task = self._verification_recall_tasks.pop(token, None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    def _schedule_verification_recall(
+        self,
+        client: Any,
+        token: str,
+        group_openid: str,
+        message_ids: tuple[str, ...],
+        timeout_seconds: int,
+    ) -> None:
+        task = asyncio.create_task(
+            self._recall_verification_after_timeout(
+                client,
+                token,
+                group_openid,
+                message_ids,
+                timeout_seconds,
+            ),
+            name="qqgroup-admin-verification-recall",
+        )
+        self._verification_recall_tasks[token] = task
+        self._recall_tasks.add(task)
+
+        def done(completed: asyncio.Task[None]) -> None:
+            self._recall_tasks.discard(completed)
+            if self._verification_recall_tasks.get(token) is completed:
+                self._verification_recall_tasks.pop(token, None)
+
+        task.add_done_callback(done)
+
+    async def _recall_verification_after_timeout(
+        self,
+        client: Any,
+        token: str,
+        group_openid: str,
+        message_ids: tuple[str, ...],
+        timeout_seconds: int,
+    ) -> None:
+        await asyncio.sleep(timeout_seconds)
+        await self._recall_messages(QQGroupAPI(client), group_openid, list(message_ids))
+        data = self._verification_tokens.get(token)
+        if data is not None and self._verification_message_ids(data) == message_ids:
+            self._verification_tokens.pop(token, None)
+
+    async def _finish_verification(
+        self,
+        client: Any,
+        token: str,
+        data: tuple[Any, ...],
+    ) -> None:
+        self._verification_tokens.pop(token, None)
+        self._cancel_verification_recall(token)
+        if self._verification_recall_enabled(data):
+            message_ids = self._verification_message_ids(data)
+            if message_ids:
+                await self._recall_messages(
+                    QQGroupAPI(client), str(data[1]), list(message_ids)
+                )
 
     async def _consume_verification_answer(
         self,
@@ -1894,13 +2009,14 @@ class QQGroupAdmin(Star):
             (
                 (token, data)
                 for token, data in self._verification_tokens.items()
-                if data[1:3] == (group_openid, member_openid)
+                if data[0] > time.monotonic()
+                and data[1:3] == (group_openid, member_openid)
             ),
             None,
         )
         if token_data is None or int(match.group(1)) != token_data[1][3]:
             return False
-        self._verification_tokens.pop(token_data[0], None)
+        await self._finish_verification(client, token_data[0], token_data[1])
         await self._clear_suspicious(group_openid, member_openid)
         await self._send_group_notice(
             client,
@@ -2018,19 +2134,24 @@ class QQGroupAdmin(Star):
         group_openid: str,
         member_openid: str,
         answer: int,
+        *,
+        ttl_seconds: int = VERIFICATION_TOKEN_TTL,
+        recall_enabled: bool = True,
     ) -> str:
         self._cleanup_tokens()
-        self._verification_tokens = {
-            token: data
-            for token, data in self._verification_tokens.items()
-            if data[1:3] != (group_openid, member_openid)
-        }
+        for old_token, data in tuple(self._verification_tokens.items()):
+            if len(data) >= 3 and data[1:3] == (group_openid, member_openid):
+                self._verification_tokens.pop(old_token, None)
+                self._cancel_verification_recall(old_token)
         token = secrets.token_urlsafe(12)
         self._verification_tokens[token] = (
-            time.monotonic() + VERIFICATION_TOKEN_TTL,
+            time.monotonic()
+            + self._bounded_int(ttl_seconds, VERIFICATION_TOKEN_TTL, 15, 600),
             group_openid,
             member_openid,
             answer,
+            (),
+            bool(recall_enabled),
         )
         return token
 
@@ -2172,14 +2293,16 @@ class QQGroupAdmin(Star):
                         token_data[3],
                     )
             else:
-                self._verification_tokens.pop(parts[1], None)
                 if int(parts[2]) != token_data[3]:
+                    self._verification_tokens.pop(parts[1], None)
+                    self._cancel_verification_recall(parts[1])
                     await self._send_verification_challenge(
                         client,
                         group_openid,
                         clicker,
                     )
                 else:
+                    await self._finish_verification(client, parts[1], token_data)
                     await self._clear_suspicious(group_openid, clicker)
                     await self._send_group_notice(
                         client,
@@ -2593,6 +2716,18 @@ class QQGroupAdmin(Star):
         except (TypeError, ValueError):
             return default
         return min(maximum, max(minimum, value))
+
+    def _verification_policy(self, group_openid: str) -> tuple[bool, int]:
+        policy = self._global_policy_for_group(group_openid)
+        return (
+            bool(self._policy_value(policy, "verification_message_recall_enabled")),
+            self._bounded_int(
+                self._policy_value(policy, "verification_message_timeout_seconds"),
+                120,
+                15,
+                600,
+            ),
+        )
 
     def _moderation_settings(self, entry: dict[str, Any] | None) -> dict[str, Any]:
         entry = entry or {}
@@ -3703,6 +3838,21 @@ class QQGroupAdmin(Star):
         return value if isinstance(value, dict) else {}
 
     @staticmethod
+    def _voice_asr_text(event: AstrMessageEvent) -> str:
+        """Read QQ's native voice transcription from the preserved payload."""
+
+        values: list[str] = []
+        for attachment in QQGroupAdmin._raw_data(event).get("attachments") or []:
+            if not isinstance(attachment, dict):
+                continue
+            value = " ".join(
+                str(attachment.get("asr_refer_text") or "").split()
+            ).strip()
+            if value:
+                values.append(value[:2_000])
+        return "\n".join(dict.fromkeys(values))[:4_000]
+
+    @staticmethod
     def _message_role(event: AstrMessageEvent) -> str:
         author = QQGroupAdmin._raw_data(event).get("author")
         return (
@@ -3791,13 +3941,18 @@ class QQGroupAdmin(Star):
         """Keep real text while dropping QQ media placeholders from AI review."""
 
         components = list(getattr(event.message_obj, "message", None) or [])
+        voice_text = QQGroupAdmin._voice_asr_text(event)
         if components:
-            return "\n".join(
+            values = [
                 str(getattr(component, "text", "") or "").strip()
                 for component in components
                 if type(component).__name__ == "Plain"
                 and str(getattr(component, "text", "") or "").strip()
-            )[:4000]
+            ]
+            joined = "\n".join(values)
+            if voice_text and voice_text.casefold() not in joined.casefold():
+                values.append(f"[语音转文字]\n{voice_text}")
+            return "\n".join(values)[:4000]
         cleaned = re.sub(
             r"\[(?:表情|Face):\[?[^\]\r\n]+\]?\]",
             " ",
@@ -3807,6 +3962,8 @@ class QQGroupAdmin(Star):
         cleaned = re.sub(
             r"\[(?:图片|Image)\]", " ", cleaned, flags=re.IGNORECASE
         )
+        if voice_text and voice_text.casefold() not in cleaned.casefold():
+            cleaned = f"{cleaned}\n[语音转文字]\n{voice_text}"
         return " ".join(cleaned.split())[:4000]
 
     async def _image_ocr_text(
@@ -4153,11 +4310,14 @@ class QQGroupAdmin(Star):
         total_timeout = self._bounded_int(
             timeout_seconds, AI_REVIEW_TOTAL_TIMEOUT_SECONDS, 5, 120
         )
+        # The configured budget covers media preparation as well as every
+        # provider attempt; otherwise image normalization can silently add
+        # several seconds before the model timeout starts.
+        deadline = time.monotonic() + total_timeout
         vision_urls = []
         if image_review_enabled:
-            preprocess_deadline = time.monotonic() + 3 * AI_REVIEW_MAX_IMAGES
             for url in list(dict.fromkeys(image_urls))[:AI_REVIEW_MAX_IMAGES]:
-                remaining = preprocess_deadline - time.monotonic()
+                remaining = deadline - time.monotonic()
                 if remaining <= 0.5:
                     break
                 if is_remote_gif_ref(url) or self._event_marks_gif(event, url):
@@ -4178,7 +4338,6 @@ class QQGroupAdmin(Star):
                     self.logger.debug("跳过无法安全转换的 GIF 图片")
         if not review_text and not vision_urls:
             return False
-        deadline = time.monotonic() + total_timeout
         prompt = (
             "审核以下 QQ 群消息。只有在明确的色情、暴力威胁、违法交易、诈骗引流、"
             "严重人身攻击/隐私泄露，或明确煽动自伤他伤时才拦截。普通吐槽、轻度脏话、"
@@ -4224,14 +4383,28 @@ class QQGroupAdmin(Star):
                     vision_error = any(
                         marker in error_text
                         for marker in (
-                            "vision",
-                            "multimodal",
-                            "image",
-                            "attachment",
-                            "media",
-                            "图片",
-                            "图像",
-                            "视觉",
+                            "does not support vision",
+                            "doesn't support vision",
+                            "vision is not supported",
+                            "vision not supported",
+                            "does not support multimodal",
+                            "doesn't support multimodal",
+                            "multimodal is not supported",
+                            "multimodal not supported",
+                            "does not support multi-modal",
+                            "multi-modal is not supported",
+                            "does not support image",
+                            "doesn't support image",
+                            "image input is not supported",
+                            "image input not supported",
+                            "images are not supported",
+                            "images not supported",
+                            "不支持视觉",
+                            "不支持多模态",
+                            "不支持图片输入",
+                            "不支持图像输入",
+                            "视觉输入不支持",
+                            "图片输入不支持",
                         )
                     )
                     if (
@@ -4553,6 +4726,9 @@ class QQGroupAdmin(Star):
             else str(getattr(author, "username", "") or "")
         )
         text = str(event.get_message_str() or "").strip()
+        voice_text = self._voice_asr_text(event)
+        if voice_text and voice_text.casefold() not in text.casefold():
+            text = f"{text}\n[语音转文字]\n{voice_text}".strip()
         images = self._image_urls(event)
         uid = self._uid_for_member(group_openid, member_openid)
         if hasattr(event, "stop_event"):
@@ -4810,6 +4986,8 @@ class QQGroupAdmin(Star):
             try:
                 self._cleanup_tokens()
                 if not any(
+                    data[0] > time.monotonic()
+                    and
                     data[1:3] == (group_openid, member_openid)
                     for data in self._verification_tokens.values()
                 ):
@@ -4827,6 +5005,9 @@ class QQGroupAdmin(Star):
             if not failed:
                 self._moderation.remember(delivery_key, True)
             return
+        voice_text = self._voice_asr_text(event)
+        if voice_text and voice_text.casefold() not in text.casefold():
+            text = f"{text}\n[语音转文字]\n{voice_text}".strip()
         if (
             (
                 not local_review_enabled
@@ -5690,6 +5871,7 @@ class QQGroupAdmin(Star):
 
         entry = self._group_config(group_openid, required=True)
         settings = self._moderation_settings(entry)
+        verification_recall, verification_timeout = self._verification_policy(group_openid)
         rows = [
             {
                 "buttons": [
@@ -5732,6 +5914,7 @@ class QQGroupAdmin(Star):
             f"图片阈值：{settings['image_count']} 条/{settings['image_window']} 秒；"
             f"跨成员至少 {settings['image_group_min_members']} 人\n"
             f"兜底真人验证：{'开' if entry.get('fallback_human_verify_enabled') else '关'}；"
+            f"验证消息{'自动撤回' if verification_recall else '保留'}；超时 {verification_timeout} 秒\n"
             "关键词和阈值请在插件页面配置。"
         )
         sent = await self._send_group_markdown(
@@ -7423,15 +7606,14 @@ class QQGroupAdmin(Star):
         key = self._member_state_key(group_openid, member_openid)
         if self._suspicious_members.pop(key, None) is None:
             raise LookupError("找不到该待验证成员")
-        self._verification_tokens = {
-            token: data
-            for token, data in self._verification_tokens.items()
-            if not (
+        for token, data in tuple(self._verification_tokens.items()):
+            if (
                 len(data) >= 3
                 and str(data[1]) == group_openid
                 and str(data[2]) == member_openid
-            )
-        }
+            ):
+                self._verification_tokens.pop(token, None)
+                self._cancel_verification_recall(token)
         await self._save_state()
         return {"group_openid": group_openid, "member_openid": member_openid}
 

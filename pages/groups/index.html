@@ -204,6 +204,9 @@
             <label><span>审核轮询间隔（秒）</span><input id="runtime-review-interval" type="number" min="15" max="600" required></label>
             <label class="checkbox runtime-toggle"><input id="runtime-settings-command" type="checkbox"><span>启用群内审核设置命令</span></label>
             <label class="checkbox runtime-toggle"><input id="runtime-panel-recall" type="checkbox"><span>审核设置面板自动撤回</span></label>
+            <div class="section-title wide">真人验证消息</div>
+            <label class="checkbox runtime-toggle"><input id="runtime-verification-recall" type="checkbox"><span>验证完成或超时后撤回验证消息</span></label>
+            <label><span>验证超时（秒）</span><input id="runtime-verification-timeout" type="number" min="15" max="600" required><small>超时后下次发言会重新出题；按当前策略覆盖群生效。</small></label>
             <label class="wide"><span>全局入群拒绝关键词</span><textarea id="runtime-global-reject-keywords" rows="4" placeholder="每行一个关键词"></textarea></label>
 
             <div class="section-title wide">消息与禁言</div>
