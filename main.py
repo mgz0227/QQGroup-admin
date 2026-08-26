@@ -4082,6 +4082,28 @@ class QQGroupAdmin(Star):
             return response.get(name)
         return getattr(response, name, None)
 
+    def _provider_supports_image_input(self, provider_id: str) -> bool | None:
+        """Resolve explicit provider/model image capability without network calls."""
+
+        getter = getattr(self.context, "get_provider_by_id", None)
+        if not callable(getter):
+            return None
+        try:
+            provider = getter(provider_id)
+            config = getattr(provider, "provider_config", None)
+        except Exception:  # noqa: BLE001 - capability is an optional hint
+            return None
+        if not isinstance(config, dict) or "modalities" not in config:
+            return None
+        modalities = config.get("modalities")
+        if isinstance(modalities, dict):
+            modalities = modalities.get("input")
+        if isinstance(modalities, str):
+            modalities = re.split(r"[^a-z0-9_]+", modalities.lower())
+        if not isinstance(modalities, (list, tuple, set)):
+            return None
+        return "image" in {str(item).strip().lower() for item in modalities}
+
     @classmethod
     def _ai_response_error(cls, response: Any) -> str:
         """Extract a useful, redacted error from ``role=err`` responses."""
@@ -4249,6 +4271,16 @@ class QQGroupAdmin(Star):
         for index, current_provider_id in enumerate(candidates):
             if not current_provider_id:
                 continue
+            if (
+                vision_urls
+                and self._provider_supports_image_input(current_provider_id) is False
+            ):
+                errors.append(f"{current_provider_id}: 不支持图片输入")
+                self.logger.debug(
+                    "跳过不支持图片输入的 AI 审核模型：provider=%s",
+                    current_provider_id,
+                )
+                continue
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 errors.append("达到 AI 审核总超时")
@@ -4327,6 +4359,11 @@ class QQGroupAdmin(Star):
 
                 if confirm_provider in candidates:
                     return confirmation_failed("确认模型与初判候选模型重复")
+                if (
+                    vision_urls
+                    and self._provider_supports_image_input(confirm_provider) is False
+                ):
+                    return confirmation_failed("确认模型不支持图片输入")
                 confirm_remaining = deadline - time.monotonic()
                 if confirm_remaining <= 0:
                     return confirmation_failed("达到 AI 审核总超时")

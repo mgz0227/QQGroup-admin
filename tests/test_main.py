@@ -3444,6 +3444,73 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[0].kwargs["image_urls"], ["vision-ref"])
         self.assertEqual(calls[1].kwargs["image_urls"], ["vision-ref"])
 
+    async def test_ai_image_review_skips_explicit_text_only_provider(self):
+        plugin, client = self.plugin()
+        text_only = SimpleNamespace(
+            provider_config={"model": "deepseek-v4-pro", "modalities": "text tool_use"},
+            meta=lambda: SimpleNamespace(model="deepseek-v4-pro"),
+        )
+        visual = SimpleNamespace(
+            provider_config={"model": "vision-model", "modalities": "text image"},
+            meta=lambda: SimpleNamespace(model="vision-model"),
+        )
+        plugin.context.get_provider_by_id = lambda provider_id: {
+            "text-only": text_only,
+            "visual": visual,
+        }.get(provider_id)
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant",
+                completion_text="BLOCK confidence=99 reason=图片内容",
+            )
+        )
+
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "text-only",
+                ["visual"],
+                image_review_enabled=True,
+            )
+
+        self.assertTrue(blocked)
+        plugin.context.llm_generate.assert_awaited_once()
+        self.assertEqual(
+            plugin.context.llm_generate.await_args.kwargs["chat_provider_id"],
+            "visual",
+        )
+        self.assertEqual(
+            plugin.context.llm_generate.await_args.kwargs["image_urls"],
+            ["vision-ref"],
+        )
+
+    async def test_ai_image_review_keeps_unknown_provider_compatible(self):
+        plugin, client = self.plugin()
+        plugin.context.get_provider_by_id = lambda _provider_id: None
+        plugin.context.llm_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                role="assistant", completion_text="ALLOW confidence=99 reason=正常"
+            )
+        )
+
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "unknown",
+                image_review_enabled=True,
+            )
+
+        self.assertFalse(blocked)
+        plugin.context.llm_generate.assert_awaited_once()
+
     async def test_ai_image_preprocessing_does_not_consume_provider_timeout(self):
         plugin, client = self.plugin()
         clock = [0.0]
