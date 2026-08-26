@@ -1386,8 +1386,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         await plugin.web_save_global_policies({"profiles": profiles})
         self.assertEqual(plugin.config["global_ai_review_provider_id"], "primary-one")
         self.assertEqual(
-            [item["global_ai_review_provider_id"] for item in plugin.config["global_policy_profiles"]],
-            ["primary-one", "primary-one"],
+            [item.get("global_ai_review_provider_id") for item in plugin.config["global_policy_profiles"]],
+            [None, None],
         )
 
     async def test_global_policy_save_rejects_empty_profiles_without_erasing(self):
@@ -1467,6 +1467,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(saved["global_ai"]["global_image_ocr_enabled"])
         self.assertEqual(saved["global_ai"]["global_image_ocr_provider_id"], "vision-ocr")
         self.assertEqual(plugin.config["global_ai_review_provider_id"], "global-primary")
+        self.assertTrue(
+            all(
+                "global_ai_review_provider_id" not in item
+                for item in plugin.config["global_policy_profiles"]
+            )
+        )
         self.assertEqual(
             {item["global_ai_review_provider_id"] for item in saved["profiles"]},
             {"global-primary"},
@@ -5096,6 +5102,97 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("欢迎 新人 加入 测试群", message["markdown"]["content"])
         self.assertIn("UID=188144093", message["markdown"]["content"])
         self.assertIn('<qqbot-at-user id="member-1" />', message["markdown"]["content"])
+
+    async def test_external_approval_welcome_is_sent_once_from_pending_cache(self):
+        plugin, client = self.plugin()
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "外部审批欢迎",
+                "message": "欢迎 {username} 加入 {group_name}",
+                "group_openids": ["group-1"],
+                "enabled": True,
+            }
+        ]
+        plugin._remember_welcome_request(
+            "group-1",
+            "member-1",
+            {"username": "申请人", "join_request_id": "request-1"},
+        )
+
+        self.assertTrue(
+            await plugin._send_pending_welcome(
+                client,
+                "group-1",
+                "member-1",
+                username="入群昵称",
+            )
+        )
+        self.assertFalse(
+            await plugin._send_pending_welcome(
+                client,
+                "group-1",
+                "member-1",
+                username="入群昵称",
+            )
+        )
+        self.assertEqual(len(client.api.messages), 1)
+        self.assertIn("欢迎 入群昵称 加入", client.api.messages[0]["content"])
+
+    async def test_welcome_poll_caches_native_approval_request(self):
+        plugin, client = self.plugin()
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "原生审批欢迎",
+                "message": "欢迎 {username}",
+                "group_openids": ["group-1"],
+                "enabled": True,
+            }
+        ]
+        request = {
+            "username": "原生用户",
+            "member_openid": "member-1",
+            "join_request_id": "request-1",
+        }
+        api = SimpleNamespace(
+            list_join_requests=AsyncMock(
+                return_value={"list": [request], "next_cursor": "next"}
+            )
+        )
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            await plugin._poll_welcome_group(client, "platform-1", "group-1")
+
+        self.assertEqual(
+            plugin._welcome_request_for_member("group-1", "member-1"),
+            request,
+        )
+        self.assertEqual(plugin._welcome_poll_cursors[("platform-1", "group-1")], "next")
+
+    async def test_first_member_message_triggers_pending_welcome(self):
+        plugin, client = self.plugin()
+        plugin.config["welcome_rules"] = [
+            {
+                "name": "首次发言欢迎",
+                "message": "欢迎 {username}",
+                "group_openids": ["group-1"],
+                "enabled": True,
+            }
+        ]
+        plugin._remember_welcome_request(
+            "group-1",
+            "member-1",
+            {"username": "申请人", "join_request_id": "request-1"},
+        )
+        event = FakeEvent(client, message_str="大家好")
+        event.is_at_or_wake_command = True
+        event.message_obj.message_id = "first-message"
+        event.message_obj.raw_message.author = SimpleNamespace(
+            member_openid="member-1", username="新人"
+        )
+
+        await plugin._audit_group_message_impl(event)
+
+        self.assertEqual(len(client.api.messages), 1)
+        self.assertIn("欢迎 新人", client.api.messages[0]["content"])
 
     async def test_button_approval_sends_welcome_with_request_context(self):
         plugin, client = self.plugin()

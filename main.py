@@ -74,6 +74,8 @@ VERIFICATION_TOKEN_TTL = 5 * 60
 MESSAGE_SEQ_MAX = 2_000_000_000
 JOIN_LIST_LIMIT = 5
 RECENT_RECALL_LIMIT = 50
+WELCOME_PENDING_TTL = 24 * 60 * 60
+WELCOME_PENDING_LIMIT = 2_000
 COMMAND_PANEL_REMARK = "astrbot_plugin_qqgroup_admin managed"
 COMMAND_PANEL = {
     "items": [
@@ -266,6 +268,12 @@ GLOBAL_POLICY_DEFAULTS = {
     "keyword_reply_cooldown_seconds": 0,
     "keyword_reply_recall_seconds": 0,
 }
+
+# AI/OCR controls are stored once at the plugin top level.  Keep this list for
+# profile writes so a scoped policy can never create a second, misleading copy.
+GLOBAL_SCOPED_POLICY_KEYS = tuple(
+    key for key in GLOBAL_POLICY_DEFAULTS if key not in GLOBAL_AI_POLICY_KEYS
+)
 
 # Keep top-level runtime controls alongside the list snapshots.  These values
 # are user-owned too, but must never include bilibili_cookie or other secrets.
@@ -527,9 +535,13 @@ class QQGroupAdmin(Star):
         self._keyword_reply_ready_at: dict[str, float] = {}
         self._bilibili_logins: dict[str, BilibiliQRLogin] = {}
         self._poll_cursors: dict[tuple[str, str], str] = {}
+        self._welcome_poll_cursors: dict[tuple[str, str], str] = {}
         self._permission_diagnostics: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
         self._welcome_sent_at: dict[tuple[str, str, int], float] = {}
+        self._welcome_pending: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
+        self._welcome_inflight: set[tuple[str, str]] = set()
+        self._welcome_poll_warning_at: dict[tuple[str, str], float] = {}
         self._bilibili_retry_at = 0.0
         self._bilibili_live_retry_at = 0.0
         self._bilibili_dynamic_retry_at: dict[str, float] = {}
@@ -662,6 +674,18 @@ class QQGroupAdmin(Star):
         if GLOBAL_AI_CONFIRM_FALLBACKS_KEY not in self.config:
             self.config[GLOBAL_AI_CONFIRM_FALLBACKS_KEY] = []
             changed = True
+        # A previous WebUI stored global AI/OCR values inside every scoped
+        # profile.  Keep the top-level value and remove only copies for which
+        # a canonical top-level setting already exists.
+        configured_profiles = self.config.get(GLOBAL_POLICIES_KEY)
+        if isinstance(configured_profiles, list):
+            for profile in configured_profiles:
+                if not isinstance(profile, dict):
+                    continue
+                for key in GLOBAL_AI_POLICY_KEYS:
+                    if key in self.config and key in profile:
+                        profile.pop(key, None)
+                        changed = True
         for key, default in (
             ("verification_message_recall_enabled", True),
             ("verification_message_timeout_seconds", 120),
@@ -1066,6 +1090,10 @@ class QQGroupAdmin(Star):
         self._keyword_reply_ready_at.clear()
         self._approval_contexts.clear()
         self._welcome_sent_at.clear()
+        self._welcome_pending.clear()
+        self._welcome_inflight.clear()
+        self._welcome_poll_warning_at.clear()
+        self._welcome_poll_cursors.clear()
         if self._violation_flush_task:
             self._violation_flush_task.cancel()
             with suppress(asyncio.CancelledError):
@@ -1511,6 +1539,47 @@ class QQGroupAdmin(Star):
             )
         ]
 
+    def _remember_welcome_request(
+        self,
+        group_openid: str,
+        member_openid: str,
+        request: dict[str, Any],
+    ) -> None:
+        """Retain a short-lived application for approvals outside the plugin."""
+
+        if not group_openid or not member_openid or not self._welcome_rules_for_group(
+            group_openid
+        ):
+            return
+        now = time.monotonic()
+        self._welcome_pending[(group_openid, member_openid)] = (
+            now + WELCOME_PENDING_TTL,
+            dict(request),
+        )
+        if len(self._welcome_pending) > WELCOME_PENDING_LIMIT:
+            for key, (expires_at, _request) in tuple(self._welcome_pending.items()):
+                if expires_at <= now:
+                    self._welcome_pending.pop(key, None)
+            while len(self._welcome_pending) > WELCOME_PENDING_LIMIT:
+                self._welcome_pending.pop(next(iter(self._welcome_pending)))
+
+    def _welcome_request_for_member(
+        self,
+        group_openid: str,
+        member_openid: str,
+    ) -> dict[str, Any] | None:
+        key = (group_openid, member_openid)
+        cached = self._welcome_pending.get(key)
+        if cached is None:
+            return None
+        if cached[0] <= time.monotonic():
+            self._welcome_pending.pop(key, None)
+            return None
+        return dict(cached[1])
+
+    def _forget_welcome_request(self, group_openid: str, member_openid: str) -> None:
+        self._welcome_pending.pop((group_openid, member_openid), None)
+
     @staticmethod
     def _welcome_render(
         template: str,
@@ -1547,71 +1616,173 @@ class QQGroupAdmin(Star):
         username: str = "",
         group_name: str = "",
         request: dict[str, Any] | None = None,
-    ) -> None:
-        # A stored rule may outlive a temporary unbound state; do not execute
-        # it until the group is configured again.
-        if self._group_config(group_openid) is None:
-            return
+    ) -> bool:
         rules = self._welcome_rules_for_group(group_openid)
         if not rules:
-            return
+            return False
+        pending_key = (group_openid, member_openid)
+        if pending_key in self._welcome_inflight:
+            return False
+        self._welcome_inflight.add(pending_key)
         request = request or {}
         entry = self._group_config(group_openid) or {}
-        group_name = str(group_name or entry.get("group_name") or group_openid)
+        group_name = str(
+            group_name
+            or entry.get("group_name")
+            or request.get("group_name")
+            or group_openid
+        )
         username = str(username or request.get("username") or "").strip()
         uid = str(request.get("uid") or "").strip() or self._uid_for_member(
             group_openid, member_openid
         )
         now = time.monotonic()
-        for index, rule in rules:
-            sent_key = (group_openid, member_openid, index)
-            if now - self._welcome_sent_at.get(sent_key, 0.0) < 30:
-                continue
-            at_member = bool(
-                rule.get("at_member", "{at_user}" in str(rule.get("message") or ""))
-            )
-            text = self._welcome_render(
-                str(rule.get("message") or ""),
-                group_name=group_name,
-                group_openid=group_openid,
-                member_openid=member_openid,
-                username=username,
-                uid=uid,
-                at_member=at_member,
-            )
-            if not text:
-                continue
-            try:
-                sent = await self._send_group_notice(
-                    client,
-                    group_openid,
-                    text,
-                    member_openid=member_openid if at_member else "",
+        sent_any = False
+        try:
+            for index, rule in rules:
+                sent_key = (group_openid, member_openid, index)
+                if now - self._welcome_sent_at.get(sent_key, 0.0) < 30:
+                    continue
+                at_member = bool(
+                    rule.get("at_member", "{at_user}" in str(rule.get("message") or ""))
                 )
-                self._welcome_sent_at[sent_key] = time.monotonic()
+                text = self._welcome_render(
+                    str(rule.get("message") or ""),
+                    group_name=group_name,
+                    group_openid=group_openid,
+                    member_openid=member_openid,
+                    username=username,
+                    uid=uid,
+                    at_member=at_member,
+                )
+                if not text:
+                    continue
                 try:
-                    recall = int(rule.get("auto_recall_seconds") or 0)
-                except (TypeError, ValueError):
-                    recall = 0
-                sent_id = str(
-                    sent.get("id")
-                    if isinstance(sent, dict)
-                    else getattr(sent, "id", "") or ""
-                )
-                if recall and sent_id:
-                    self._schedule_recall(
+                    sent = await self._send_group_notice(
                         client,
                         group_openid,
-                        sent_id,
-                        min(120, max(0, recall)),
-                        "welcome",
+                        text,
+                        member_openid=member_openid if at_member else "",
                     )
-            except Exception as exc:  # noqa: BLE001 - welcome must not affect approval
-                self.logger.warning(
-                    "发送入群欢迎消息失败：group=%s member=%s error=%s",
+                    if sent is None:
+                        continue
+                    self._welcome_sent_at[sent_key] = time.monotonic()
+                    sent_any = True
+                    try:
+                        recall = int(rule.get("auto_recall_seconds") or 0)
+                    except (TypeError, ValueError):
+                        recall = 0
+                    sent_id = str(
+                        sent.get("id")
+                        if isinstance(sent, dict)
+                        else getattr(sent, "id", "") or ""
+                    )
+                    if recall and sent_id:
+                        self._schedule_recall(
+                            client,
+                            group_openid,
+                            sent_id,
+                            min(120, max(0, recall)),
+                            "welcome",
+                        )
+                except Exception as exc:  # noqa: BLE001 - welcome must not affect approval
+                    self.logger.warning(
+                        "发送入群欢迎消息失败：group=%s member=%s error=%s",
+                        group_openid,
+                        member_openid,
+                        exc,
+                    )
+        finally:
+            self._welcome_inflight.discard(pending_key)
+        if sent_any:
+            self._forget_welcome_request(group_openid, member_openid)
+        return sent_any
+
+    async def _send_pending_welcome(
+        self,
+        client: Any,
+        group_openid: str,
+        member_openid: str,
+        *,
+        username: str = "",
+    ) -> bool:
+        request = self._welcome_request_for_member(group_openid, member_openid)
+        if request is None:
+            return False
+        return await self._send_welcome_messages(
+            client,
+            group_openid,
+            member_openid,
+            username=username,
+            request=request,
+        )
+
+    def _welcome_candidate_entries(self) -> list[tuple[str, str]]:
+        """Return bound groups whose welcome rules need an approval fallback."""
+
+        entries = self.config.get("auto_review_groups") or []
+        if not isinstance(entries, list):
+            return []
+        result: list[tuple[str, str]] = []
+        seen: set[tuple[str, str]] = set()
+        for entry in entries:
+            if not isinstance(entry, dict):
+                continue
+            group_openid = str(entry.get("group_openid") or "").strip()
+            platform_id = str(entry.get("platform_id") or "").strip()
+            key = (platform_id, group_openid)
+            if not all(key) or key in seen or not self._welcome_rules_for_group(
+                group_openid
+            ):
+                continue
+            seen.add(key)
+            result.append(key)
+        return result
+
+    async def _poll_welcome_group(
+        self,
+        client: Any,
+        platform_id: str,
+        group_openid: str,
+    ) -> None:
+        """Cache pending applications for groups using manual/native approval.
+
+        QQ/AstrBot does not expose a member-joined event.  The pending list is
+        therefore only a short-lived bridge; the actual welcome is sent when
+        the approved member's first message arrives.
+        """
+
+        key = (platform_id, group_openid)
+        cursor = self._welcome_poll_cursors.get(key, "")
+        try:
+            data = await QQGroupAPI(client).list_join_requests(
+                group_openid,
+                limit=100,
+                cursor=cursor,
+            )
+        except (QQAPIError, AttributeError, TypeError, ValueError, RuntimeError) as exc:
+            if cursor:
+                self._welcome_poll_cursors.pop(key, None)
+            now = time.monotonic()
+            if now - self._welcome_poll_warning_at.get(key, 0.0) >= 600:
+                self._welcome_poll_warning_at[key] = now
+                self.logger.debug(
+                    "欢迎补发无法读取入群申请：group=%s platform=%s error=%s",
+                    group_openid,
+                    platform_id,
+                    exc,
+                )
+            return
+        self._welcome_poll_cursors[key] = str(data.get("next_cursor") or "")
+        for request in data.get("list") or []:
+            if not isinstance(request, dict):
+                continue
+            member_openid = str(request.get("member_openid") or "").strip()
+            if member_openid:
+                self._remember_welcome_request(
                     group_openid,
                     member_openid,
-                    exc,
+                    request,
                 )
 
     @staticmethod
@@ -2648,7 +2819,13 @@ class QQGroupAdmin(Star):
                         for key, value in inherited.items()
                         if key in GLOBAL_INHERIT_POLICY_KEYS and key not in policy
                     },
-                    **policy,
+                    # Old saves may still contain AI/OCR fields.  Ignore those
+                    # copies at read time; the top-level policy is authoritative.
+                    **{
+                        key: value
+                        for key, value in policy.items()
+                        if key not in GLOBAL_AI_POLICY_KEYS
+                    },
                 }
         return {}
 
@@ -2674,7 +2851,7 @@ class QQGroupAdmin(Star):
             created = {
                 key_name: (list(item) if isinstance(item, list) else item)
                 for key_name, item in template.items()
-                if key_name in GLOBAL_POLICY_DEFAULTS
+                if key_name in GLOBAL_SCOPED_POLICY_KEYS
             }
             created.update(
                 {
@@ -3257,6 +3434,14 @@ class QQGroupAdmin(Star):
             join_request_id = str(request.get("join_request_id") or "")
             if not member_openid or not join_request_id:
                 continue
+            # Keep the request before processing it.  If a QQ-native strategy
+            # or an administrator approves it outside this plugin, the first
+            # member message can still trigger the configured welcome.
+            self._remember_welcome_request(
+                group_openid,
+                member_openid,
+                request,
+            )
             verified_uid: str | None = None
             approved_by_conditions = False
             fallback_approved = False
@@ -3374,6 +3559,8 @@ class QQGroupAdmin(Star):
                 group_openid,
                 join_request_id,
             )
+            if op != "approve":
+                self._forget_welcome_request(group_openid, member_openid)
             if op == "approve":
                 try:
                     await self._send_welcome_messages(
@@ -3463,10 +3650,12 @@ class QQGroupAdmin(Star):
         while True:
             try:
                 clients = self._platform_clients()
+                polled: set[tuple[str, str]] = set()
                 for platform_id, group_openid, settings in self._uid_review_entries():
                     client = clients.get(platform_id)
                     if client is None:
                         continue
+                    polled.add((platform_id, group_openid))
                     try:
                         await self._poll_uid_group(
                             client,
@@ -3487,6 +3676,21 @@ class QQGroupAdmin(Star):
                             group_openid,
                             exc,
                         )
+                    await asyncio.sleep(2.1)
+                # Native QQ approval and manual approval have no member-add
+                # event in AstrBot.  Poll only groups with a welcome rule and
+                # reuse the existing low-frequency join-request budget.
+                for platform_id, group_openid in self._welcome_candidate_entries():
+                    if (platform_id, group_openid) in polled:
+                        continue
+                    client = clients.get(platform_id)
+                    if client is None:
+                        continue
+                    await self._poll_welcome_group(
+                        client,
+                        platform_id,
+                        group_openid,
+                    )
                     await asyncio.sleep(2.1)
             except Exception as exc:  # noqa: BLE001 - keep the background task alive
                 self.logger.warning("QQ 入群审核后台任务本轮失败：%s", exc)
@@ -5031,6 +5235,28 @@ class QQGroupAdmin(Star):
             if hasattr(event, "stop_event"):
                 event.stop_event()
             return
+        # A normal member-add event is not exposed by the current QQ adapter.
+        # Complete welcomes for approvals observed outside the plugin on the
+        # member's first message, with an in-memory one-shot guard.
+        if self._welcome_request_for_member(group_openid, member_openid) is not None:
+            raw_author = getattr(raw, "author", None)
+            username = str(getattr(raw_author, "username", "") or "").strip()
+            if not username and isinstance(author, dict):
+                username = str(author.get("username") or "").strip()
+            try:
+                await self._send_pending_welcome(
+                    self._client(event),
+                    group_openid,
+                    member_openid,
+                    username=username,
+                )
+            except Exception as exc:  # noqa: BLE001 - welcome is best effort
+                self.logger.warning(
+                    "补发入群欢迎消息失败：group=%s member=%s error=%s",
+                    group_openid,
+                    member_openid,
+                    exc,
+                )
         role = self._message_role(event)
         text = str(event.get_message_str() or "").strip()
         if not bool(getattr(event, "is_at_or_wake_command", False)):
@@ -7109,7 +7335,7 @@ class QQGroupAdmin(Star):
                 "enabled": bool(raw.get("enabled", True)),
                 "group_openids": list(raw.get("group_openids") or []),
             }
-            for key in GLOBAL_POLICY_DEFAULTS:
+            for key in GLOBAL_SCOPED_POLICY_KEYS:
                 if (
                     key in GLOBAL_MEDIA_POLICY_KEYS
                     and key in legacy_values
@@ -7117,9 +7343,7 @@ class QQGroupAdmin(Star):
                     and raw.get(key) == legacy_values[key]
                 ):
                     continue
-                value = global_ai_values[key] if key in GLOBAL_AI_POLICY_KEYS else raw.get(
-                    key, GLOBAL_POLICY_DEFAULTS[key]
-                )
+                value = raw.get(key, GLOBAL_POLICY_DEFAULTS[key])
                 profile[key] = list(value) if isinstance(value, list) else value
             profiles.append(profile)
         self.config[GLOBAL_POLICIES_KEY] = profiles
@@ -7135,7 +7359,7 @@ class QQGroupAdmin(Star):
             None,
         )
         if legacy_profile is not None:
-            for key in GLOBAL_POLICY_DEFAULTS:
+            for key in GLOBAL_SCOPED_POLICY_KEYS:
                 self.config[key] = legacy_profile.get(
                     key, GLOBAL_POLICY_DEFAULTS[key]
                 )
