@@ -2172,7 +2172,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 await plugin.audit_group_message(event)
         self.assertTrue(event.stopped)
         api.set_member_mutes.assert_awaited_once()
-        api.recall_group_message.assert_awaited_once_with("group-1", "repeat-3")
+        self.assertEqual(
+            [item.args for item in api.recall_group_message.await_args_list],
+            [("group-1", "repeat-1"), ("group-1", "repeat-2"), ("group-1", "repeat-3")],
+        )
 
     async def test_global_rate_limit_runs_when_local_audit_is_disabled(self):
         plugin, client = self.plugin()
@@ -2545,7 +2548,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 )
                 await plugin.audit_group_message(event)
 
-        self.assertEqual([item[0] for item in order], ["mute", "notice", "recall"])
+        self.assertEqual(
+            [item[0] for item in order],
+            ["mute", "notice", "recall", "recall", "recall"],
+        )
         self.assertEqual(
             order[0][1],
             (
@@ -2560,7 +2566,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ),
         )
         self.assertEqual(order[1][1]["content"], "复读成员已禁言 17 秒。")
-        self.assertEqual(order[2][1], ("group-1", "message-3"))
+        self.assertEqual(
+            [item[1] for item in order[2:]],
+            [("group-1", "message-1"), ("group-1", "message-2"), ("group-1", "message-3")],
+        )
 
     async def test_repeat_mute_failure_does_not_send_success_notice(self):
         plugin, client = self.plugin()

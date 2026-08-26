@@ -106,6 +106,7 @@ class ModerationWindowsTest(unittest.TestCase):
             ),
             ["u1", "u2"],
         )
+        self.assertEqual(state.consume_repeat_message_ids("g"), ["m1", "m2", "m3"])
 
         state = ModerationWindows()
         state.add_repeat("g", "x", "u1", "member", "m1", threshold=3, window=10, now=1)

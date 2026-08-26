@@ -4829,7 +4829,10 @@ class QQGroupAdmin(Star):
                 reason = "检测到集中复读，已随机禁言一名参与者。"
                 warn_text = settings["repeat_reply"]
                 warn_at_member = settings["repeat_at"]
-                recall_ids = [message_id]
+                recall_ids = (
+                    self._moderation.consume_repeat_message_ids(group_openid)
+                    or [message_id]
+                )
         else:
             self._moderation.break_repeat(group_openid)
         if (

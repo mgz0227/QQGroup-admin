@@ -29,6 +29,7 @@ class ModerationWindows:
             defaultdict(list)
         )
         self.repeat_last_signature: dict[str, str] = {}
+        self.repeat_recall_ids: dict[str, list[str]] = {}
         self.rates: dict[tuple[str, str], list[tuple[float, str]]] = defaultdict(list)
 
     def duplicate(
@@ -224,6 +225,16 @@ class ModerationWindows:
             self.repeats[key] = [
                 event for event in self.repeats[key] if event[3] not in removed
             ]
+        if group_openid in self.repeat_recall_ids:
+            remaining = [
+                message_id
+                for message_id in self.repeat_recall_ids[group_openid]
+                if message_id not in removed
+            ]
+            if remaining:
+                self.repeat_recall_ids[group_openid] = remaining
+            else:
+                self.repeat_recall_ids.pop(group_openid, None)
         for key in [key for key in self.rates if key[0] == group_openid]:
             remaining = [
                 event for event in self.rates[key] if event[1] not in removed
@@ -270,10 +281,19 @@ class ModerationWindows:
         if len(events) < threshold or len(members) < 2:
             return []
         self.repeats.pop(key, None)
+        self.repeat_recall_ids[group_openid] = list(
+            dict.fromkeys(event[3] for event in events if event[3])
+        )[-100:]
         return members
+
+    def consume_repeat_message_ids(self, group_openid: str) -> list[str]:
+        """Return and clear the message IDs from the latest triggered round."""
+
+        return self.repeat_recall_ids.pop(group_openid, [])
 
     def _reset_repeat_group(self, group_openid: str) -> None:
         self.repeat_last_signature.pop(group_openid, None)
+        self.repeat_recall_ids.pop(group_openid, None)
         # ponytail: scan at most 2,000 phrase keys; index by group only if this
         # bound becomes a measurable hot path.
         for key in [key for key in self.repeats if key[0] == group_openid]:
