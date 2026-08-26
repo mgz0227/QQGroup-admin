@@ -91,7 +91,11 @@ class BilibiliTest(unittest.TestCase):
                                 "major": {
                                     "draw": {
                                         "items": [
-                                            {"src": "//i0.hdslb.com/bfs/draw.jpg"}
+                                            {
+                                                "src": "//i0.hdslb.com/bfs/draw.jpg",
+                                                "width": 1320,
+                                                "height": 2468,
+                                            }
                                         ]
                                     }
                                 },
@@ -106,6 +110,8 @@ class BilibiliTest(unittest.TestCase):
             parse_dynamic_items(payload)[0]["cover"],
             "https://i0.hdslb.com/bfs/draw.jpg",
         )
+        self.assertEqual(parse_dynamic_items(payload)[0]["cover_width"], 1320)
+        self.assertEqual(parse_dynamic_items(payload)[0]["cover_height"], 2468)
         self.assertEqual(parse_dynamic_items(payload)[0]["title"], "")
         self.assertEqual(parse_dynamic_items(payload)[0]["text"], "")
 
@@ -137,6 +143,31 @@ class BilibiliTest(unittest.TestCase):
         item = parse_dynamic_items(payload)[0]
         self.assertEqual(item["title"], "视频标题")
         self.assertEqual(item["text"], "这是视频简介")
+
+    def test_dynamic_parser_uses_rich_text_nodes_when_plain_text_is_empty(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "rich-1",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_dynamic": {
+                                "desc": {
+                                    "text": "",
+                                    "rich_text_nodes": [
+                                        {"text": "第一段"},
+                                        {"text": " 第二段"},
+                                    ],
+                                }
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+        self.assertEqual(parse_dynamic_items(payload)[0]["text"], "第一段 第二段")
 
     def test_live_transition_seeds_and_detects_changes(self):
         offline = {"live_status": 0, "live_time": 0}

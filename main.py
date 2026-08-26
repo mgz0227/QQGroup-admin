@@ -3566,7 +3566,12 @@ class QQGroupAdmin(Star):
         return "" if text in {"", "-", "--", "—", "暂无", "暂无内容"} else text
 
     @staticmethod
-    def _bilibili_markdown_image(value: Any) -> str:
+    def _bilibili_markdown_image(
+        value: Any,
+        *,
+        width: Any = 0,
+        height: Any = 0,
+    ) -> str:
         url = str(value or "").strip()
         if url.startswith("//"):
             url = "https:" + url
@@ -3574,6 +3579,16 @@ class QQGroupAdmin(Star):
             char.isspace() or char in "()" for char in url
         ):
             return ""
+        try:
+            source_width = int(width)
+            source_height = int(height)
+        except (TypeError, ValueError):
+            source_width = source_height = 0
+        if source_width > 0 and source_height > 0:
+            scale = min(600 / source_width, 420 / source_height)
+            display_width = max(1, int(source_width * scale))
+            display_height = max(1, int(source_height * scale))
+            return f"![封面 #{display_width}px #{display_height}px]({url})"
         return f"![封面 #300px #169px]({url})"
 
     @staticmethod
@@ -4010,6 +4025,23 @@ class QQGroupAdmin(Star):
                                 (card_data or {}).get("link_label") or "查看原动态"
                             ),
                         )
+                        link = str((card_data or {}).get("link") or "").strip()
+                        if link:
+                            label = str(
+                                (card_data or {}).get("link_label") or "查看原动态"
+                            ).strip()
+                            try:
+                                await self._send_group_markdown(
+                                    client,
+                                    group_openid,
+                                    f"[{label} ↗]({link})",
+                                )
+                            except Exception:
+                                await self._send_group_text(
+                                    client,
+                                    group_openid,
+                                    f"{label}：{link}",
+                                )
                         continue
                     except Exception as card_exc:  # noqa: BLE001 - optional card
                         self.logger.debug("B 站图片卡片发送失败，降级 Markdown：%s", card_exc)
@@ -4091,6 +4123,8 @@ class QQGroupAdmin(Star):
         link: str = "",
         link_label: str = "查看原动态",
     ) -> Any:
+        # QQ's msg_type=7 accepts media only; the named link is sent as a
+        # separate Markdown message by _push_bilibili_message.
         media = await QQGroupAPI(client).upload_group_image(
             group_openid,
             image,
@@ -4100,11 +4134,6 @@ class QQGroupAdmin(Star):
             "msg_type": 7,
             "media": {"file_info": str(media["file_info"])},
         }
-        # QQ media messages accept a plain caption; keeping the URL here
-        # preserves a usable action even though the rendered image itself is
-        # not interactive.
-        if link:
-            payload["content"] = f"{str(link_label or '查看原动态').strip()}：{link}"
         return await client.api.post_group_message(
             **payload,
         )
@@ -4273,7 +4302,11 @@ class QQGroupAdmin(Star):
                 meta = f"**{name}** · {kind}"
                 if pub_ts:
                     meta += time.strftime(" · %m-%d %H:%M", time.localtime(pub_ts))
-                cover = self._bilibili_markdown_image(item.get("cover"))
+                cover = self._bilibili_markdown_image(
+                    item.get("cover"),
+                    width=item.get("cover_width"),
+                    height=item.get("cover_height"),
+                )
                 sections = ["# B站视频" if is_video else "# B站动态", meta]
                 if cover:
                     sections.append(cover)
@@ -4303,6 +4336,8 @@ class QQGroupAdmin(Star):
                         else ""
                     ),
                     "cover": item.get("cover"),
+                    "cover_width": item.get("cover_width", 0),
+                    "cover_height": item.get("cover_height", 0),
                     "avatar": item.get("avatar"),
                     "status": "",
                     "link": item.get("url"),

@@ -70,6 +70,19 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertIn("B站直播", live)
         self.assertIn("进入直播间", live)
 
+    def test_html_card_uses_compact_portrait_layout_when_dimensions_are_known(self):
+        html = build_bilibili_card(
+            author="UP",
+            kind="图文",
+            title="海报说明",
+            cover="https://i0.hdslb.com/bfs/draw.jpg",
+            cover_width=1320,
+            cover_height=2468,
+        )
+        self.assertIn("portrait-content", html)
+        self.assertIn('width:251px;height:470px', html)
+        self.assertIn("海报说明", html)
+
     def test_local_card_renders_useful_empty_dynamic(self):
         with patch("bilibili_card._download_image", return_value=None):
             image = render_bilibili_card(
@@ -100,7 +113,7 @@ class BilibiliCardTest(unittest.TestCase):
 
         rendered = Image.open(BytesIO(image))
         self.assertGreater(rendered.height, 700)
-        self.assertLess(rendered.height, 1_000)
+        self.assertLess(rendered.height, 850)
 
     def test_local_card_uses_custom_link_label_and_clips_author(self):
         from PIL import ImageDraw

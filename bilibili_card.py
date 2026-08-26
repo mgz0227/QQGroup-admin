@@ -233,24 +233,42 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     if not title_lines and not summary_lines and cover is not None:
         title_lines = [f"发布了一条{kind}动态"]
     cover_display_size = None
+    portrait_layout = False
     if cover is not None:
         source_width, source_height = cover.size
         if source_width > 0 and source_height > 0:
-            scale = min(inner_width / source_width, 520 / source_height)
+            portrait_layout = source_width / source_height < 0.78
+            max_width = 278 if portrait_layout else inner_width
+            max_height = 470 if portrait_layout else 520
+            scale = min(max_width / source_width, max_height / source_height)
             cover_display_size = (
                 max(1, int(source_width * scale)),
                 max(1, int(source_height * scale)),
             )
 
+    side_title_lines: list[str] = []
+    side_summary_lines: list[str] = []
+    if portrait_layout and cover_display_size is not None:
+        side_width = max(180, inner_width - cover_display_size[0] - 24)
+        side_title_lines = _wrap_text(draw, title, title_font, side_width, 4)
+        side_summary_lines = _wrap_text(draw, summary, regular, side_width - 18, 8)
+        if not side_title_lines and not side_summary_lines:
+            side_title_lines = [f"发布了一条{kind}动态"]
+
     content_height = 0
     if status:
         content_height += 32
-    if title_lines:
-        content_height += len(title_lines) * 36 + 10
-    if summary_lines:
-        content_height += len(summary_lines) * 28 + 24
-    if cover_display_size is not None:
-        content_height += cover_display_size[1] + 16
+    if portrait_layout and cover_display_size is not None:
+        side_height = len(side_title_lines) * 36 + (10 if side_title_lines else 0)
+        side_height += len(side_summary_lines) * 28 + (24 if side_summary_lines else 0)
+        content_height += max(cover_display_size[1], side_height) + 16
+    else:
+        if title_lines:
+            content_height += len(title_lines) * 36 + 10
+        if summary_lines:
+            content_height += len(summary_lines) * 28 + 24
+        if cover_display_size is not None:
+            content_height += cover_display_size[1] + 16
     content_height = max(content_height, 64)
     card_height = 148 + content_height + 78
 
@@ -338,41 +356,74 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         )
         draw.text((inner_left + 12, y + 4), status, font=small, fill="#e85d5d")
         y += 38
-    for line in title_lines:
-        draw.text((inner_left, y), line, font=title_font, fill="#18191c")
-        y += 36
-    if title_lines:
-        y += 4
-    if summary_lines:
-        box_top = y
-        box_bottom = y + len(summary_lines) * 28 + 18
-        draw.rounded_rectangle(
-            (inner_left, box_top, inner_right, box_bottom),
-            12,
-            fill="#f7f8fa",
-        )
-        draw.rounded_rectangle(
-            (inner_left, box_top, inner_left + 4, box_bottom),
-            2,
-            fill="#fb7299",
-        )
-        text_y = box_top + 9
-        for line in summary_lines:
-            draw.text((inner_left + 18, text_y), line, font=regular, fill="#61666d")
-            text_y += 28
-        y = box_bottom + 16
-    elif not cover and title_lines:
-        y += 10
-    if cover_display_size is not None:
+    if portrait_layout and cover_display_size is not None:
         display_width, display_height = cover_display_size
-        cover_left = inner_left + (inner_width - display_width) // 2
         _rounded_image(
             canvas,
             cover,
-            (cover_left, y, cover_left + display_width, y + display_height),
+            (inner_left, y, inner_left + display_width, y + display_height),
             14,
         )
-        y += display_height + 16
+        side_x = inner_left + display_width + 24
+        side_right = inner_right
+        side_y = y
+        for line in side_title_lines:
+            draw.text((side_x, side_y), line, font=title_font, fill="#18191c")
+            side_y += 36
+        if side_title_lines:
+            side_y += 4
+        if side_summary_lines:
+            box_top = side_y
+            box_bottom = side_y + len(side_summary_lines) * 28 + 18
+            draw.rounded_rectangle(
+                (side_x, box_top, side_right, box_bottom),
+                12,
+                fill="#f7f8fa",
+            )
+            draw.rounded_rectangle(
+                (side_x, box_top, side_x + 4, box_bottom),
+                2,
+                fill="#fb7299",
+            )
+            text_y = box_top + 9
+            for line in side_summary_lines:
+                draw.text((side_x + 18, text_y), line, font=regular, fill="#61666d")
+                text_y += 28
+    else:
+        for line in title_lines:
+            draw.text((inner_left, y), line, font=title_font, fill="#18191c")
+            y += 36
+        if title_lines:
+            y += 4
+        if summary_lines:
+            box_top = y
+            box_bottom = y + len(summary_lines) * 28 + 18
+            draw.rounded_rectangle(
+                (inner_left, box_top, inner_right, box_bottom),
+                12,
+                fill="#f7f8fa",
+            )
+            draw.rounded_rectangle(
+                (inner_left, box_top, inner_left + 4, box_bottom),
+                2,
+                fill="#fb7299",
+            )
+            text_y = box_top + 9
+            for line in summary_lines:
+                draw.text((inner_left + 18, text_y), line, font=regular, fill="#61666d")
+                text_y += 28
+            y = box_bottom + 16
+        elif not cover and title_lines:
+            y += 10
+        if cover_display_size is not None:
+            display_width, display_height = cover_display_size
+            cover_left = inner_left + (inner_width - display_width) // 2
+            _rounded_image(
+                canvas,
+                cover,
+                (cover_left, y, cover_left + display_width, y + display_height),
+                14,
+            )
 
     footer_top = margin + card_height - 62
     draw.line(
@@ -414,6 +465,8 @@ def build_bilibili_card(
     status: object = "",
     link: object = "",
     link_label: object = "",
+    cover_width: object = 0,
+    cover_height: object = 0,
 ) -> str:
     """Build a compact card for AstrBot's built-in HTML-to-image renderer."""
 
@@ -428,6 +481,25 @@ def build_bilibili_card(
     link_url = _url(link)
     brand, source, default_link_label = _card_labels(kind)
     link_label_text = _text(link_label, 40) or default_link_label
+    try:
+        source_width = int(cover_width)
+        source_height = int(cover_height)
+    except (TypeError, ValueError):
+        source_width = source_height = 0
+    portrait_cover = bool(
+        cover_url
+        and source_width > 0
+        and source_height > 0
+        and source_width / source_height < 0.78
+    )
+    portrait_cover_style = ""
+    if portrait_cover:
+        scale = min(278 / source_width, 470 / source_height)
+        display_width = max(1, int(source_width * scale))
+        display_height = max(1, int(source_height * scale))
+        portrait_cover_style = (
+            f' style="width:{display_width}px;height:{display_height}px"'
+        )
 
     avatar_markup = (
         f'<img class="avatar" src="{avatar_url}" alt="">'
@@ -435,7 +507,7 @@ def build_bilibili_card(
         else '<span class="avatar fallback-avatar">B</span>'
     )
     cover_markup = (
-        f'<div class="cover-wrap"><img class="cover" src="{cover_url}" alt=""></div>'
+        f'<div class="cover-wrap"><img class="cover"{portrait_cover_style} src="{cover_url}" alt=""></div>'
         if cover_url
         else ""
     )
@@ -454,6 +526,15 @@ def build_bilibili_card(
         if link_url
         else ""
     )
+    if portrait_cover:
+        content_markup = (
+            '<div class="portrait-content">'
+            f'<div class="portrait-cover">{cover_markup}</div>'
+            f'<div class="portrait-copy">{title_markup}{summary_markup}</div>'
+            '</div>'
+        )
+    else:
+        content_markup = f"{title_markup}{summary_markup}{cover_markup}"
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -494,8 +575,12 @@ body {{
 .content {{ padding: 0 28px 24px; }}
 .status {{ margin: 0 0 13px; color: #fb7299; font-size: 13px; font-weight: 750; letter-spacing: .4px; }}
 .title {{ margin-bottom: 10px; color: #18191c; font-size: 22px; font-weight: 750; line-height: 1.45; word-break: break-word; }}
-.summary {{ margin-bottom: 18px; padding: 11px 14px; border-left: 4px solid #fb7299; border-radius: 0 10px 10px 0; background: #f7f8fa; color: #61666d; font-size: 16px; line-height: 1.7; word-break: break-word; }}
+ .summary {{ margin-bottom: 18px; padding: 11px 14px; border-left: 4px solid #fb7299; border-radius: 0 10px 10px 0; background: #f7f8fa; color: #61666d; font-size: 16px; line-height: 1.7; word-break: break-word; }}
+ .portrait-content {{ display: flex; align-items: flex-start; gap: 22px; }}
+ .portrait-cover {{ flex: 0 0 auto; }}
+ .portrait-copy {{ min-width: 0; flex: 1 1 auto; }}
 .cover-wrap {{ display: flex; justify-content: center; overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
+.portrait-cover .cover-wrap {{ margin-top: 0; }}
 .cover {{ display: block; width: auto; max-width: 100%; max-height: 520px; object-fit: contain; background: #f1f2f3; }}
 .footer {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px 20px; border-top: 1px solid #f0f1f2; background: #fcfcfd; }}
 .source {{ color: #c0c4cc; font-size: 12px; letter-spacing: .5px; }}
@@ -516,9 +601,7 @@ body {{
     </div>
     <div class="content">
       {status_markup}
-      {title_markup}
-      {summary_markup}
-      {cover_markup}
+      {content_markup}
     </div>
     <div class="footer">
       <span class="source">{source}</span>

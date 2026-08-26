@@ -289,7 +289,19 @@ def _clean_dynamic_text(value: Any) -> str:
     return "" if text in {"-", "--", "—", "暂无", "暂无内容"} else text
 
 
-def _first_cover(card: dict[str, Any]) -> str:
+def _rich_text(value: Any) -> str:
+    nodes = value if isinstance(value, list) else []
+    parts: list[str] = []
+    for node in nodes:
+        if not isinstance(node, dict):
+            continue
+        text = _clean_dynamic_text(node.get("text") or node.get("orig_text"))
+        if text:
+            parts.append(text)
+    return _clean_dynamic_text(" ".join(parts))
+
+
+def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
     for key in (
         "cover",
         "cover_url",
@@ -301,23 +313,36 @@ def _first_cover(card: dict[str, Any]) -> str:
     ):
         cover = _media_url(card.get(key))
         if cover:
-            return cover
+            return cover, 0, 0
     for key in ("pics", "covers", "images", "items"):
         values = card.get(key)
         if not isinstance(values, list):
             continue
         for value in values:
             if isinstance(value, dict):
+                width = value.get("width") or value.get("img_width") or 0
+                height = value.get("height") or value.get("img_height") or 0
                 value = (
                     value.get("url")
                     or value.get("src")
                     or value.get("img_src")
                     or value.get("image_url")
                 )
+            else:
+                width = height = 0
             cover = _media_url(value)
             if cover:
-                return cover
-    return ""
+                try:
+                    width = int(width)
+                    height = int(height)
+                except (TypeError, ValueError):
+                    width = height = 0
+                return cover, max(0, width), max(0, height)
+    return "", 0, 0
+
+
+def _first_cover(card: dict[str, Any]) -> str:
+    return _first_cover_info(card)[0]
 
 
 def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
@@ -383,11 +408,13 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
                 _clean_dynamic_text(card.get("desc")),
                 _clean_dynamic_text(card.get("description")),
                 _clean_dynamic_text(desc.get("text")),
+                _rich_text(desc.get("rich_text_nodes")),
                 _clean_dynamic_text(summary.get("text")),
             )
             if dynamic_type == "DYNAMIC_TYPE_AV"
             else (
                 _clean_dynamic_text(desc.get("text")),
+                _rich_text(desc.get("rich_text_nodes")),
                 _clean_dynamic_text(summary.get("text")),
                 _clean_dynamic_text(card.get("desc")),
                 _clean_dynamic_text(card.get("description")),
@@ -413,6 +440,7 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             pub_ts = int(author.get("pub_ts") or 0)
         except (TypeError, ValueError):
             pub_ts = 0
+        cover, cover_width, cover_height = _first_cover_info(card)
         parsed_item = {
             "id": dynamic_id,
             "type": dynamic_type,
@@ -422,8 +450,11 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             "title": title,
             "text": text,
             "url": url,
-            "cover": _first_cover(card),
+            "cover": cover,
         }
+        if cover_width and cover_height:
+            parsed_item["cover_width"] = cover_width
+            parsed_item["cover_height"] = cover_height
         avatar = _media_url(author.get("face"))
         if avatar:
             parsed_item["avatar"] = avatar

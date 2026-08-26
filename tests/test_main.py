@@ -2937,6 +2937,18 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertNotIn("\n-\n", push_text)
 
+    async def test_bilibili_markdown_cover_preserves_known_portrait_ratio(self):
+        plugin, _ = self.plugin()
+        image = plugin._bilibili_markdown_image(
+            "https://i0.hdslb.com/bfs/draw.jpg",
+            width=1320,
+            height=2468,
+        )
+        self.assertEqual(
+            image,
+            "![封面 #224px #420px](https://i0.hdslb.com/bfs/draw.jpg)",
+        )
+
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
@@ -2973,7 +2985,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             send_card.await_args.kwargs["link"],
             "https://www.bilibili.com/opus/1",
         )
-        self.assertEqual(client.api.messages, [])
+        self.assertEqual(
+            client.api.messages[-1]["markdown"]["content"],
+            "[查看原动态 ↗](https://www.bilibili.com/opus/1)",
+        )
 
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
         plugin, _client = self.plugin()
@@ -3043,7 +3058,6 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "group_openid": "group-1",
                 "msg_type": 7,
                 "media": {"file_info": "info-1"},
-                "content": "查看原动态：https://www.bilibili.com/opus/1",
             },
         )
 
