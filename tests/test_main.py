@@ -5194,6 +5194,55 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.api.messages), 1)
         self.assertIn("欢迎 新人", client.api.messages[0]["content"])
 
+    def test_group_member_event_parser_bridge_dispatches_official_payload(self):
+        plugin, client = self.plugin()
+        fake_botpy = types.ModuleType("botpy")
+        fake_connection = types.ModuleType("botpy.connection")
+
+        class FakeState:
+            def __init__(self):
+                self.events = []
+                self.parsers = {}
+
+            def _dispatch(self, name, event):
+                self.events.append((name, event))
+
+        fake_connection.ConnectionState = FakeState
+        fake_botpy.connection = fake_connection
+        previous_botpy = sys.modules.get("botpy")
+        previous_connection = sys.modules.get("botpy.connection")
+        try:
+            sys.modules["botpy"] = fake_botpy
+            sys.modules["botpy.connection"] = fake_connection
+            self.assertTrue(plugin._install_group_member_event(client))
+            state = FakeState()
+            state.parsers["group_member_add"] = state.parse_group_member_add
+            state.parsers["group_member_add"](
+                {
+                    "id": "event-1",
+                    "d": {
+                        "timestamp": 123,
+                        "group_openid": "group-1",
+                        "member_openid": "member-1",
+                        "user_openid": "user-1",
+                    },
+                }
+            )
+            self.assertEqual(state.events[0][0], "group_member_add")
+            self.assertEqual(state.events[0][1].group_openid, "group-1")
+            self.assertEqual(state.events[0][1].member_openid, "member-1")
+        finally:
+            if previous_botpy is None:
+                sys.modules.pop("botpy", None)
+            else:
+                sys.modules["botpy"] = previous_botpy
+            if previous_connection is None:
+                sys.modules.pop("botpy.connection", None)
+            else:
+                sys.modules["botpy.connection"] = previous_connection
+            if hasattr(FakeState, "parse_group_member_add"):
+                delattr(FakeState, "parse_group_member_add")
+
     async def test_button_approval_sends_welcome_with_request_context(self):
         plugin, client = self.plugin()
         plugin.config["welcome_rules"] = [

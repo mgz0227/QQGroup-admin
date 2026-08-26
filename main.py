@@ -11,6 +11,7 @@ from contextlib import suppress
 from functools import wraps
 from io import BytesIO
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from xml.sax.saxutils import quoteattr
 
@@ -68,6 +69,9 @@ QQ_PLATFORM_TYPES = (
 )
 QQ_PLATFORM_NAMES = {"qq_official", "qq_official_webhook"}
 INTERACTION_INTENT = 1 << 26
+# QQ official docs expose GROUP_MEMBER_ADD with this intent, while the
+# qq-botpy version bundled by AstrBot 4.27.4 does not expose a flag/parser.
+GROUP_MEMBER_INTENT = 1 << 24
 BUTTON_TOKEN_TTL = 15 * 60
 SETTINGS_MESSAGE_TTL = 45
 VERIFICATION_TOKEN_TTL = 5 * 60
@@ -538,6 +542,7 @@ class QQGroupAdmin(Star):
         self._welcome_poll_cursors: dict[tuple[str, str], str] = {}
         self._permission_diagnostics: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
+        self._patched_member_clients: dict[Any, Any] = {}
         self._welcome_sent_at: dict[tuple[str, str, int], float] = {}
         self._welcome_pending: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._welcome_inflight: set[tuple[str, str]] = set()
@@ -1119,6 +1124,14 @@ class QQGroupAdmin(Star):
                 else:
                     client.on_interaction_create = previous
         self._patched_clients.clear()
+        for client, previous in self._patched_member_clients.items():
+            handler = getattr(client, "on_group_member_add", None)
+            if getattr(handler, "__qqgroup_admin_owner__", None) is self:
+                if previous is None:
+                    delattr(client, "on_group_member_add")
+                else:
+                    client.on_group_member_add = previous
+        self._patched_member_clients.clear()
 
     async def _load_state(self) -> None:
         getter = getattr(self, "get_kv_data", None)
@@ -2335,8 +2348,112 @@ class QQGroupAdmin(Star):
                 interaction_handler.__qqgroup_admin_previous__ = existing
                 client.on_interaction_create = interaction_handler
                 self._patched_clients[client] = existing
+                if self._install_group_member_event(client):
+                    previous_member = getattr(client, "on_group_member_add", None)
+                    owner = getattr(
+                        previous_member,
+                        "__qqgroup_admin_owner__",
+                        None,
+                    )
+                    if owner is not self:
+                        if owner is not None:
+                            previous_member = getattr(
+                                previous_member,
+                                "__qqgroup_admin_previous__",
+                                previous_member,
+                            )
+
+                        async def group_member_handler(
+                            member_event: Any,
+                            bound_client: Any = client,
+                            previous_handler: Any = previous_member,
+                        ) -> None:
+                            group_openid = str(
+                                getattr(member_event, "group_openid", "") or ""
+                            ).strip()
+                            member_openid = str(
+                                getattr(member_event, "member_openid", "") or ""
+                            ).strip()
+                            if group_openid and member_openid:
+                                try:
+                                    request = (
+                                        self._welcome_request_for_member(
+                                            group_openid,
+                                            member_openid,
+                                        )
+                                        or {}
+                                    )
+                                    request.update(
+                                        {
+                                            "member_openid": member_openid,
+                                            "user_openid": str(
+                                                getattr(
+                                                    member_event,
+                                                    "user_openid",
+                                                    "",
+                                                )
+                                                or ""
+                                            ),
+                                        }
+                                    )
+                                    await self._send_welcome_messages(
+                                        bound_client,
+                                        group_openid,
+                                        member_openid,
+                                        request=request,
+                                    )
+                                except Exception as exc:  # noqa: BLE001 - welcome is best effort
+                                    self.logger.warning(
+                                        "群成员加入事件发送欢迎失败：group=%s member=%s error=%s",
+                                        group_openid,
+                                        member_openid,
+                                        exc,
+                                    )
+                            if previous_handler is not None:
+                                await previous_handler(member_event)
+
+                        group_member_handler.__qqgroup_admin_owner__ = self
+                        group_member_handler.__qqgroup_admin_previous__ = previous_member
+                        client.on_group_member_add = group_member_handler
+                        self._patched_member_clients[client] = previous_member
             except Exception as exc:  # noqa: BLE001 - private botpy boundary
                 self.logger.warning("安装 QQ 群管理按钮回调失败：%s", exc)
+
+    def _install_group_member_event(self, client: Any) -> bool:
+        """Bridge QQ's GROUP_MEMBER_ADD event missing from qq-botpy 1.2.1."""
+
+        try:
+            from botpy.connection import ConnectionState
+        except (ImportError, ModuleNotFoundError):
+            return False
+
+        if not hasattr(ConnectionState, "parse_group_member_add"):
+            def parse_group_member_add(state: Any, payload: Any) -> None:
+                payload = payload if isinstance(payload, dict) else {}
+                data = payload.get("d")
+                data = data if isinstance(data, dict) else {}
+                state._dispatch(
+                    "group_member_add",
+                    SimpleNamespace(
+                        event_id=payload.get("id"),
+                        timestamp=data.get("timestamp"),
+                        group_openid=data.get("group_openid"),
+                        member_openid=data.get("member_openid"),
+                        user_openid=data.get("user_openid"),
+                    ),
+                )
+
+            setattr(ConnectionState, "parse_group_member_add", parse_group_member_add)
+
+        connection = getattr(client, "_connection", None)
+        state = getattr(connection, "state", None)
+        parser = getattr(state, "parse_group_member_add", None)
+        if state is not None and isinstance(getattr(state, "parsers", None), dict):
+            if parser is not None:
+                state.parsers.setdefault("group_member_add", parser)
+        if hasattr(client, "intents"):
+            client.intents |= GROUP_MEMBER_INTENT
+        return True
 
     def _cleanup_tokens(self) -> None:
         now = time.monotonic()
