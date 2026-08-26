@@ -1351,6 +1351,51 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["primary-one", "primary-one"],
         )
 
+    async def test_global_policy_save_rejects_empty_profiles_without_erasing(self):
+        plugin, _ = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "existing",
+                "name": "现有策略",
+                "enabled": True,
+                "group_openids": [],
+            }
+        ]
+        before = list(plugin.config["global_policy_profiles"])
+        with self.assertRaisesRegex(ValueError, "至少保留一套全局群策略"):
+            await plugin.web_save_global_policies({"profiles": []})
+        self.assertEqual(plugin.config["global_policy_profiles"], before)
+
+    async def test_global_policy_save_does_not_mirror_scoped_profile_as_global(self):
+        plugin, _ = self.plugin()
+        profiles = module.GroupAdminWeb._global_policy_profiles(
+            [
+                {
+                    "profile_id": "scoped",
+                    "name": "仅群一",
+                    "enabled": True,
+                    "group_openids": ["group-1"],
+                    "global_message_reject_keywords": "只在群一命中",
+                },
+                {
+                    "profile_id": "fallback",
+                    "name": "全部群",
+                    "enabled": True,
+                    "group_openids": [],
+                    "global_message_reject_keywords": "全部群命中",
+                },
+            ],
+            {"group-1", "group-2"},
+        )
+        await plugin.web_save_global_policies({"profiles": profiles})
+        self.assertEqual(plugin.config["global_message_reject_keywords"], "全部群命中")
+        self.assertEqual(
+            plugin._global_policy_for_group("group-2")[
+                "global_message_reject_keywords"
+            ],
+            "全部群命中",
+        )
+
     async def test_global_policy_save_keeps_explicit_ai_outside_scoped_profiles(self):
         plugin, _ = self.plugin()
         current = await plugin.web_global_policies()
@@ -1879,14 +1924,17 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
         )
         self.assertIn("真人验证", prompt["content"])
-        self.assertIn("验证前发送的消息会被撤回", prompt["content"])
+        self.assertIn("这是入群安全验证", prompt["content"])
+        self.assertIn("未完成验证前发送的消息会被撤回", prompt["content"])
         self.assertNotIn("msg_id", prompt)
+        self.assertIn("这是入群安全验证", message["markdown"]["content"])
         self.assertIn("如果看不到按钮", message["markdown"]["content"])
+        self.assertIn("未完成验证前发送的消息会被撤回", message["markdown"]["content"])
         self.assertNotIn("msg_id", message)
         self.assertIn("算式：", prompt["content"])
         self.assertRegex(message["markdown"]["content"], r"\d+ \+ \d+ = \?")
         self.assertEqual(
-            [item["msg_type"] for item in client.api.messages[:2]], [0, 2]
+            [item["msg_type"] for item in client.api.messages[:2]], [2, 0]
         )
         token = buttons[0]["action"]["data"].split(":")[1]
         answer = plugin._verification_tokens[token][3]
@@ -3316,6 +3364,39 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["deepseek", "deepseek"],
         )
 
+    async def test_ai_image_provider_error_tries_visual_fallback_before_text_retry(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                RuntimeError("provider does not support vision"),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=99 reason=图片内容",
+                ),
+            ]
+        )
+
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "text-only-primary",
+                ["vision-fallback"],
+                image_review_enabled=True,
+            )
+
+        self.assertTrue(blocked)
+        calls = plugin.context.llm_generate.await_args_list
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in calls],
+            ["text-only-primary", "vision-fallback"],
+        )
+        self.assertEqual(calls[0].kwargs["image_urls"], ["vision-ref"])
+        self.assertEqual(calls[1].kwargs["image_urls"], ["vision-ref"])
+
     async def test_ai_image_preprocessing_does_not_consume_provider_timeout(self):
         plugin, client = self.plugin()
         clock = [0.0]
@@ -3403,6 +3484,33 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             plugin.config[module.WELCOME_RULES_KEY][0]["name"],
             "入群欢迎",
         )
+
+    async def test_keyword_backup_restores_without_group_snapshot(self):
+        config = TestConfig(
+            global_keyword_replies=[
+                {"name": "帮助", "keywords": ["帮助"], "reply": "请看公告"}
+            ],
+            keyword_reply_cooldown_seconds=45,
+            keyword_reply_recall_seconds=12,
+        )
+        plugin = module.QQGroupAdmin(SimpleNamespace(), config)
+        payload = plugin._config_backup_payload()
+        self.assertNotIn("auto_review_groups", payload)
+        plugin._kv[module.CONFIG_BACKUP_KEY] = payload
+        plugin.config["global_keyword_replies"] = []
+        plugin.config["keyword_reply_cooldown_seconds"] = 0
+        plugin.config["keyword_reply_recall_seconds"] = 0
+        plugin._config_reset_keys = {"global_keyword_replies"}
+        plugin._config_reset_candidate = True
+
+        await plugin._load_state()
+
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertEqual(
+            plugin.config["global_keyword_replies"][0]["reply"], "请看公告"
+        )
+        self.assertEqual(plugin.config["keyword_reply_cooldown_seconds"], 45)
+        self.assertEqual(plugin.config["keyword_reply_recall_seconds"], 12)
 
     async def test_partial_welcome_reset_restores_without_touching_groups(self):
         plugin, _client = self.plugin()
@@ -4828,12 +4936,17 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         card = next(message for message in client.api.messages if message["msg_type"] == 2)
         content = card["markdown"]["content"]
+        self.assertIn("这是入群安全验证", content)
         self.assertIn("请点击下方正确答案按钮", content)
         self.assertIn("请直接发送正确数字", content)
         self.assertIn("真人验证", content)
         self.assertIn("算式：", content)
+        self.assertIn("未完成验证前发送的消息会被撤回", content)
         self.assertRegex(content, r"\d+ \+ \d+ = \?")
         self.assertNotIn("msg_id", card)
+        self.assertEqual(
+            [message["msg_type"] for message in client.api.messages[:2]], [2, 0]
+        )
 
     async def test_verification_rejects_prefixed_answer(self):
         plugin, client = self.plugin()

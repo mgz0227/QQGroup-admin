@@ -201,6 +201,7 @@ CONFIG_BACKUP_KEY = "qqgroup_admin_config_backup_v1"
 CONFIG_BACKUP_GROUP_LIMIT = 1_000
 CONFIG_BACKUP_PROFILE_LIMIT = 100
 CONFIG_BACKUP_WELCOME_LIMIT = 100
+CONFIG_BACKUP_KEYWORD_REPLY_LIMIT = 100
 # Keep identity state bounded so a busy deployment cannot grow its KV payload
 # or make every WebUI query increasingly expensive.
 MAX_UID_BINDINGS = 20_000
@@ -531,6 +532,7 @@ class QQGroupAdmin(Star):
                 "auto_review_groups",
                 WELCOME_RULES_KEY,
                 GLOBAL_POLICIES_KEY,
+                "global_keyword_replies",
             )
             if not isinstance(self.config.get(key), list)
             or not self.config.get(key)
@@ -762,13 +764,11 @@ class QQGroupAdmin(Star):
 
     def _config_backup_payload(self) -> dict[str, Any] | None:
         entries = self.config.get("auto_review_groups")
-        if not isinstance(entries, list):
-            return None
-        payload: dict[str, Any] = {
-            "auto_review_groups": copy.deepcopy(
+        payload: dict[str, Any] = {}
+        if isinstance(entries, list):
+            payload["auto_review_groups"] = copy.deepcopy(
                 entries[:CONFIG_BACKUP_GROUP_LIMIT]
-            ),
-        }
+            )
         welcome = self.config.get(WELCOME_RULES_KEY)
         if isinstance(welcome, list):
             payload[WELCOME_RULES_KEY] = copy.deepcopy(
@@ -779,7 +779,20 @@ class QQGroupAdmin(Star):
             payload[GLOBAL_POLICIES_KEY] = copy.deepcopy(
                 profiles[:CONFIG_BACKUP_PROFILE_LIMIT]
             )
-        return payload
+        keyword_replies = self.config.get("global_keyword_replies")
+        if isinstance(keyword_replies, list):
+            payload["global_keyword_replies"] = copy.deepcopy(
+                keyword_replies[:CONFIG_BACKUP_KEYWORD_REPLY_LIMIT]
+            )
+            for key, maximum in (
+                ("keyword_reply_cooldown_seconds", 3_600),
+                ("keyword_reply_recall_seconds", 120),
+            ):
+                if key in self.config:
+                    payload[key] = self._bounded_int(
+                        self.config.get(key), 0, 0, maximum
+                    )
+        return payload or None
 
     def _schedule_config_backup(self) -> None:
         self._config_backup_dirty = True
@@ -822,7 +835,9 @@ class QQGroupAdmin(Star):
             ("auto_review_groups", CONFIG_BACKUP_GROUP_LIMIT),
             (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
             (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
+            ("global_keyword_replies", CONFIG_BACKUP_KEYWORD_REPLY_LIMIT),
         )
+        keyword_reset = "global_keyword_replies" in self._config_reset_keys
         for key, limit in candidates:
             current = self.config.get(key)
             backup = self._config_backup.get(key)
@@ -841,6 +856,19 @@ class QQGroupAdmin(Star):
                 continue
             self.config[key] = copy.deepcopy(backup[:limit])
             restored[key] = len(self.config[key])
+        # A schema reset clears the keyword list and normally resets its two
+        # scalar controls. Restore them only with a non-empty rule snapshot;
+        # an explicitly saved empty list remains empty.
+        keyword_backup = self._config_backup.get("global_keyword_replies")
+        if keyword_reset and isinstance(keyword_backup, list) and keyword_backup:
+            for key, maximum in (
+                ("keyword_reply_cooldown_seconds", 3_600),
+                ("keyword_reply_recall_seconds", 120),
+            ):
+                if key in self._config_backup:
+                    self.config[key] = self._bounded_int(
+                        self._config_backup.get(key), 0, 0, maximum
+                    )
         if not restored:
             return False
         self.config.save_config()
@@ -968,20 +996,28 @@ class QQGroupAdmin(Star):
             if isinstance(durable_backup, dict):
                 backup = durable_backup
         if isinstance(backup, dict):
+            loaded_backup: dict[str, Any] = {}
             entries = backup.get("auto_review_groups")
             if isinstance(entries, list):
-                self._config_backup = {
-                    "auto_review_groups": copy.deepcopy(
-                        entries[:CONFIG_BACKUP_GROUP_LIMIT]
-                    )
-                }
-                for key, limit in (
-                    (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
-                    (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
-                ):
-                    item = backup.get(key)
-                    if isinstance(item, list):
-                        self._config_backup[key] = copy.deepcopy(item[:limit])
+                loaded_backup["auto_review_groups"] = copy.deepcopy(
+                    entries[:CONFIG_BACKUP_GROUP_LIMIT]
+                )
+            for key, limit in (
+                (WELCOME_RULES_KEY, CONFIG_BACKUP_WELCOME_LIMIT),
+                (GLOBAL_POLICIES_KEY, CONFIG_BACKUP_PROFILE_LIMIT),
+                ("global_keyword_replies", CONFIG_BACKUP_KEYWORD_REPLY_LIMIT),
+            ):
+                item = backup.get(key)
+                if isinstance(item, list):
+                    loaded_backup[key] = copy.deepcopy(item[:limit])
+            for key in (
+                "keyword_reply_cooldown_seconds",
+                "keyword_reply_recall_seconds",
+            ):
+                if key in backup:
+                    loaded_backup[key] = backup[key]
+            if loaded_backup:
+                self._config_backup = loaded_backup
         if self._violation_state_dirty:
             await self._save_state()
 
@@ -1688,43 +1724,35 @@ class QQGroupAdmin(Star):
                 }
             )
         prompt = (
-            "真人验证：请点击下方正确答案按钮。\n"
-            "如果看不到按钮，请直接发送正确数字；答对后即可正常发言。\n"
+            "真人验证：这是入群安全验证，请完成后恢复发言。\n"
+            "请点击下方正确答案按钮；如果看不到按钮，请直接发送正确数字。\n"
             f"算式：{left} + {right} = ?\n"
-            "验证前发送的消息会被撤回。"
+            "未完成验证前发送的消息会被撤回。"
         )
-        # Some QQ clients collapse Markdown text when a custom keyboard is
-        # attached. Send the full instructions as a standalone message first.
+        # Some QQ clients render only the last line of a keyboard card. Put
+        # the same full prompt in the card and send it again as plain text
+        # after the card so the instructions remain visible on those clients.
         # Do not reuse the triggering message id: QQ treats it as an
         # idempotency/reply key on some clients and silently drops the prompt.
-        challenge = (
-            "真人验证：请点击下方正确答案按钮；如果看不到按钮，请直接发送正确数字。\n"
-            f"算式：{left} + {right} = ?"
-        )
-        prompt_sent = False
-        try:
-            await self._send_group_text(
-                client,
-                group_openid,
-                prompt,
-            )
-            prompt_sent = True
-        except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
-            self.logger.debug("真人验证文字提示发送失败：%s", prompt_exc)
+        keyboard_sent = False
         try:
             await self._send_group_markdown(
                 client,
                 group_openid,
-                challenge,
+                prompt,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
             )
+            keyboard_sent = True
         except Exception as exc:  # noqa: BLE001 - Markdown/keyboard boundary
-            # Keep the token when buttons are unavailable; plain text answers
-            # are handled by _consume_verification_answer.
-            if not prompt_sent:
+            self.logger.debug("真人验证按钮发送失败，将发送文字提示：%s", exc)
+        try:
+            await self._send_group_text(client, group_openid, prompt)
+        except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
+            self.logger.debug("真人验证文字提示发送失败：%s", prompt_exc)
+            if not keyboard_sent:
                 self._verification_tokens.pop(token, None)
                 self._verification_tokens.update(previous)
-                raise exc
+                raise prompt_exc
 
     async def _consume_verification_answer(
         self,
@@ -4018,6 +4046,7 @@ class QQGroupAdmin(Star):
             current_provider_id: str,
             system_prompt: str,
             call_timeout: float,
+            allow_text_only_retry: bool = True,
         ) -> Any:
             """Call one provider, retrying text-only when its vision input fails."""
 
@@ -4062,6 +4091,7 @@ class QQGroupAdmin(Star):
                     if (
                         current_images
                         and review_text
+                        and allow_text_only_retry
                         and not retried_text_only
                         and vision_error
                         and str(exc) != "AI 审核并发繁忙"
@@ -4114,6 +4144,11 @@ class QQGroupAdmin(Star):
                         "不得把普通聊天或游戏截图判为违规。"
                     ),
                     min(provider_timeout, remaining),
+                    # Preserve the image for a later fallback model.  Only
+                    # the last candidate may degrade to text-only, otherwise
+                    # an image-capable fallback would never get a chance to
+                    # review the attachment.
+                    index == len(candidates) - 1,
                 )
                 raw_decision = str(
                     self._ai_response_field(response, "completion_text") or ""
@@ -6505,10 +6540,19 @@ class QQGroupAdmin(Star):
     async def web_save_global_policies(
         self, settings: dict[str, Any]
     ) -> dict[str, Any]:
-        raw_profiles = [
-            item for item in settings.get("profiles", []) if isinstance(item, dict)
-        ]
-        first_raw = raw_profiles[0] if raw_profiles else {}
+        if not isinstance(settings, dict):
+            raise TypeError("全局群策略必须是 JSON 对象")
+        raw_profiles_value = settings.get("profiles")
+        if not isinstance(raw_profiles_value, list):
+            raise TypeError("全局群策略必须是列表")
+        # A direct caller must obey the same non-empty invariant as the WebUI
+        # route; otherwise a malformed save could erase every policy.
+        if not raw_profiles_value:
+            raise ValueError("至少保留一套全局群策略")
+        if any(not isinstance(item, dict) for item in raw_profiles_value):
+            raise TypeError("全局群策略条目格式错误")
+        raw_profiles = list(raw_profiles_value)
+        first_raw = raw_profiles[0]
         explicit_global_ai = settings.get("global_ai")
         if explicit_global_ai is not None and not isinstance(explicit_global_ai, dict):
             raise TypeError("全局 AI 配置必须是对象")
@@ -6537,7 +6581,7 @@ class QQGroupAdmin(Star):
             if str(item.get("profile_id") or "")
         }
         profiles = []
-        for index, raw in enumerate(settings.get("profiles", []), 1):
+        for index, raw in enumerate(raw_profiles, 1):
             profile_id = str(raw.get("profile_id") or f"profile-{index}").strip()
             existing_raw = existing.get(profile_id, {})
             legacy_values = raw.get("_legacy_media_values")
@@ -6564,10 +6608,22 @@ class QQGroupAdmin(Star):
                 profile[key] = list(value) if isinstance(value, list) else value
             profiles.append(profile)
         self.config[GLOBAL_POLICIES_KEY] = profiles
-        # Keep the first profile mirrored to legacy keys for older cached pages.
-        if profiles:
+        # Keep an enabled, unscoped profile mirrored for older cached pages.
+        # Never copy a group-only profile into the legacy global fallback.
+        legacy_profile = next(
+            (
+                profile
+                for profile in profiles
+                if bool(profile.get("enabled", True))
+                and not self._policy_group_openids(profile)
+            ),
+            None,
+        )
+        if legacy_profile is not None:
             for key in GLOBAL_POLICY_DEFAULTS:
-                self.config[key] = profiles[0].get(key, GLOBAL_POLICY_DEFAULTS[key])
+                self.config[key] = legacy_profile.get(
+                    key, GLOBAL_POLICY_DEFAULTS[key]
+                )
         for key, value in global_ai_values.items():
             self.config[key] = list(value) if isinstance(value, list) else value
         self._save_config()
