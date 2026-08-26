@@ -1,4 +1,5 @@
 import unittest
+from io import BytesIO
 from unittest.mock import patch
 
 from bilibili_card import _image_url, build_bilibili_card, render_bilibili_card
@@ -82,6 +83,51 @@ class BilibiliCardTest(unittest.TestCase):
 
         self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertLess(len(image), 8 * 1024 * 1024)
+
+    def test_local_card_expands_portrait_cover_without_cropping(self):
+        from PIL import Image
+
+        portrait = Image.new("RGB", (1320, 2468), "#734820")
+        with patch("bilibili_card._download_image", return_value=portrait):
+            image = render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "图文",
+                    "cover": "https://i0.hdslb.com/bfs/new_dyn/post.png",
+                    "link": "https://www.bilibili.com/opus/1",
+                }
+            )
+
+        rendered = Image.open(BytesIO(image))
+        self.assertGreater(rendered.height, 700)
+        self.assertLess(rendered.height, 1_000)
+
+    def test_local_card_uses_custom_link_label_and_clips_author(self):
+        from PIL import ImageDraw
+
+        calls = []
+        original_text = ImageDraw.ImageDraw.text
+
+        def capture_text(draw, xy, text, *args, **kwargs):
+            calls.append(str(text))
+            return original_text(draw, xy, text, *args, **kwargs)
+
+        with (
+            patch("bilibili_card._download_image", return_value=None),
+            patch.object(ImageDraw.ImageDraw, "text", capture_text),
+        ):
+            render_bilibili_card(
+                {
+                    "author": "超长作者名称-" * 20,
+                    "kind": "直播",
+                    "status": "直播结束",
+                    "link": "https://live.bilibili.com/123",
+                    "link_label": "查看直播间",
+                }
+            )
+
+        self.assertIn("查看直播间  →", calls)
+        self.assertTrue(any(value.endswith("…") for value in calls))
 
 
 if __name__ == "__main__":

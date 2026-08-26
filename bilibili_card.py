@@ -215,7 +215,8 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     summary = str(card_data.get("summary") or "").strip()[:520]
     status = _plain(card_data.get("status"), 20)
     link = _plain(card_data.get("link"), 500)
-    brand, source, link_label = _card_labels(kind)
+    brand, source, default_link_label = _card_labels(kind)
+    link_label = _plain(card_data.get("link_label"), 40) or default_link_label
     avatar = _download_image(card_data.get("avatar"))
     cover = _download_image(card_data.get("cover"))
 
@@ -229,8 +230,17 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     draw = ImageDraw.Draw(measure)
     title_lines = _wrap_text(draw, title, title_font, inner_width, 3)
     summary_lines = _wrap_text(draw, summary, regular, inner_width - 42, 6)
-    if not title_lines and not summary_lines and cover is None:
-        title_lines = ["发布了一条新动态"]
+    if not title_lines and not summary_lines and cover is not None:
+        title_lines = [f"发布了一条{kind}动态"]
+    cover_display_size = None
+    if cover is not None:
+        source_width, source_height = cover.size
+        if source_width > 0 and source_height > 0:
+            scale = min(inner_width / source_width, 520 / source_height)
+            cover_display_size = (
+                max(1, int(source_width * scale)),
+                max(1, int(source_height * scale)),
+            )
 
     content_height = 0
     if status:
@@ -239,8 +249,8 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         content_height += len(title_lines) * 36 + 10
     if summary_lines:
         content_height += len(summary_lines) * 28 + 24
-    if cover is not None:
-        content_height += 292
+    if cover_display_size is not None:
+        content_height += cover_display_size[1] + 16
     content_height = max(content_height, 64)
     card_height = 148 + content_height + 78
 
@@ -293,6 +303,9 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         )
 
     text_x = inner_left + 74
+    brand_w = draw.textlength(brand, font=small)
+    author_width = max(180, int(inner_right - text_x - brand_w - 24))
+    author = (_wrap_text(draw, author, bold, author_width, 1) or ["B站用户"])[0]
     draw.text((text_x, margin + 37), author, font=bold, fill="#18191c")
     meta_y = margin + 75
     pill_text = kind
@@ -310,7 +323,6 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
             font=small,
             fill="#9499a0",
         )
-    brand_w = draw.textlength(brand, font=small)
     draw.text((inner_right - brand_w, margin + 48), brand, font=small, fill="#00aeec")
     draw.line(
         (inner_left, margin + 116, inner_right, margin + 116), fill="#f0f1f2", width=1
@@ -351,9 +363,16 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         y = box_bottom + 16
     elif not cover and title_lines:
         y += 10
-    if cover is not None:
-        _rounded_image(canvas, cover, (inner_left, y, inner_right, y + 276), 14)
-        y += 292
+    if cover_display_size is not None:
+        display_width, display_height = cover_display_size
+        cover_left = inner_left + (inner_width - display_width) // 2
+        _rounded_image(
+            canvas,
+            cover,
+            (cover_left, y, cover_left + display_width, y + display_height),
+            14,
+        )
+        y += display_height + 16
 
     footer_top = margin + card_height - 62
     draw.line(
@@ -394,6 +413,7 @@ def build_bilibili_card(
     avatar: object = "",
     status: object = "",
     link: object = "",
+    link_label: object = "",
 ) -> str:
     """Build a compact card for AstrBot's built-in HTML-to-image renderer."""
 
@@ -406,7 +426,8 @@ def build_bilibili_card(
     cover_url = _url(cover, bilibili_media=True)
     avatar_url = _url(avatar, bilibili_media=True)
     link_url = _url(link)
-    brand, source, link_label = _card_labels(kind)
+    brand, source, default_link_label = _card_labels(kind)
+    link_label_text = _text(link_label, 40) or default_link_label
 
     avatar_markup = (
         f'<img class="avatar" src="{avatar_url}" alt="">'
@@ -421,7 +442,7 @@ def build_bilibili_card(
     status_markup = f'<div class="status">{status_text}</div>' if status_text else ""
     if title_text:
         title_markup = f'<div class="title">{title_text}</div>'
-    elif not summary_html and not cover_url:
+    elif cover_url and not summary_html:
         title_markup = f'<div class="title">发布了一条{kind_text}动态</div>'
     else:
         title_markup = ""
@@ -429,7 +450,7 @@ def build_bilibili_card(
         f'<div class="summary">{summary_html}</div>' if summary_html else ""
     )
     link_markup = (
-        f'<a class="open-link" href="{link_url}">{link_label} <span>↗</span></a>'
+        f'<a class="open-link" href="{link_url}">{link_label_text} <span>↗</span></a>'
         if link_url
         else ""
     )
@@ -474,8 +495,8 @@ body {{
 .status {{ margin: 0 0 13px; color: #fb7299; font-size: 13px; font-weight: 750; letter-spacing: .4px; }}
 .title {{ margin-bottom: 10px; color: #18191c; font-size: 22px; font-weight: 750; line-height: 1.45; word-break: break-word; }}
 .summary {{ margin-bottom: 18px; padding: 11px 14px; border-left: 4px solid #fb7299; border-radius: 0 10px 10px 0; background: #f7f8fa; color: #61666d; font-size: 16px; line-height: 1.7; word-break: break-word; }}
-.cover-wrap {{ overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
-.cover {{ display: block; width: 100%; max-height: 360px; object-fit: contain; background: #f1f2f3; }}
+.cover-wrap {{ display: flex; justify-content: center; overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
+.cover {{ display: block; width: auto; max-width: 100%; max-height: 520px; object-fit: contain; background: #f1f2f3; }}
 .footer {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px 20px; border-top: 1px solid #f0f1f2; background: #fcfcfd; }}
 .source {{ color: #c0c4cc; font-size: 12px; letter-spacing: .5px; }}
 .open-link {{ padding: 8px 14px; border-radius: 9px; background: #eaf8ff; color: #008ac5; font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }}

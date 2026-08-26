@@ -388,10 +388,15 @@ def parse_member_list(value: Any, *, max_items: int = 10_000) -> list[str]:
 
 def normalize_welcome_rules(value: Any) -> list[dict[str, Any]]:
     """Normalize global welcome rules without making malformed config fatal."""
-    if not isinstance(value, list):
+    # AstrBot serializes a template_list with one item as a mapping on some
+    # versions.  Treat that shape as a one-item list instead of dropping the
+    # configured welcome rule during plugin startup.
+    if isinstance(value, dict):
+        value = [value]
+    elif not isinstance(value, (list, tuple)):
         return []
     result: list[dict[str, Any]] = []
-    for index, raw in enumerate(value[:WELCOME_RULE_LIMIT], 1):
+    for index, raw in enumerate(list(value)[:WELCOME_RULE_LIMIT], 1):
         if not isinstance(raw, dict):
             continue
         message = str(
@@ -543,6 +548,8 @@ class QQGroupAdmin(Star):
         self._permission_diagnostics: dict[tuple[str, str], str] = {}
         self._patched_clients: dict[Any, Any] = {}
         self._patched_member_clients: dict[Any, Any] = {}
+        self._patched_connect_clients: dict[Any, Any] = {}
+        self._patched_connection_connects: dict[Any, Any] = {}
         self._welcome_sent_at: dict[tuple[str, str, int], float] = {}
         self._welcome_pending: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._welcome_inflight: set[tuple[str, str]] = set()
@@ -580,8 +587,12 @@ class QQGroupAdmin(Star):
                 GLOBAL_POLICIES_KEY,
                 "global_keyword_replies",
             )
-            if not isinstance(self.config.get(key), list)
-            or not self.config.get(key)
+            if (
+                not normalize_welcome_rules(self.config.get(key))
+                if key == WELCOME_RULES_KEY
+                else not isinstance(self.config.get(key), list)
+                or not self.config.get(key)
+            )
         }
         self._config_reset_candidate = bool(self._config_reset_keys)
         self._config_backup: dict[str, Any] = {}
@@ -1132,6 +1143,20 @@ class QQGroupAdmin(Star):
                 else:
                     client.on_group_member_add = previous
         self._patched_member_clients.clear()
+        for client, previous in self._patched_connect_clients.items():
+            handler = getattr(client, "bot_connect", None)
+            if getattr(handler, "__qqgroup_admin_owner__", None) is self:
+                if previous is None:
+                    with suppress(AttributeError):
+                        delattr(client, "bot_connect")
+                else:
+                    client.bot_connect = previous
+        self._patched_connect_clients.clear()
+        for connection, previous in self._patched_connection_connects.items():
+            handler = getattr(connection, "_connect", None)
+            if getattr(handler, "__qqgroup_admin_owner__", None) is self:
+                connection._connect = previous
+        self._patched_connection_connects.clear()
 
     async def _load_state(self) -> None:
         getter = getattr(self, "get_kv_data", None)
@@ -2319,6 +2344,7 @@ class QQGroupAdmin(Star):
         for platform in self._qq_platforms():
             try:
                 client = platform.get_client()
+                self._patch_qq_connect_intents(client)
                 existing = getattr(client, "on_interaction_create", None)
                 owner = getattr(existing, "__qqgroup_admin_owner__", None)
                 if owner is self:
@@ -2429,6 +2455,91 @@ class QQGroupAdmin(Star):
                         self._patched_member_clients[client] = previous_member
             except Exception as exc:  # noqa: BLE001 - private botpy boundary
                 self.logger.warning("安装 QQ 群管理按钮回调失败：%s", exc)
+
+    @staticmethod
+    def _ensure_qq_session_intents(session: Any) -> None:
+        if not isinstance(session, dict):
+            return
+        try:
+            session["intent"] = int(session.get("intent") or 0) | (
+                INTERACTION_INTENT | GROUP_MEMBER_INTENT
+            )
+        except (TypeError, ValueError):
+            return
+
+    def _patch_qq_connect_intents(self, client: Any) -> None:
+        """Keep custom intents in botpy's per-connection session snapshot."""
+
+        if hasattr(client, "intents"):
+            try:
+                client.intents = int(client.intents) | (
+                    INTERACTION_INTENT | GROUP_MEMBER_INTENT
+                )
+            except (TypeError, ValueError):
+                pass
+
+        previous = getattr(client, "bot_connect", None)
+        owner = getattr(previous, "__qqgroup_admin_owner__", None)
+        if callable(previous) and owner is not self:
+            if owner is not None:
+                previous = getattr(previous, "__qqgroup_admin_previous__", previous)
+
+            async def bot_connect(
+                session: Any,
+                previous_connect: Any = previous,
+            ) -> Any:
+                self._ensure_qq_session_intents(session)
+                return await previous_connect(session)
+
+            bot_connect.__qqgroup_admin_owner__ = self
+            bot_connect.__qqgroup_admin_previous__ = previous
+            client.bot_connect = bot_connect
+            self._patched_connect_clients[client] = previous
+        elif owner is self:
+            self._patched_connect_clients.setdefault(
+                client,
+                getattr(previous, "__qqgroup_admin_previous__", None),
+            )
+
+        connection = getattr(client, "_connection", None)
+        previous_connection = getattr(connection, "_connect", None)
+        connection_owner = getattr(
+            previous_connection,
+            "__qqgroup_admin_owner__",
+            None,
+        )
+        if connection is not None and callable(previous_connection):
+            if connection_owner is self:
+                self._patched_connection_connects.setdefault(
+                    connection,
+                    getattr(
+                        previous_connection,
+                        "__qqgroup_admin_previous__",
+                        None,
+                    ),
+                )
+            else:
+                if connection_owner is not None:
+                    previous_connection = getattr(
+                        previous_connection,
+                        "__qqgroup_admin_previous__",
+                        previous_connection,
+                    )
+
+                async def connection_connect(
+                    session: Any,
+                    previous_connect: Any = previous_connection,
+                ) -> Any:
+                    self._ensure_qq_session_intents(session)
+                    return await previous_connect(session)
+
+                connection_connect.__qqgroup_admin_owner__ = self
+                connection_connect.__qqgroup_admin_previous__ = previous_connection
+                connection._connect = connection_connect
+                self._patched_connection_connects[connection] = previous_connection
+
+        for session in getattr(connection, "_session_list", ()) or ():
+            self._ensure_qq_session_intents(session)
 
     def _install_group_member_event(self, client: Any) -> bool:
         """Bridge QQ's GROUP_MEMBER_ADD event missing from qq-botpy 1.2.1."""
@@ -4055,6 +4166,7 @@ class QQGroupAdmin(Star):
                                 f"**{name}**",
                                 f"**{title}**",
                                 "本场直播已结束。",
+                                f"[查看直播间 ↗](https://live.bilibili.com/{room_id})",
                             ]
                         )
                         text = "\n\n".join(sections)
@@ -4069,7 +4181,9 @@ class QQGroupAdmin(Star):
                         "avatar": current.get("face") or current.get("avatar"),
                         "status": "正在直播" if transition == "start" else "直播结束",
                         "link": f"https://live.bilibili.com/{room_id}",
-                        "link_label": "进入直播间",
+                        "link_label": (
+                            "进入直播间" if transition == "start" else "查看直播间"
+                        ),
                     }
                     delivered = await self._push_bilibili_message(
                         subscriptions.get(uid, []),

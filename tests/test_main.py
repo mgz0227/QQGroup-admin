@@ -306,6 +306,43 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         plugin._patch_qq_clients()
         self.assertIs(client.on_group_member_add, member_handler)
 
+    async def test_reconnect_session_keeps_group_member_intent(self):
+        plugin, client = self.plugin()
+        calls = []
+
+        async def original_connect(session):
+            calls.append(session["intent"])
+
+        client.bot_connect = original_connect
+        class FakeConnection:
+            def __init__(self):
+                self._connect = original_connect
+                self._session_list = [{"intent": 0}]
+
+        connection = FakeConnection()
+        client._connection = connection
+        plugin._qq_platforms = lambda: [
+            SimpleNamespace(get_client=lambda: client)
+        ]
+        plugin._install_group_member_event = lambda _client: True
+
+        plugin._patch_qq_clients()
+        client_connect = client.bot_connect
+        connection_connect = connection._connect
+        plugin._patch_qq_clients()
+
+        self.assertIs(client.bot_connect, client_connect)
+        self.assertIs(connection._connect, connection_connect)
+        required = module.INTERACTION_INTENT | module.GROUP_MEMBER_INTENT
+        self.assertEqual(connection._session_list[0]["intent"] & required, required)
+        await client.bot_connect({"intent": 0})
+        await connection._connect({"intent": 0})
+        self.assertEqual(calls, [required, required])
+
+        await plugin.terminate()
+        self.assertIs(client.bot_connect, original_connect)
+        self.assertIs(connection._connect, original_connect)
+
     async def test_settings_button_binds_named_group_without_webui_entry(self):
         plugin, client = self.plugin()
         plugin.config["auto_review_groups"] = []
@@ -2959,6 +2996,33 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(rendered.startswith(b"\x89PNG"))
         self.assertFalse(__import__("os").path.exists(temp_path.name))
 
+    async def test_bilibili_html_card_fallback_accepts_custom_link_label(self):
+        plugin, _client = self.plugin()
+        temp_path = __import__("tempfile").NamedTemporaryFile(
+            suffix=".png", delete=False
+        )
+        temp_path.write(b"\x89PNG\r\ncard")
+        temp_path.close()
+        plugin.html_render = AsyncMock(return_value=temp_path.name)
+
+        with patch.object(
+            module,
+            "render_bilibili_card",
+            side_effect=RuntimeError("local unavailable"),
+        ):
+            rendered = await plugin._render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "视频",
+                    "link": "https://www.bilibili.com/video/BV1",
+                    "link_label": "查看视频",
+                }
+            )
+
+        self.assertTrue(rendered.startswith(b"\x89PNG"))
+        template = plugin.html_render.await_args.kwargs["tmpl"]
+        self.assertIn("查看视频", template)
+
     async def test_bilibili_group_card_uploads_then_sends_media(self):
         plugin, client = self.plugin()
         upload = AsyncMock(
@@ -3029,6 +3093,44 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             plugin._bilibili_state["live"]["188144093"]["live_status"],
             1,
         )
+
+    async def test_bilibili_live_stop_push_keeps_room_link(self):
+        plugin, _client = self.plugin()
+        subscriptions = {
+            "188144093": [
+                {
+                    "group_openid": "group-1",
+                    "platform_id": "platform-1",
+                    "dynamic": False,
+                    "live": True,
+                }
+            ]
+        }
+        plugin._bilibili_state["live"]["188144093"] = {
+            "live_status": 1,
+            "live_time": "2026-08-24 12:00:00",
+            "room_id": "123",
+            "uname": "UP",
+            "title": "旧标题",
+        }
+        push = AsyncMock(return_value=True)
+        current = {
+            "live_status": 0,
+            "live_time": "2026-08-24 13:00:00",
+            "room_id": "123",
+            "uname": "UP",
+            "title": "旧标题",
+            "user_cover": "https://i0.hdslb.com/bfs/live/cover.jpg",
+        }
+        with (
+            patch.object(module, "fetch_live_statuses", return_value={"188144093": current}),
+            patch.object(plugin, "_push_bilibili_message", push),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_live(subscriptions))
+
+        text = push.await_args.args[1]
+        self.assertIn("[查看直播间 ↗](https://live.bilibili.com/123)", text)
+        self.assertEqual(push.await_args.kwargs["card_data"]["link_label"], "查看直播间")
 
     async def test_bilibili_empty_dynamic_card_has_no_placeholder_text(self):
         plugin, _client = self.plugin()
@@ -5130,6 +5232,21 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("欢迎 新人 加入 测试群", message["markdown"]["content"])
         self.assertIn("UID=188144093", message["markdown"]["content"])
         self.assertIn('<qqbot-at-user id="member-1" />', message["markdown"]["content"])
+
+    def test_single_welcome_template_mapping_is_preserved(self):
+        plugin, _client = self.plugin()
+        plugin.config["welcome_rules"] = {
+            "__template_key": "welcome_rule",
+            "name": "单条欢迎",
+            "message": "欢迎 {at_user}",
+            "group_openids": ["group-1"],
+            "enabled": True,
+        }
+
+        plugin._migrate_config()
+
+        self.assertEqual(len(plugin.config["welcome_rules"]), 1)
+        self.assertEqual(plugin.config["welcome_rules"][0]["name"], "单条欢迎")
 
     async def test_external_approval_welcome_is_sent_once_from_pending_cache(self):
         plugin, client = self.plugin()
