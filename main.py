@@ -71,6 +71,7 @@ INTERACTION_INTENT = 1 << 26
 BUTTON_TOKEN_TTL = 15 * 60
 SETTINGS_MESSAGE_TTL = 45
 VERIFICATION_TOKEN_TTL = 5 * 60
+MESSAGE_SEQ_MAX = 2_000_000_000
 JOIN_LIST_LIMIT = 5
 RECENT_RECALL_LIMIT = 50
 COMMAND_PANEL_REMARK = "astrbot_plugin_qqgroup_admin managed"
@@ -509,6 +510,8 @@ class QQGroupAdmin(Star):
         self._approval_contexts: dict[str, dict[str, Any]] = {}
         self._settings_tokens: dict[str, tuple[float, str, str, str]] = {}
         self._verification_tokens: dict[str, tuple[float, str, str, int]] = {}
+        # QQ may deduplicate active messages that reuse botpy's default seq=1.
+        self._outbound_message_seq = int(time.time_ns() % MESSAGE_SEQ_MAX) or 1
         self._keyword_reply_ready_at: dict[str, float] = {}
         self._bilibili_logins: dict[str, BilibiliQRLogin] = {}
         self._poll_cursors: dict[tuple[str, str], str] = {}
@@ -1346,6 +1349,12 @@ class QQGroupAdmin(Star):
         # the older <@OpenID> form is deprecated and may render literally.
         return f"<qqbot-at-user id={quoteattr(value)} />" if value else ""
 
+    def _next_outbound_message_seq(self) -> int:
+        self._outbound_message_seq += 1
+        if self._outbound_message_seq >= MESSAGE_SEQ_MAX:
+            self._outbound_message_seq = 1
+        return self._outbound_message_seq
+
     async def _send_group_text(
         self,
         client: Any,
@@ -1353,6 +1362,7 @@ class QQGroupAdmin(Star):
         text: str,
         *,
         message_id: str = "",
+        msg_seq: int | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "group_openid": group_openid,
@@ -1361,6 +1371,8 @@ class QQGroupAdmin(Star):
         }
         if message_id:
             kwargs["msg_id"] = message_id
+        if msg_seq is not None:
+            kwargs["msg_seq"] = int(msg_seq)
         return await client.api.post_group_message(**kwargs)
 
     async def _send_group_markdown(
@@ -1371,6 +1383,7 @@ class QQGroupAdmin(Star):
         *,
         message_id: str = "",
         keyboard: dict[str, Any] | None = None,
+        msg_seq: int | None = None,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "group_openid": group_openid,
@@ -1381,6 +1394,8 @@ class QQGroupAdmin(Star):
             kwargs["keyboard"] = keyboard
         if message_id:
             kwargs["msg_id"] = message_id
+        if msg_seq is not None:
+            kwargs["msg_seq"] = int(msg_seq)
         return await client.api.post_group_message(**kwargs)
 
     async def _send_group_notice(
@@ -1830,11 +1845,14 @@ class QQGroupAdmin(Star):
         # Do not reuse the triggering message id: QQ treats it as an
         # idempotency/reply key on some clients and silently drops the prompt.
         prompt_sent = False
+        prompt_seq = self._next_outbound_message_seq()
+        card_seq = self._next_outbound_message_seq()
         try:
             await self._send_group_text(
                 client,
                 group_openid,
                 prompt,
+                msg_seq=prompt_seq,
             )
             prompt_sent = True
         except Exception as prompt_exc:  # noqa: BLE001 - optional text notice
@@ -1845,6 +1863,7 @@ class QQGroupAdmin(Star):
                 group_openid,
                 prompt,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
+                msg_seq=card_seq,
             )
         except Exception as exc:  # noqa: BLE001 - Markdown/keyboard boundary
             # Keep the token when either prompt form was delivered; numeric

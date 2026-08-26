@@ -5005,6 +5005,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             await plugin._send_verification_challenge(client, "group-1", "member-1")
 
         card = next(message for message in client.api.messages if message["msg_type"] == 2)
+        prompt = next(message for message in client.api.messages if message["msg_type"] == 0)
         content = card["markdown"]["content"]
         self.assertIn("这是入群安全验证", content)
         self.assertIn("请点击下方正确答案按钮", content)
@@ -5014,6 +5015,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("未完成验证前发送的消息会被撤回", content)
         self.assertRegex(content, r"\d+ \+ \d+ = \?")
         self.assertNotIn("msg_id", card)
+        self.assertIn("msg_seq", prompt)
+        self.assertIn("msg_seq", card)
+        self.assertNotEqual(prompt["msg_seq"], card["msg_seq"])
         self.assertEqual(
             [message["msg_type"] for message in client.api.messages[:2]], [0, 2]
         )
