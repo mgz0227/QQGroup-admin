@@ -261,6 +261,20 @@ GLOBAL_POLICY_DEFAULTS = {
     "keyword_reply_recall_seconds": 0,
 }
 
+# Keep top-level runtime controls alongside the list snapshots.  These values
+# are user-owned too, but must never include bilibili_cookie or other secrets.
+CONFIG_BACKUP_RUNTIME_DEFAULTS = {
+    "uid_review_interval_seconds": 60,
+    "bilibili_live_interval_seconds": 60,
+    "bilibili_dynamic_interval_seconds": 180,
+}
+CONFIG_BACKUP_GLOBAL_KEYS = tuple(
+    dict.fromkeys((*GLOBAL_POLICY_DEFAULTS, *CONFIG_BACKUP_RUNTIME_DEFAULTS))
+)
+CONFIG_BACKUP_GLOBAL_TEXT_LIMIT = 1_400_000
+CONFIG_BACKUP_GLOBAL_REPLY_LIMIT = 4_000
+CONFIG_BACKUP_GLOBAL_INT_MAX = 2_592_000
+
 GLOBAL_MEDIA_POLICY_KEYS = (
     "global_image_spam_enabled",
     "global_image_spam_count",
@@ -792,6 +806,15 @@ class QQGroupAdmin(Star):
                     payload[key] = self._bounded_int(
                         self.config.get(key), 0, 0, maximum
                     )
+        global_settings = self._normalize_config_backup_globals(
+            {
+                key: self.config.get(key)
+                for key in CONFIG_BACKUP_GLOBAL_KEYS
+                if key in self.config
+            }
+        )
+        if global_settings:
+            payload["global_settings"] = global_settings
         return payload or None
 
     def _schedule_config_backup(self) -> None:
@@ -815,6 +838,62 @@ class QQGroupAdmin(Star):
             await asyncio.sleep(0.2)
             await self._save_config_backup()
 
+    @classmethod
+    def _normalize_config_backup_globals(cls, value: Any) -> dict[str, Any]:
+        if not isinstance(value, dict):
+            return {}
+        result: dict[str, Any] = {}
+        for key in CONFIG_BACKUP_GLOBAL_KEYS:
+            if key not in value:
+                continue
+            default = (
+                GLOBAL_POLICY_DEFAULTS[key]
+                if key in GLOBAL_POLICY_DEFAULTS
+                else CONFIG_BACKUP_RUNTIME_DEFAULTS[key]
+            )
+            raw = value[key]
+            if key == GLOBAL_AI_FALLBACKS_KEY:
+                result[key] = normalize_provider_ids(raw)
+            elif isinstance(default, bool):
+                if isinstance(raw, bool):
+                    result[key] = raw
+            elif isinstance(default, int):
+                result[key] = cls._bounded_int(
+                    raw,
+                    default,
+                    0,
+                    CONFIG_BACKUP_GLOBAL_INT_MAX,
+                )
+            elif isinstance(default, str):
+                text = str(raw or "")
+                limit = (
+                    CONFIG_BACKUP_GLOBAL_REPLY_LIMIT
+                    if key.endswith("_reply") or key == "mute_success_message"
+                    else CONFIG_BACKUP_GLOBAL_TEXT_LIMIT
+                )
+                result[key] = text[:limit]
+        return result
+
+    @classmethod
+    def _config_value_is_default(cls, key: str, value: Any) -> bool:
+        default = (
+            GLOBAL_POLICY_DEFAULTS[key]
+            if key in GLOBAL_POLICY_DEFAULTS
+            else CONFIG_BACKUP_RUNTIME_DEFAULTS[key]
+        )
+        if key == GLOBAL_AI_FALLBACKS_KEY:
+            return normalize_provider_ids(value) == normalize_provider_ids(default)
+        if isinstance(default, bool):
+            return not isinstance(value, bool) or value == default
+        if isinstance(default, int):
+            try:
+                return int(value) == default
+            except (TypeError, ValueError):
+                return True
+        if isinstance(default, str):
+            return not isinstance(value, str) or value == default
+        return False
+
     async def _save_config_backup(self) -> None:
         payload = self._config_backup_payload()
         if payload is None:
@@ -828,7 +907,7 @@ class QQGroupAdmin(Star):
             self.logger.warning("保存入群审核配置快照失败：%s", exc)
 
     async def _restore_config_backup(self) -> bool:
-        if not self._config_reset_candidate:
+        if not (self._config_reset_candidate or self._config_full_reset_candidate):
             return False
         restored: dict[str, int] = {}
         candidates = (
@@ -869,7 +948,17 @@ class QQGroupAdmin(Star):
                     self.config[key] = self._bounded_int(
                         self._config_backup.get(key), 0, 0, maximum
                     )
-        if not restored:
+        restored_globals = 0
+        global_backup = self._normalize_config_backup_globals(
+            self._config_backup.get("global_settings")
+        )
+        if global_backup:
+            for key, value in global_backup.items():
+                current = self.config.get(key)
+                if key not in self.config or self._config_value_is_default(key, current):
+                    self.config[key] = copy.deepcopy(value)
+                    restored_globals += 1
+        if not restored and not restored_globals:
             return False
         self.config.save_config()
         self._config_reset_keys.difference_update(restored)
@@ -1016,6 +1105,11 @@ class QQGroupAdmin(Star):
             ):
                 if key in backup:
                     loaded_backup[key] = backup[key]
+            global_settings = self._normalize_config_backup_globals(
+                backup.get("global_settings")
+            )
+            if global_settings:
+                loaded_backup["global_settings"] = global_settings
             if loaded_backup:
                 self._config_backup = loaded_backup
         if self._violation_state_dirty:

@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import sys
@@ -3520,6 +3521,66 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(plugin.config["keyword_reply_cooldown_seconds"], 45)
         self.assertEqual(plugin.config["keyword_reply_recall_seconds"], 12)
+
+    async def test_config_backup_restores_global_settings_after_schema_reset(self):
+        config = TestConfig(
+            auto_review_groups=[{"group_openid": "group-1"}],
+            global_policy_profiles=[{"profile_id": "default"}],
+            welcome_rules=[],
+            global_keyword_replies=[],
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="primary",
+            global_ai_review_fallback_provider_ids=["fallback-1", "fallback-2"],
+            global_ai_review_timeout_seconds=77,
+            global_image_ocr_enabled=True,
+            global_image_ocr_provider_id="vision",
+            global_image_ocr_timeout_seconds=9,
+            global_image_ocr_max_images=3,
+            global_message_reject_keywords="广告",
+            uid_review_interval_seconds=240,
+            bilibili_live_interval_seconds=300,
+            bilibili_dynamic_interval_seconds=900,
+        )
+        plugin = module.QQGroupAdmin(SimpleNamespace(), config)
+        payload = plugin._config_backup_payload()
+        self.assertNotIn("bilibili_cookie", payload["global_settings"])
+
+        for key, default in module.GLOBAL_POLICY_DEFAULTS.items():
+            plugin.config[key] = copy.deepcopy(default)
+        for key, default in module.CONFIG_BACKUP_RUNTIME_DEFAULTS.items():
+            plugin.config[key] = default
+        plugin._config_backup = payload
+        plugin._config_reset_keys = {"auto_review_groups"}
+        plugin._config_reset_candidate = True
+
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertTrue(plugin.config[module.GLOBAL_AI_ENABLED_KEY])
+        self.assertEqual(plugin.config[module.GLOBAL_AI_PROVIDER_KEY], "primary")
+        self.assertEqual(
+            plugin.config[module.GLOBAL_AI_FALLBACKS_KEY], ["fallback-1", "fallback-2"]
+        )
+        self.assertTrue(plugin.config[module.GLOBAL_IMAGE_OCR_ENABLED_KEY])
+        self.assertEqual(plugin.config["global_message_reject_keywords"], "广告")
+        self.assertEqual(plugin.config["uid_review_interval_seconds"], 240)
+        self.assertEqual(plugin.config["bilibili_live_interval_seconds"], 300)
+        self.assertEqual(plugin.config["bilibili_dynamic_interval_seconds"], 900)
+
+    async def test_config_backup_does_not_overwrite_non_default_current_global_settings(self):
+        config = TestConfig(
+            auto_review_groups=[{"group_openid": "group-1"}],
+            global_ai_review_provider_id="old-primary",
+            uid_review_interval_seconds=240,
+        )
+        plugin = module.QQGroupAdmin(SimpleNamespace(), config)
+        plugin._config_backup = plugin._config_backup_payload()
+        plugin.config[module.GLOBAL_AI_PROVIDER_KEY] = "new-primary"
+        plugin.config["uid_review_interval_seconds"] = 120
+        plugin._config_full_reset_candidate = True
+        plugin._config_reset_candidate = False
+
+        self.assertTrue(await plugin._restore_config_backup())
+        self.assertEqual(plugin.config[module.GLOBAL_AI_PROVIDER_KEY], "new-primary")
+        self.assertEqual(plugin.config["uid_review_interval_seconds"], 120)
 
     async def test_partial_welcome_reset_restores_without_touching_groups(self):
         plugin, _client = self.plugin()
