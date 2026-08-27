@@ -37,6 +37,7 @@ from .bilibili_card import (
     bilibili_media_url_candidates,
     download_bilibili_image,
     render_bilibili_card,
+    split_bilibili_poster,
 )
 from .image_ocr import (
     embedded_image_text,
@@ -4033,6 +4034,7 @@ class QQGroupAdmin(Star):
         card_image: bytes | None = None
         focus_fallback_image: bytes | None = None
         native_image: bytes | None = None
+        native_images: list[bytes] = []
         native_url = ""
         native_cover = False
         poster_caption = ""
@@ -4063,6 +4065,20 @@ class QQGroupAdmin(Star):
                     )
                 except Exception as exc:  # noqa: BLE001 - use rich-card fallback
                     self.logger.debug("B 站原图下载失败，改用通知卡片：%s", exc)
+                if native_image is not None:
+                    try:
+                        native_images = await asyncio.wait_for(
+                            asyncio.to_thread(split_bilibili_poster, native_image),
+                            timeout=8,
+                        )
+                    except Exception as exc:  # noqa: BLE001 - keep the original poster
+                        native_images = [native_image]
+                        self.logger.debug("B 站海报分段失败，保留整图：%s", exc)
+                    if len(native_images) > 1:
+                        self.logger.debug(
+                            "B 站竖版海报分段发送：parts=%s",
+                            len(native_images),
+                        )
             if native_cover:
                 poster_caption = self._bilibili_poster_caption(card_data)
             try:
@@ -4083,22 +4099,36 @@ class QQGroupAdmin(Star):
             try:
                 if native_cover:
                     poster_sent = False
-                    if native_image is not None:
+                    if native_images:
+                        sent_parts = 0
                         try:
-                            await self._send_group_card(
-                                client,
-                                group_openid,
-                                native_image,
-                                link=str((card_data or {}).get("link") or ""),
-                                link_label=str(
-                                    (card_data or {}).get("link_label") or "查看原动态"
-                                ),
-                            )
-                            poster_sent = True
+                            for poster in native_images:
+                                await self._send_group_card(
+                                    client,
+                                    group_openid,
+                                    poster,
+                                    link=str((card_data or {}).get("link") or ""),
+                                    link_label=str(
+                                        (card_data or {}).get("link_label") or "查看原动态"
+                                    ),
+                                )
+                                sent_parts += 1
+                            poster_sent = sent_parts == len(native_images)
                         except Exception as card_exc:  # noqa: BLE001 - try URL path
-                            self.logger.debug(
-                                "B 站原图媒体发送失败，尝试公开 URL：%s", card_exc
-                            )
+                            if sent_parts:
+                                # Do not append a full fallback after a partial
+                                # poster; that would duplicate the first images.
+                                poster_sent = True
+                                self.logger.warning(
+                                    "B 站海报分段发送不完整：sent=%s total=%s error=%s",
+                                    sent_parts,
+                                    len(native_images),
+                                    card_exc,
+                                )
+                            else:
+                                self.logger.debug(
+                                    "B 站原图媒体发送失败，尝试公开 URL：%s", card_exc
+                                )
                     if not poster_sent and native_url:
                         try:
                             await self._send_group_card_url(

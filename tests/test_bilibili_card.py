@@ -8,6 +8,7 @@ from bilibili_card import (
     build_bilibili_card,
     download_bilibili_image,
     render_bilibili_card,
+    split_bilibili_poster,
 )
 
 
@@ -57,6 +58,12 @@ class BilibiliCardTest(unittest.TestCase):
             ],
         )
         self.assertEqual(
+            _image_url_candidates(
+                "https://i0.hdslb.com/bfs/new_dyn/post.png@672w_1c.webp"
+            )[-1],
+            "https://i0.hdslb.com/bfs/new_dyn/post.png",
+        )
+        self.assertEqual(
             _image_url("https://user:pass@i0.hdslb.com/bfs/post.jpg"),
             "",
         )
@@ -98,6 +105,63 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertLessEqual(max(rendered.size), 2400)
         self.assertLessEqual(len(encoded), 8 * 1024 * 1024)
         self.assertEqual(opener.timeout, 4)
+
+    def test_native_download_prefers_suffix_free_original_before_thumbnail(self):
+        from PIL import Image
+
+        small = BytesIO()
+        Image.new("RGB", (672, 1256), "#734820").save(small, format="PNG")
+        original = BytesIO()
+        Image.new("RGB", (1320, 2468), "#3c2410").save(original, format="PNG")
+        requested: list[str] = []
+
+        class Response:
+            def __init__(self, payload: bytes):
+                self.payload = payload
+                self.headers = {"Content-Length": str(len(payload))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                return self.payload
+
+        class Opener:
+            def open(self, request, timeout):
+                requested.append(request.full_url)
+                return Response(
+                    original.getvalue()
+                    if "@672w_1c" not in request.full_url
+                    else small.getvalue()
+                )
+
+        with patch("bilibili_card.build_opener", return_value=Opener()):
+            encoded = download_bilibili_image(
+                "http://i0.hdslb.com/bfs/new_dyn/post@672w_1c.png"
+            )
+
+        self.assertIsNotNone(encoded)
+        rendered = Image.open(BytesIO(encoded))
+        self.assertEqual(requested[0], "https://i0.hdslb.com/bfs/new_dyn/post.png")
+        self.assertEqual(rendered.size, (1284, 2400))
+
+    def test_tall_poster_is_split_into_readable_parts(self):
+        from PIL import Image
+
+        source = BytesIO()
+        Image.new("RGB", (1320, 2468), "#734820").save(source, format="JPEG")
+        parts = split_bilibili_poster(source.getvalue())
+
+        self.assertEqual(len(parts), 3)
+        self.assertEqual(
+            sum(Image.open(BytesIO(part)).height for part in parts),
+            2468,
+        )
+        self.assertTrue(all(Image.open(BytesIO(part)).width == 1320 for part in parts))
+        self.assertEqual(len(split_bilibili_poster(b"not-an-image")), 1)
 
     def test_html_card_gives_small_portrait_covers_a_readable_width(self):
         html = build_bilibili_card(
@@ -170,7 +234,7 @@ class BilibiliCardTest(unittest.TestCase):
             image_only=True,
         )
         self.assertIn("focus-content", html)
-        self.assertIn('width:299px;height:560px', html)
+        self.assertIn('width:406px;height:760px', html)
         self.assertIn("图文动态 · 正文已包含在海报中", html)
 
     def test_html_portrait_with_copy_keeps_side_by_side_layout(self):
@@ -236,7 +300,7 @@ class BilibiliCardTest(unittest.TestCase):
         rendered = Image.open(BytesIO(image))
         self.assertEqual(rendered.width, 560)
         self.assertGreater(rendered.height, 700)
-        self.assertLess(rendered.height, 950)
+        self.assertLess(rendered.height, 1_200)
 
     def test_local_image_only_square_cover_uses_focus_width(self):
         from PIL import Image
@@ -278,6 +342,28 @@ class BilibiliCardTest(unittest.TestCase):
         rendered = Image.open(BytesIO(image))
         self.assertEqual(rendered.width, 560)
         self.assertGreater(rendered.height, 1_000)
+
+    def test_focus_fallback_download_keeps_tall_cover_resolution(self):
+        from PIL import Image
+
+        portrait = Image.new("RGB", (1320, 2468), "#734820")
+        requested_sizes: list[tuple[int, int]] = []
+
+        def download(_value, *, max_size=(1600, 1000)):
+            requested_sizes.append(max_size)
+            return portrait
+
+        with patch("bilibili_card._download_image", side_effect=download):
+            render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "图文",
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "focus_cover": True,
+                }
+            )
+
+        self.assertIn((1600, 2400), requested_sizes)
 
     def test_local_card_uses_custom_link_label_and_clips_author(self):
         from PIL import ImageDraw

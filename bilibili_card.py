@@ -79,7 +79,13 @@ def _image_url_candidates(value: object) -> list[str]:
         suffix = ""
         if "." in filename[marker:]:
             suffix = filename.rsplit(".", 1)[-1]
-        original_filename = filename[:marker] + (f".{suffix}" if suffix else "")
+        prefix = filename[:marker]
+        # Some feeds put the source extension before the resize marker, e.g.
+        # ``poster.png@672w_1c.webp``.  Keep that extension instead of
+        # producing the invalid ``poster.png.webp`` candidate.
+        original_filename = (
+            prefix if "." in prefix else prefix + (f".{suffix}" if suffix else "")
+        )
         parent = parsed.path[: -len(filename)] if filename else parsed.path
         original_path = parent + original_filename
         original = urlunsplit(
@@ -139,7 +145,7 @@ def _font(size: int, *, bold: bool = False):
     return ImageFont.load_default()
 
 
-def _download_image(value: object):
+def _download_image(value: object, *, max_size: tuple[int, int] = (1600, 1000)):
     from PIL import Image, ImageOps
 
     urls = _image_url_candidates(value)
@@ -163,9 +169,15 @@ def _download_image(value: object):
                 continue
             image = Image.open(BytesIO(data))
             image = ImageOps.exif_transpose(image).convert("RGB")
-            image.thumbnail((1600, 1000))
+            image.thumbnail(max_size)
             return image
-        except (OSError, SyntaxError, URLError, ValueError):
+        except (
+            OSError,
+            SyntaxError,
+            URLError,
+            ValueError,
+            Image.DecompressionBombError,
+        ):
             continue
     return None
 
@@ -184,7 +196,11 @@ def download_bilibili_image(value: object, *, max_bytes: int = 8 * 1024 * 1024) 
     urls = _image_url_candidates(value)
     if not urls or max_bytes <= 0:
         return None
-    for url in urls:
+    # A feed often exposes a resized ``@672w`` URL first.  For the native
+    # poster path prefer the suffix-free source so QQ does not magnify a low
+    # resolution thumbnail; the original URL remains a bounded fallback when
+    # the source poster is unavailable.
+    for url in reversed(urls):
         try:
             request = Request(
                 url,
@@ -214,9 +230,60 @@ def download_bilibili_image(value: object, *, max_bytes: int = 8 * 1024 * 1024) 
             encoded = output.getvalue()
             if len(encoded) <= max_bytes:
                 return encoded
-        except (OSError, SyntaxError, URLError, ValueError):
+        except (
+            OSError,
+            SyntaxError,
+            URLError,
+            ValueError,
+            Image.DecompressionBombError,
+        ):
             continue
     return None
+
+
+def split_bilibili_poster(
+    image_data: bytes,
+    *,
+    max_parts: int = 3,
+    max_part_height: int = 900,
+) -> list[bytes]:
+    """Split very tall posters so QQ clients do not shrink them to a thumbnail."""
+
+    if not isinstance(image_data, bytes) or not image_data:
+        return []
+    if max_parts < 2 or max_part_height < 1:
+        return [image_data]
+    try:
+        from PIL import Image, ImageOps
+    except ImportError:
+        return [image_data]
+    try:
+        source = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGB")
+        width, height = source.size
+        if height <= max_part_height or height / max(width, 1) <= 1.45:
+            return [image_data]
+        parts = min(max_parts, max(2, (height + max_part_height - 1) // max_part_height))
+        part_height = (height + parts - 1) // parts
+        result: list[bytes] = []
+        for index in range(parts):
+            top = index * part_height
+            bottom = min(height, (index + 1) * part_height)
+            if top >= bottom:
+                continue
+            output = BytesIO()
+            source.crop((0, top, width, bottom)).save(
+                output,
+                format="JPEG",
+                quality=92,
+                optimize=True,
+            )
+            encoded = output.getvalue()
+            if not encoded or len(encoded) > 8 * 1024 * 1024:
+                return [image_data]
+            result.append(encoded)
+        return result or [image_data]
+    except (OSError, SyntaxError, ValueError, Image.DecompressionBombError):
+        return [image_data]
 
 
 def _wrap_text(
@@ -306,8 +373,22 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     link = _plain(card_data.get("link"), 500)
     brand, source, default_link_label = _card_labels(kind)
     link_label = _plain(card_data.get("link_label"), 40) or default_link_label
+    focus_requested = str(card_data.get("focus_cover") or "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    } or str(card_data.get("image_only") or "").lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     avatar = _download_image(card_data.get("avatar"))
-    cover = _download_image(card_data.get("cover"))
+    cover = _download_image(
+        card_data.get("cover"),
+        max_size=(1600, 2400) if focus_requested else (1600, 1000),
+    )
 
     # A draw dynamic can contain all of its copy in one portrait poster.  A
     # wide side-by-side card makes that poster occupy too little of the QQ
@@ -359,7 +440,7 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     if cover is not None and source_width > 0 and source_height > 0:
         portrait_layout = portrait_source and not focus_layout
         max_width = inner_width if focus_layout else (278 if portrait_layout else inner_width)
-        max_height = 560 if image_only else (760 if focus_layout else (470 if portrait_layout else 520))
+        max_height = 760 if image_only else (760 if focus_layout else (470 if portrait_layout else 520))
         scale = min(max_width / source_width, max_height / source_height)
         cover_display_size = (
             max(1, int(source_width * scale)),
@@ -661,8 +742,9 @@ def build_bilibili_card(
         portrait_cover = False
     portrait_cover_style = ""
     if portrait_cover:
-        max_width = 350 if image_only_cover else 278
-        max_height = 560 if image_only_cover else 470
+        # Focus cards are 560px wide with 28px content padding on each side.
+        max_width = 460 if image_only_cover else 278
+        max_height = 760 if image_only_cover else 470
         scale = min(max_width / source_width, max_height / source_height)
         display_width = max(1, int(source_width * scale))
         display_height = max(1, int(source_height * scale))
@@ -764,7 +846,7 @@ body {{
 .focus-content .cover-wrap {{ width: 100%; margin-top: 0; }}
 .cover-wrap {{ display: flex; justify-content: center; overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
 .portrait-cover .cover-wrap {{ margin-top: 0; }}
-.cover {{ display: block; width: auto; max-width: 100%; max-height: {560 if image_only_cover else (760 if focus_cover_requested else 520)}px; height: auto; object-fit: contain; background: #f1f2f3; }}
+.cover {{ display: block; width: auto; max-width: 100%; max-height: {760 if image_only_cover else (760 if focus_cover_requested else 520)}px; height: auto; object-fit: contain; background: #f1f2f3; }}
 .footer {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px 20px; border-top: 1px solid #f0f1f2; background: #fcfcfd; }}
 .source {{ color: #c0c4cc; font-size: 12px; letter-spacing: .5px; }}
 .open-link {{ padding: 8px 14px; border-radius: 9px; background: #eaf8ff; color: #008ac5; font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }}

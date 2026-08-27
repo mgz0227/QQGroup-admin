@@ -3141,6 +3141,70 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
         )
 
+    async def test_bilibili_tall_poster_sends_each_readable_part_once(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_card = AsyncMock(return_value=SimpleNamespace(id="poster"))
+        with (
+            patch.object(module, "download_bilibili_image", return_value=b"poster"),
+            patch.object(module, "split_bilibili_poster", return_value=[b"part-1", b"part-2"]),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    }
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "link": "https://www.bilibili.com/opus/5",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual([call.args[2] for call in send_card.await_args_list], [b"part-1", b"part-2"])
+        self.assertIn("查看原动态", client.api.messages[-1]["markdown"]["content"])
+
+    async def test_bilibili_partial_poster_send_does_not_append_duplicate_fallback(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_card = AsyncMock(
+            side_effect=[SimpleNamespace(id="part-1"), RuntimeError("part-2 failed")]
+        )
+        with (
+            patch.object(module, "download_bilibili_image", return_value=b"poster"),
+            patch.object(module, "split_bilibili_poster", return_value=[b"part-1", b"part-2"]),
+            patch.object(plugin, "_send_group_card", send_card),
+            patch.object(plugin, "_send_group_card_url", AsyncMock()) as send_url,
+            patch.object(plugin, "_render_bilibili_card", AsyncMock()) as render,
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "link": "https://www.bilibili.com/opus/6",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(send_card.await_count, 2)
+        send_url.assert_not_awaited()
+        render.assert_not_awaited()
+
     async def test_bilibili_draw_download_failure_uses_focus_fallback(self):
         plugin, _client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": _client}
