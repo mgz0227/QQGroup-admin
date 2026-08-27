@@ -4042,7 +4042,26 @@ class QQGroupAdmin(Star):
         native_cover = False
         native_preferred = False
         poster_caption = ""
+        cover_values: list[str] = []
         if card_data:
+            raw_covers = card_data.get("covers") or card_data.get("images") or []
+            if isinstance(raw_covers, (list, tuple)):
+                for value in raw_covers:
+                    if isinstance(value, dict):
+                        value = (
+                            value.get("url")
+                            or value.get("src")
+                            or value.get("image")
+                        )
+                    value = str(value or "").strip()
+                    if value and value not in cover_values:
+                        cover_values.append(value)
+            first_cover = str(card_data.get("cover") or "").strip()
+            if first_cover:
+                cover_values = [
+                    first_cover,
+                    *(value for value in cover_values if value != first_cover),
+                ]
             image_only = str(card_data.get("image_only") or "").lower() in {
                 "1",
                 "true",
@@ -4059,8 +4078,8 @@ class QQGroupAdmin(Star):
             native_preferred = str(
                 card_data.get("native_poster_preferred") or ""
             ).lower() in {"1", "true", "yes", "on"}
-            if (image_only or native_cover) and card_data.get("cover"):
-                native_urls = bilibili_media_url_candidates(card_data.get("cover"))
+            if (image_only or native_cover) and cover_values:
+                native_urls = bilibili_media_url_candidates(cover_values[0])
                 # Keep the original feed URL here.  _send_group_card_url
                 # receives the full candidate list and tries the suffix-free
                 # source first, then the thumbnail if QQ cannot fetch it.
@@ -4090,31 +4109,48 @@ class QQGroupAdmin(Star):
                     card_image = await self._render_bilibili_card(render_data)
             except Exception as exc:  # noqa: BLE001 - renderer is optional
                 self.logger.debug("B 站统一卡片不可用，尝试原始海报：%s", exc)
-            if native_cover and card_image is None and card_data.get("cover"):
-                try:
-                    native_image = await asyncio.wait_for(
-                        asyncio.to_thread(
-                            download_bilibili_image,
-                            card_data.get("cover"),
-                        ),
-                        timeout=8,
-                    )
-                except Exception as exc:  # noqa: BLE001 - use URL/Markdown fallback
-                    self.logger.debug("B 站原图下载失败，改用通知卡片：%s", exc)
-                if native_image is not None:
+            if native_cover and card_image is None and cover_values:
+                # Keep gallery processing serial and bounded: one slow CDN or
+                # oversized image must not create an unbounded worker queue.
+                media_deadline = time.monotonic() + 20
+                for cover_value in cover_values[:3]:
+                    remaining = media_deadline - time.monotonic()
+                    if remaining <= 0.5:
+                        break
                     try:
-                        native_images = await asyncio.wait_for(
+                        native_image = await asyncio.wait_for(
+                            asyncio.to_thread(
+                                download_bilibili_image,
+                                cover_value,
+                            ),
+                            timeout=min(8, remaining),
+                        )
+                    except Exception as exc:  # noqa: BLE001 - try next image
+                        self.logger.debug("B 站原图下载失败，跳过当前图片：%s", exc)
+                        continue
+                    if native_image is None:
+                        continue
+                    remaining = media_deadline - time.monotonic()
+                    if remaining <= 0.5:
+                        native_images.append(native_image)
+                        break
+                    try:
+                        parts = await asyncio.wait_for(
                             asyncio.to_thread(split_bilibili_poster, native_image),
-                            timeout=8,
+                            timeout=min(8, remaining),
                         )
-                    except Exception as exc:  # noqa: BLE001 - keep the original poster
-                        native_images = [native_image]
+                    except Exception as exc:  # noqa: BLE001 - keep original poster
+                        parts = [native_image]
                         self.logger.debug("B 站海报分段失败，保留整图：%s", exc)
-                    if len(native_images) > 1:
-                        self.logger.debug(
-                            "B 站竖版海报分段发送：parts=%s",
-                            len(native_images),
-                        )
+                    native_images.extend(parts)
+                    if len(native_images) >= 3:
+                        native_images = native_images[:3]
+                        break
+                if len(native_images) > 1:
+                    self.logger.debug(
+                        "B 站图文原图分段发送：parts=%s",
+                        len(native_images),
+                    )
 
         async def send_native_poster(client: Any, group_openid: str) -> bool:
             """Send the original poster when the composed card is unavailable."""
@@ -4284,6 +4320,17 @@ class QQGroupAdmin(Star):
         timestamp = str(card_data.get("timestamp") or "").strip()
         if timestamp:
             caption += " · " + self._markdown_text(timestamp, 32)
+        image_count = self._bounded_int(
+            card_data.get("image_count")
+            or len(card_data.get("covers") or card_data.get("images") or []),
+            0,
+            0,
+            99,
+        )
+        if image_count > 1:
+            caption += f" · {image_count} 张图片"
+            if image_count > 3:
+                caption += "（展示前 3 张）"
         title = str(card_data.get("title") or "").strip()
         summary = str(card_data.get("summary") or "").strip()
         if title:
@@ -4602,7 +4649,16 @@ class QQGroupAdmin(Star):
                 sections = ["# B站视频" if is_video else "# B站动态", meta]
                 if cover:
                     sections.append(cover)
-                has_poster = bool(item.get("cover") and kind in {"图文", "转发"})
+                gallery = item.get("images")
+                gallery = gallery if isinstance(gallery, list) else []
+                covers = [
+                    value.get("url")
+                    for value in gallery
+                    if isinstance(value, dict) and value.get("url")
+                ]
+                if item.get("cover") and item.get("cover") not in covers:
+                    covers.insert(0, item.get("cover"))
+                has_poster = bool(covers and kind in {"图文", "转发"})
                 image_only = bool(has_poster and not title and not summary)
                 # Portrait draw/forward posts remain readable when QQ receives
                 # the source poster directly; a tall composed card is scaled
@@ -4639,6 +4695,8 @@ class QQGroupAdmin(Star):
                         else ""
                     ),
                     "cover": item.get("cover"),
+                    "covers": covers[:3],
+                    "image_count": len(covers),
                     "cover_width": item.get("cover_width", 0),
                     "cover_height": item.get("cover_height", 0),
                     # Some Bilibili draw posts have no API title/description:

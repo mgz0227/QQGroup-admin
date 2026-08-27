@@ -3342,6 +3342,48 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([call.args[2] for call in send_card.await_args_list], [b"part-1", b"part-2"])
         self.assertIn("查看原动态", client.api.messages[-1]["markdown"]["content"])
 
+    async def test_bilibili_gallery_sends_at_most_three_native_images(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_card = AsyncMock(return_value=SimpleNamespace(id="poster"))
+        with (
+            patch.object(
+                module,
+                "download_bilibili_image",
+                side_effect=[b"one", b"two", b"three"],
+            ) as download,
+            patch.object(module, "split_bilibili_poster", side_effect=lambda value: [value]),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "native_poster_preferred": True,
+                    "cover": "https://i0.hdslb.com/bfs/1.jpg",
+                    "covers": [
+                        "https://i0.hdslb.com/bfs/1.jpg",
+                        "https://i0.hdslb.com/bfs/2.jpg",
+                        "https://i0.hdslb.com/bfs/3.jpg",
+                        "https://i0.hdslb.com/bfs/4.jpg",
+                    ],
+                    "image_count": 4,
+                    "link": "https://www.bilibili.com/opus/gallery",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(download.call_count, 3)
+        self.assertEqual(
+            [call.args[2] for call in send_card.await_args_list],
+            [b"one", b"two", b"three"],
+        )
+        self.assertIn("4 张图片", client.api.messages[-1]["markdown"]["content"])
+
     async def test_bilibili_partial_poster_send_does_not_append_duplicate_fallback(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}

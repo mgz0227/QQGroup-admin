@@ -153,6 +153,45 @@ class BilibiliTest(unittest.TestCase):
         self.assertEqual(item["cover_width"], 1320)
         self.assertEqual(item["cover_height"], 2468)
 
+    def test_dynamic_parser_keeps_a_bounded_gallery(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "draw-gallery",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_author": {"name": "UP"},
+                            "module_dynamic": {
+                                "major": {
+                                    "draw": {
+                                        "items": [
+                                            {"src": "//i0.hdslb.com/bfs/1.jpg", "width": 800, "height": 600},
+                                            {"src": "//i0.hdslb.com/bfs/2.jpg", "width": 800, "height": 600},
+                                            {"src": "//i0.hdslb.com/bfs/3.jpg", "width": 800, "height": 600},
+                                            {"src": "//i0.hdslb.com/bfs/4.jpg", "width": 800, "height": 600},
+                                        ]
+                                    }
+                                }
+                            },
+                        },
+                    }
+                ]
+            },
+        }
+
+        item = parse_dynamic_items(payload)[0]
+        self.assertEqual(item["cover"], "https://i0.hdslb.com/bfs/1.jpg")
+        self.assertEqual(
+            [image["url"] for image in item["images"]],
+            [
+                "https://i0.hdslb.com/bfs/1.jpg",
+                "https://i0.hdslb.com/bfs/2.jpg",
+                "https://i0.hdslb.com/bfs/3.jpg",
+            ],
+        )
+
     def test_video_parser_prefers_video_description_over_generic_dynamic_text(self):
         payload = {
             "code": 0,

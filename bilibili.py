@@ -406,6 +406,47 @@ def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
     return "", 0, 0
 
 
+def _cover_infos(card: dict[str, Any], *, max_items: int = 3) -> list[tuple[str, int, int]]:
+    """Return a bounded gallery while preserving the legacy first-cover choice."""
+
+    if not isinstance(card, dict) or max_items <= 0:
+        return []
+    values: list[tuple[str, int, int]] = []
+    for key in ("pics", "covers", "images", "items"):
+        raw_values = card.get(key)
+        if not isinstance(raw_values, list):
+            continue
+        for raw in raw_values:
+            value = _first_cover_info({key: [raw]})
+            if value[0]:
+                values.append(value)
+    if not values:
+        url, width, height = _first_cover_info(card)
+        return [(url, width, height)] if url else []
+    # The first dimensioned gallery item is the same item selected by the
+    # existing parser; put it first, then retain the remaining gallery order.
+    dimensioned = next(
+        (index for index, item in enumerate(values) if item[1] and item[2]),
+        None,
+    )
+    if dimensioned is not None:
+        values = [values[dimensioned], *values[:dimensioned], *values[dimensioned + 1 :]]
+    else:
+        first, width, height = _first_cover_info(card)
+        if first:
+            values = [(first, width, height), *values]
+    result: list[tuple[str, int, int]] = []
+    seen: set[str] = set()
+    for value in values:
+        if value[0] in seen:
+            continue
+        seen.add(value[0])
+        result.append(value)
+        if len(result) >= max_items:
+            break
+    return result
+
+
 def _first_cover(card: dict[str, Any]) -> str:
     return _first_cover_info(card)[0]
 
@@ -569,9 +610,11 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             pub_ts = 0
         cover = ""
         cover_width = cover_height = 0
+        gallery: list[tuple[str, int, int]] = []
         for candidate in cards:
-            cover, cover_width, cover_height = _first_cover_info(candidate)
-            if cover:
+            gallery = _cover_infos(candidate)
+            if gallery:
+                cover, cover_width, cover_height = gallery[0]
                 break
         parsed_item = {
             "id": dynamic_id,
@@ -587,6 +630,11 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
         if cover_width and cover_height:
             parsed_item["cover_width"] = cover_width
             parsed_item["cover_height"] = cover_height
+        if len(gallery) > 1:
+            parsed_item["images"] = [
+                {"url": url, "width": width, "height": height}
+                for url, width, height in gallery
+            ]
         avatar = _media_url(author.get("face"))
         if avatar:
             parsed_item["avatar"] = avatar
