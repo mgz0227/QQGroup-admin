@@ -510,6 +510,7 @@ def split_message(text: str, limit: int = 3000) -> list[str]:
 class QQGroupAdmin(Star):
     HELP = """QQ 群聊管理命令
 /群信息
+/成员记录 <成员OpenID|@成员> [1-10]
 /上传群文件 <URL> [文件名]
 /机器人状态
 /申请列表 [游标]
@@ -6429,6 +6430,80 @@ class QQGroupAdmin(Star):
                 ]
             )
         )
+
+    @qq_admin_command("成员记录")
+    async def member_records(
+        self,
+        event: AstrMessageEvent,
+        member_openid: str,
+        count: str = "5",
+    ):
+        """查询当前群成员的 UID 绑定、验证状态和最近违规内容。"""
+
+        _, group_openid, _ = self._context(event)
+        member = self._target_member(event, member_openid)
+        value = str(count or "5").strip()
+        if not value.isdigit() or not 1 <= int(value) <= 10:
+            raise ValueError("记录数量必须是 1-10 的整数")
+        limit = int(value)
+        records = [
+            record
+            for record in reversed(self._violation_records)
+            if str(record.get("group_openid") or "") == group_openid
+            and str(record.get("member_openid") or "") == member
+        ]
+        uid = self._uid_for_member(group_openid, member)
+        suspicious = self._suspicious_members.get(
+            self._member_state_key(group_openid, member)
+        )
+        username = str(
+            (suspicious or {}).get("username")
+            or next(
+                (record.get("username") for record in records if record.get("username")),
+                "",
+            )
+            or (self._uid_bindings.get(uid) or {}).get("username")
+            or "-"
+        )
+        lines = [
+            f"成员：{self._plain_text(username, 120)}",
+            f"成员 OpenID：{member}",
+            f"B 站 UID：{uid or '-'}",
+            f"真人验证：{'待验证' if suspicious else '正常'}",
+            f"当前群违规记录：{len(records)} 条",
+        ]
+        review_statuses = {
+            "pending": "待复核",
+            "confirmed": "确认违规",
+            "false_positive": "误判",
+        }
+        actions = {"record_only": "仅记录", "recall": "已撤回", "mute": "已禁言"}
+        for index, record in enumerate(records[:limit], 1):
+            try:
+                timestamp = int(record.get("created_at") or 0)
+                created_at = (
+                    time.strftime("%m-%d %H:%M", time.localtime(timestamp))
+                    if timestamp > 0
+                    else "-"
+                )
+            except (OSError, OverflowError, TypeError, ValueError):
+                created_at = "-"
+            reason = self._plain_text(record.get("reason") or record.get("rule"), 100)
+            content = self._plain_text(record.get("content"), 160)
+            status = review_statuses.get(
+                str(record.get("review_status") or "pending"), "待复核"
+            )
+            action = actions.get(
+                str(record.get("action") or ""),
+                self._plain_text(record.get("action"), 30),
+            )
+            lines.append(
+                f"{index}. {created_at} [{status}/{action}] {reason}\n   内容：{content}"
+            )
+        if not records:
+            lines.append("最近记录：暂无")
+        for result in self._results(event, "\n".join(lines)):
+            yield result
 
     @qq_admin_command("上传群文件")
     async def upload_group_file(

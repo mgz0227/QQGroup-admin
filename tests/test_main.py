@@ -5831,6 +5831,52 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("已撤回本群最近 2 条", results[0])
         self.assertIn("缓存不足 1 条", results[0])
 
+    async def test_member_records_are_scoped_to_current_group_and_target(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client, "/成员记录 @测试成员 2")
+        event.message_obj.raw_message.mentions = [
+            SimpleNamespace(member_openid="member-1", is_you=False)
+        ]
+        plugin._uid_bindings["188144093"] = {
+            "username": "测试成员",
+            "members": {"group-1": "member-1"},
+        }
+        plugin._rebuild_uid_binding_index()
+        plugin._suspicious_members["group-1:member-1"] = {
+            "username": "测试成员"
+        }
+        plugin._violation_records = [
+            {
+                "group_openid": "other-group",
+                "member_openid": "member-1",
+                "created_at": 1,
+                "reason": "其他群记录",
+                "content": "不应显示",
+            },
+            {
+                "group_openid": "group-1",
+                "member_openid": "member-1",
+                "username": "测试成员",
+                "created_at": 2,
+                "reason": "命中关键词",
+                "content": "当前群违规原文",
+                "action": "recall",
+                "review_status": "confirmed",
+            },
+        ]
+
+        results = [
+            result async for result in plugin.member_records(event, "@测试成员", "2")
+        ]
+        text = "\n".join(results)
+
+        self.assertIn("测试成员", text)
+        self.assertIn("188144093", text)
+        self.assertIn("真人验证：待验证", text)
+        self.assertIn("当前群违规记录：1 条", text)
+        self.assertIn("当前群违规原文", text)
+        self.assertNotIn("其他群记录", text)
+
     async def test_whole_mute_commands_report_official_api_limit(self):
         plugin, client = self.plugin()
         event = FakeEvent(client, "/全体禁言")
