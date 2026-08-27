@@ -4040,6 +4040,7 @@ class QQGroupAdmin(Star):
         native_images: list[bytes] = []
         native_url = ""
         native_cover = False
+        native_preferred = False
         poster_caption = ""
         if card_data:
             image_only = str(card_data.get("image_only") or "").lower() in {
@@ -4055,6 +4056,9 @@ class QQGroupAdmin(Star):
                 "on",
             }
             native_cover = native_cover or image_only
+            native_preferred = str(
+                card_data.get("native_poster_preferred") or ""
+            ).lower() in {"1", "true", "yes", "on"}
             if (image_only or native_cover) and card_data.get("cover"):
                 native_urls = bilibili_media_url_candidates(card_data.get("cover"))
                 # Keep the original feed URL here.  _send_group_card_url
@@ -4069,7 +4073,9 @@ class QQGroupAdmin(Star):
                 # poster down to the card height.  Send the bounded native
                 # poster first; cards remain the preferred layout when the
                 # dynamic has API text to show beside the cover.
-                if card_data and not image_only:
+                if card_data and not image_only and not (
+                    native_preferred and native_cover
+                ):
                     render_data = {
                         **card_data,
                         "focus_cover": bool(native_cover)
@@ -4598,11 +4604,13 @@ class QQGroupAdmin(Star):
                     sections.append(cover)
                 has_poster = bool(item.get("cover") and kind in {"图文", "转发"})
                 image_only = bool(has_poster and not title and not summary)
-                # A poster with API text needs a single readable composition;
-                # keep the original-image shortcut only for true image-only
-                # dynamics whose copy is already embedded in the poster.
-                native_cover = image_only
-                focus_cover = bool(has_poster and not image_only)
+                # Portrait draw/forward posts remain readable when QQ receives
+                # the source poster directly; a tall composed card is scaled
+                # down by clients even when its title is useful.  Keep the
+                # metadata in the short caption sent after the poster.
+                native_cover = has_poster
+                native_poster_preferred = has_poster
+                focus_cover = False
                 if image_only:
                     sections.append("图片动态：正文已包含在海报中。")
                 if title:
@@ -4636,9 +4644,10 @@ class QQGroupAdmin(Star):
                     # Some Bilibili draw posts have no API title/description:
                     # all copy is baked into the portrait poster itself.
                     "image_only": image_only,
-                    # Text-bearing posters use the stacked focus layout so the
-                    # title/summary remains readable beside a portrait image.
+                    # The compact caption keeps title/summary readable beside
+                    # the native poster without making one very tall card.
                     "native_cover": native_cover,
+                    "native_poster_preferred": native_poster_preferred,
                     "focus_cover": focus_cover,
                     "avatar": item.get("avatar"),
                     "status": "",

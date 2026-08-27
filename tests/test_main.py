@@ -3055,7 +3055,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(push.await_args.kwargs["card_data"]["focus_cover"])
         self.assertIn("图片动态：正文已包含在海报中。", push.await_args.args[1])
 
-    async def test_bilibili_text_poster_uses_one_focus_card(self):
+    async def test_bilibili_text_poster_prefers_native_poster_and_caption(self):
         plugin, _ = self.plugin()
         plugin.config["bilibili_cookie"] = "cookie"
         plugin._bilibili_state["dynamic"]["188144093"] = {
@@ -3096,9 +3096,42 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         card_data = push.await_args.kwargs["card_data"]
         self.assertFalse(card_data["image_only"])
-        self.assertFalse(card_data["native_cover"])
-        self.assertTrue(card_data["focus_cover"])
+        self.assertTrue(card_data["native_cover"])
+        self.assertTrue(card_data["native_poster_preferred"])
+        self.assertFalse(card_data["focus_cover"])
         self.assertEqual(card_data["summary"], "动态简短说明\n第二段")
+
+    async def test_bilibili_text_poster_skips_tall_card_when_native_upload_succeeds(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
+        render = AsyncMock(side_effect=AssertionError("poster should not render as a tall card"))
+        with (
+            patch.object(module, "download_bilibili_image", return_value=b"poster"),
+            patch.object(module, "split_bilibili_poster", return_value=[b"poster"]),
+            patch.object(plugin, "_render_bilibili_card", render),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
+                "# B站动态\n\n动态标题\n\n动态简短说明",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "native_poster_preferred": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "title": "动态标题",
+                    "summary": "动态简短说明",
+                    "link": "https://www.bilibili.com/opus/text-poster",
+                },
+            )
+
+        self.assertTrue(delivered)
+        render.assert_not_awaited()
+        self.assertEqual(send_card.await_args.args[2], b"poster")
+        self.assertIn("动态标题", client.api.messages[-1]["markdown"]["content"])
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
