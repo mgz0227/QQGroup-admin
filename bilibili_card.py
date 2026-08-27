@@ -281,12 +281,18 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         and str(card_data.get("image_only") or "").lower()
         in {"1", "true", "yes", "on"}
     )
-    if image_only:
+    focus_cover = bool(
+        cover is not None
+        and str(card_data.get("focus_cover") or "").lower()
+        in {"1", "true", "yes", "on"}
+    )
+    focus_layout = image_only or focus_cover
+    if focus_layout:
         width = 560
         margin = 18
 
     card_left, card_right = margin, width - margin
-    inner_padding = 34 if image_only else 54
+    inner_padding = 34 if focus_layout else 54
     inner_left, inner_right = inner_padding, width - inner_padding
     inner_width = inner_right - inner_left
 
@@ -304,16 +310,15 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         title_lines = [f"发布了一条{kind}动态"]
     cover_display_size = None
     portrait_layout = False
-    if cover is not None:
-        if source_width > 0 and source_height > 0:
-            portrait_layout = portrait_source
-            max_width = inner_width if image_only else (278 if portrait_layout else inner_width)
-            max_height = 560 if image_only else (470 if portrait_layout else 520)
-            scale = min(max_width / source_width, max_height / source_height)
-            cover_display_size = (
-                max(1, int(source_width * scale)),
-                max(1, int(source_height * scale)),
-            )
+    if cover is not None and source_width > 0 and source_height > 0:
+        portrait_layout = portrait_source and not focus_layout
+        max_width = inner_width if focus_layout else (278 if portrait_layout else inner_width)
+        max_height = 560 if image_only else (760 if focus_layout else (470 if portrait_layout else 520))
+        scale = min(max_width / source_width, max_height / source_height)
+        cover_display_size = (
+            max(1, int(source_width * scale)),
+            max(1, int(source_height * scale)),
+        )
 
     side_title_lines: list[str] = []
     side_summary_lines: list[str] = []
@@ -562,6 +567,7 @@ def build_bilibili_card(
     cover_width: object = 0,
     cover_height: object = 0,
     image_only: object = False,
+    focus_cover: object = False,
 ) -> str:
     """Build a compact card for AstrBot's built-in HTML-to-image renderer."""
 
@@ -598,6 +604,15 @@ def build_bilibili_card(
     # poster-only dynamics back through the wide legacy layout just because
     # width/height metadata was omitted by the API.
     image_only_cover = image_only_requested
+    focus_cover_requested = bool(
+        cover_url
+        and str(focus_cover or "").lower() in {"1", "true", "yes", "on"}
+    )
+    focus_layout = image_only_cover or focus_cover_requested
+    if focus_cover_requested:
+        # A failed native upload must still keep a portrait poster wide and
+        # complete; the old side-by-side layout made its text unreadable.
+        portrait_cover = False
     portrait_cover_style = ""
     if portrait_cover:
         max_width = 350 if image_only_cover else 278
@@ -637,6 +652,12 @@ def build_bilibili_card(
     if image_only_cover:
         note_markup = '<div class="focus-note">图文动态 · 正文已包含在海报中</div>'
         content_markup = f'<div class="focus-content">{note_markup}{cover_markup}</div>'
+    elif focus_cover_requested:
+        note_markup = '<div class="focus-note">图文动态 · 海报优先展示</div>'
+        content_markup = (
+            f'<div class="focus-content">{title_markup}{summary_markup}'
+            f"{note_markup}{cover_markup}</div>"
+        )
     elif portrait_cover:
         content_markup = (
             '<div class="portrait-content">'
@@ -647,7 +668,7 @@ def build_bilibili_card(
     else:
         content_markup = f"{title_markup}{summary_markup}{cover_markup}"
 
-    body_width = 560 if image_only_cover else 720
+    body_width = 560 if focus_layout else 720
     card_width = body_width - 44
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -697,7 +718,7 @@ body {{
 .focus-content .cover-wrap {{ width: 100%; margin-top: 0; }}
 .cover-wrap {{ display: flex; justify-content: center; overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
 .portrait-cover .cover-wrap {{ margin-top: 0; }}
-.cover {{ display: block; width: auto; max-width: 100%; max-height: {560 if image_only_cover else 520}px; height: auto; object-fit: contain; background: #f1f2f3; }}
+.cover {{ display: block; width: auto; max-width: 100%; max-height: {560 if image_only_cover else (760 if focus_cover_requested else 520)}px; height: auto; object-fit: contain; background: #f1f2f3; }}
 .footer {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px 20px; border-top: 1px solid #f0f1f2; background: #fcfcfd; }}
 .source {{ color: #c0c4cc; font-size: 12px; letter-spacing: .5px; }}
 .open-link {{ padding: 8px 14px; border-radius: 9px; background: #eaf8ff; color: #008ac5; font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }}

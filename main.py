@@ -4008,6 +4008,7 @@ class QQGroupAdmin(Star):
             return True
         success = True
         card_image: bytes | None = None
+        focus_fallback_image: bytes | None = None
         native_image: bytes | None = None
         if card_data:
             image_only = str(card_data.get("image_only") or "").lower() in {
@@ -4035,7 +4036,14 @@ class QQGroupAdmin(Star):
                     self.logger.debug("B 站原图下载失败，改用通知卡片：%s", exc)
             try:
                 if native_image is None:
-                    card_image = await self._render_bilibili_card(card_data)
+                    render_data = dict(card_data)
+                    if native_cover:
+                        # Keep the fallback readable when the Bilibili CDN or
+                        # QQ media upload is temporarily unavailable.
+                        render_data["focus_cover"] = True
+                    card_image = await self._render_bilibili_card(render_data)
+                    if native_cover:
+                        focus_fallback_image = card_image
             except Exception as exc:  # noqa: BLE001 - renderer is optional
                 self.logger.debug("B 站图片卡片不可用，降级 Markdown：%s", exc)
         for target in eligible_targets:
@@ -4121,6 +4129,31 @@ class QQGroupAdmin(Star):
                                 )
                         continue
                     except Exception as card_exc:  # noqa: BLE001 - optional card
+                        # A native poster can download successfully but still
+                        # fail during QQ media upload.  Render the readable
+                        # focus fallback once before giving up on rich media.
+                        if native_image is not None and native_cover:
+                            try:
+                                if focus_fallback_image is None:
+                                    focus_fallback_image = await self._render_bilibili_card(
+                                        {**(card_data or {}), "focus_cover": True}
+                                    )
+                                await self._send_group_card(
+                                    client,
+                                    group_openid,
+                                    focus_fallback_image,
+                                    link=str((card_data or {}).get("link") or ""),
+                                    link_label=str(
+                                        (card_data or {}).get("link_label")
+                                        or "查看原动态"
+                                    ),
+                                )
+                                continue
+                            except Exception as fallback_card_exc:  # noqa: BLE001
+                                self.logger.debug(
+                                    "B 站聚焦卡片发送失败，降级 Markdown：%s",
+                                    fallback_card_exc,
+                                )
                         self.logger.debug("B 站图片卡片发送失败，降级 Markdown：%s", card_exc)
                 await self._send_group_markdown(client, group_openid, text)
                 continue

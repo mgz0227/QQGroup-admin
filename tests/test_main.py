@@ -3094,6 +3094,95 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
         )
 
+    async def test_bilibili_draw_download_failure_uses_focus_fallback(self):
+        plugin, _client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": _client}
+        render = AsyncMock(return_value=b"\x89PNG\r\nfocus")
+        send_card = AsyncMock(return_value=SimpleNamespace(id="focus-1"))
+        with (
+            patch.object(module, "download_bilibili_image", return_value=None),
+            patch.object(plugin, "_render_bilibili_card", render),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    }
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "summary": "动态正文摘要",
+                    "link": "https://www.bilibili.com/opus/4",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertTrue(render.await_args.args[0]["focus_cover"])
+        self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\nfocus")
+
+    async def test_bilibili_native_upload_failure_retries_focus_card(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        render = AsyncMock(return_value=b"\x89PNG\r\nfocus")
+        send_card = AsyncMock(
+            side_effect=[
+                RuntimeError("native upload failed"),
+                SimpleNamespace(id="focus-1"),
+                RuntimeError("native upload failed"),
+                SimpleNamespace(id="focus-2"),
+            ]
+        )
+        with (
+            patch.object(
+                module,
+                "download_bilibili_image",
+                return_value=b"\xff\xd8\xffposter",
+            ),
+            patch.object(plugin, "_render_bilibili_card", render),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    },
+                    {
+                        "group_openid": "group-2",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    },
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "link": "https://www.bilibili.com/opus/4",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(send_card.await_count, 4)
+        self.assertEqual(send_card.await_args_list[1].args[2], b"\x89PNG\r\nfocus")
+        self.assertEqual(send_card.await_args_list[3].args[2], b"\x89PNG\r\nfocus")
+        self.assertEqual(render.await_count, 1)
+        self.assertTrue(render.await_args.args[0]["focus_cover"])
+
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
         plugin, _client = self.plugin()
         temp_path = __import__("tempfile").NamedTemporaryFile(

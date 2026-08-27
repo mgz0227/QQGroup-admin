@@ -170,6 +170,24 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertIn('width:251px;height:470px', html)
         self.assertIn("海报说明", html)
 
+    def test_html_focus_fallback_stacks_copy_and_full_poster(self):
+        html = build_bilibili_card(
+            author="UP",
+            kind="图文",
+            title="动态标题",
+            summary="动态简短说明",
+            cover="https://i0.hdslb.com/bfs/draw.jpg",
+            cover_width=1320,
+            cover_height=2468,
+            focus_cover=True,
+        )
+
+        self.assertIn("focus-content", html)
+        self.assertNotIn('<div class="portrait-content">', html)
+        self.assertIn("width: 560px", html)
+        self.assertIn("动态简短说明", html)
+        self.assertIn("max-height: 760px", html)
+
     def test_local_card_renders_useful_empty_dynamic(self):
         with patch("bilibili_card._download_image", return_value=None):
             image = render_bilibili_card(
@@ -224,6 +242,26 @@ class BilibiliCardTest(unittest.TestCase):
         # The square poster should fill the focus card instead of being
         # constrained to the old portrait column.
         self.assertGreaterEqual(rendered.height, 650)
+
+    def test_local_focus_fallback_keeps_portrait_readable_with_copy(self):
+        from PIL import Image
+
+        portrait = Image.new("RGB", (1320, 2468), "#734820")
+        with patch("bilibili_card._download_image", return_value=portrait):
+            image = render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "图文",
+                    "title": "动态标题",
+                    "summary": "动态简短说明",
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "focus_cover": True,
+                }
+            )
+
+        rendered = Image.open(BytesIO(image))
+        self.assertEqual(rendered.width, 560)
+        self.assertGreater(rendered.height, 1_000)
 
     def test_local_card_uses_custom_link_label_and_clips_author(self):
         from PIL import ImageDraw
