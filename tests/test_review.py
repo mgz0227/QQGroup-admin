@@ -31,6 +31,20 @@ class ReviewRulesTest(unittest.TestCase):
             ),
             "188144093\n主页",
         )
+        self.assertEqual(
+            verification_text(
+                {
+                    "verify_info": {
+                        "verify_message": "请填写 UID",
+                        "review_qa_list": [
+                            {"question": "UID", "answer": "188144093"},
+                            {"question": "备注", "answer": "广告"},
+                        ],
+                    }
+                }
+            ),
+            "请填写 UID\n188144093\n广告",
+        )
 
     def test_uid_parser_accepts_labeled_or_pure_uid(self):
         self.assertEqual(parse_bilibili_uid("UID：188144093"), "188144093")

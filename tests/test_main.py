@@ -1425,8 +1425,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             {"global-primary"},
         )
 
-    async def test_global_policy_save_normalizes_ai_values_to_first_profile(self):
+    async def test_global_policy_save_ignores_stale_ai_values_in_profiles(self):
         plugin, _ = self.plugin()
+        plugin.config.update(
+            global_ai_review_enabled=True,
+            global_ai_review_provider_id="canonical-primary",
+            global_ai_review_fallback_provider_ids=["canonical-fallback"],
+        )
         profiles = module.GroupAdminWeb._global_policy_profiles(
             [
                 {
@@ -1449,9 +1454,19 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             {"group-1", "group-2"},
         )
         await plugin.web_save_global_policies({"profiles": profiles})
-        self.assertEqual(plugin.config["global_ai_review_provider_id"], "primary-one")
+        self.assertTrue(plugin.config["global_ai_review_enabled"])
         self.assertEqual(
-            [item.get("global_ai_review_provider_id") for item in plugin.config["global_policy_profiles"]],
+            plugin.config["global_ai_review_provider_id"], "canonical-primary"
+        )
+        self.assertEqual(
+            plugin.config["global_ai_review_fallback_provider_ids"],
+            ["canonical-fallback"],
+        )
+        self.assertEqual(
+            [
+                item.get("global_ai_review_provider_id")
+                for item in plugin.config["global_policy_profiles"]
+            ],
             [None, None],
         )
 
@@ -2989,6 +3004,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
 
         self.assertTrue(push.await_args.kwargs["card_data"]["image_only"])
+        self.assertTrue(push.await_args.kwargs["card_data"]["native_cover"])
         self.assertIn("图片动态：正文已包含在海报中。", push.await_args.args[1])
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
@@ -3032,7 +3048,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "[查看原动态 ↗](https://www.bilibili.com/opus/1)",
         )
 
-    async def test_bilibili_image_only_push_uses_native_poster_and_caption(self):
+    async def test_bilibili_draw_push_uses_native_poster_and_caption(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
         send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
@@ -3059,8 +3075,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 card_data={
                     "author": "UP",
                     "kind": "图文",
-                    "image_only": True,
+                    "native_cover": True,
                     "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "timestamp": "08-27 01:17",
+                    "summary": "动态正文摘要",
                     "link": "https://www.bilibili.com/opus/4",
                     "link_label": "查看原动态",
                 },
@@ -3072,7 +3090,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_card.await_args.args[2], b"\xff\xd8\xffposter")
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            "**UP** · 图文\n\n[查看原动态 ↗](https://www.bilibili.com/opus/4)",
+            "**UP** · 图文 · 08\\-27 01:17\n\n动态正文摘要\n\n"
+            "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
         )
 
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
@@ -5215,6 +5234,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn('id="violation-status-filter"', html)
         self.assertIn('apiPost("violation-review"', script)
         self.assertIn("review_status", script)
+
+    async def test_suspicious_clear_rejects_non_object_payload(self):
+        plugin, _ = self.plugin()
+        web = module.GroupAdminWeb(plugin, plugin.context)
+        web._payload = AsyncMock(return_value=[])
+
+        with self.assertRaisesRegex(TypeError, "JSON 对象"):
+            await web.page_suspicious_clear()
 
     async def test_recall_recent_messages_uses_received_message_cache(self):
         plugin, client = self.plugin()

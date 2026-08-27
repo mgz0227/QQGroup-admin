@@ -1756,9 +1756,9 @@ class GroupAdminWeb:
 
     async def page_suspicious_clear(self) -> Any:
         payload = await self._payload()
-        group_openid = self._validated_group(payload)
         if not isinstance(payload, dict):
             raise TypeError("请求内容必须是 JSON 对象")
+        group_openid = self._validated_group(payload)
         member_openid = self._text(
             payload.get("member_openid"), "成员 OpenID", 128, required=True
         )

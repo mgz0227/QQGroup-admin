@@ -4016,7 +4016,13 @@ class QQGroupAdmin(Star):
                 "yes",
                 "on",
             }
-            if image_only and card_data.get("cover"):
+            native_cover = str(card_data.get("native_cover") or "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if (image_only or native_cover) and card_data.get("cover"):
                 try:
                     native_image = await asyncio.wait_for(
                         asyncio.to_thread(
@@ -4062,6 +4068,23 @@ class QQGroupAdmin(Star):
                                 24,
                             )
                             caption = f"**{author}** · {kind}"
+                            timestamp = str(
+                                (card_data or {}).get("timestamp") or ""
+                            ).strip()
+                            if timestamp:
+                                caption += (
+                                    " · " + self._markdown_text(timestamp, 32)
+                                )
+                            title = str((card_data or {}).get("title") or "").strip()
+                            summary = str(
+                                (card_data or {}).get("summary") or ""
+                            ).strip()
+                            if title:
+                                caption += (
+                                    "\n\n**" + self._markdown_text(title, 180) + "**"
+                                )
+                            if summary:
+                                caption += "\n\n" + self._markdown_text(summary, 240)
                             if link:
                                 label = self._markdown_text(
                                     (card_data or {}).get("link_label") or "查看原动态",
@@ -4364,12 +4387,10 @@ class QQGroupAdmin(Star):
                 sections = ["# B站视频" if is_video else "# B站动态", meta]
                 if cover:
                     sections.append(cover)
-                image_only = bool(
-                    item.get("cover")
-                    and kind in {"图文", "转发"}
-                    and not title
-                    and not summary
+                native_cover = bool(
+                    item.get("cover") and kind in {"图文", "转发"}
                 )
+                image_only = bool(native_cover and not title and not summary)
                 if image_only:
                     sections.append("图片动态：正文已包含在海报中。")
                 if title:
@@ -4403,6 +4424,9 @@ class QQGroupAdmin(Star):
                     # Some Bilibili draw posts have no API title/description:
                     # all copy is baked into the portrait poster itself.
                     "image_only": image_only,
+                    # QQ preserves Bilibili posters more clearly as native images;
+                    # keep the copy in the following caption instead of shrinking it.
+                    "native_cover": native_cover,
                     "avatar": item.get("avatar"),
                     "status": "",
                     "link": item.get("url"),
@@ -7623,7 +7647,6 @@ class QQGroupAdmin(Star):
         if any(not isinstance(item, dict) for item in raw_profiles_value):
             raise TypeError("全局群策略条目格式错误")
         raw_profiles = list(raw_profiles_value)
-        first_raw = raw_profiles[0]
         explicit_global_ai = settings.get("global_ai")
         if explicit_global_ai is not None and not isinstance(explicit_global_ai, dict):
             raise TypeError("全局 AI 配置必须是对象")
@@ -7638,11 +7661,10 @@ class QQGroupAdmin(Star):
             )
         global_ai_values: dict[str, Any] = {}
         for key in GLOBAL_AI_POLICY_KEYS:
-            value = (
-                configured_global_ai.get(key, GLOBAL_POLICY_DEFAULTS[key])
-                if isinstance(explicit_global_ai, dict)
-                else first_raw.get(key, self.config.get(key, GLOBAL_POLICY_DEFAULTS[key]))
-            )
+            # AI/OCR is a single top-level policy.  Never read legacy copies
+            # from a scoped profile: a stale page can submit those fields and
+            # otherwise silently roll back the current global model settings.
+            value = configured_global_ai.get(key, GLOBAL_POLICY_DEFAULTS[key])
             if key in {GLOBAL_AI_FALLBACKS_KEY, GLOBAL_AI_CONFIRM_FALLBACKS_KEY}:
                 value = normalize_provider_ids(value)
             global_ai_values[key] = list(value) if isinstance(value, list) else value

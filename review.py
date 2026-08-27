@@ -24,14 +24,14 @@ def verification_text(request: dict[str, Any]) -> str:
     if not isinstance(info, dict):
         return ""
     message = str(info.get("verify_message") or "").strip()
-    if message:
-        return message
     answers = [
         str(item.get("answer") or "").strip()
         for item in info.get("review_qa_list") or []
         if isinstance(item, dict) and str(item.get("answer") or "").strip()
     ]
-    return "\n".join(answers)
+    # QQ may provide both a free-form message and structured answers.  Keep
+    # both so UID checks and keyword rejection inspect the complete request.
+    return "\n".join([part for part in [message, *answers] if part])
 
 
 def parse_bilibili_uid(text: str) -> str | None:
