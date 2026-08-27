@@ -302,6 +302,43 @@ def _rich_text(value: Any) -> str:
 
 
 def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
+    def dimensions(value: dict[str, Any], fallback: dict[str, Any] | None = None) -> tuple[int, int]:
+        fallback = fallback or {}
+        width = next(
+            (
+                value.get(key) or fallback.get(key)
+                for key in (
+                    "width",
+                    "img_width",
+                    "image_width",
+                    "pic_width",
+                    "cover_width",
+                )
+                if value.get(key) or fallback.get(key)
+            ),
+            0,
+        )
+        height = next(
+            (
+                value.get(key) or fallback.get(key)
+                for key in (
+                    "height",
+                    "img_height",
+                    "image_height",
+                    "pic_height",
+                    "cover_height",
+                )
+                if value.get(key) or fallback.get(key)
+            ),
+            0,
+        )
+        try:
+            return max(0, int(width)), max(0, int(height))
+        except (TypeError, ValueError):
+            return 0, 0
+
+    direct_cover = ""
+    direct_width = direct_height = 0
     for key in (
         "cover",
         "cover_url",
@@ -311,9 +348,24 @@ def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
         "thumbnail",
         "thumb",
     ):
-        cover = _media_url(card.get(key))
+        raw = card.get(key)
+        if isinstance(raw, dict):
+            cover = _media_url(
+                raw.get("url")
+                or raw.get("src")
+                or raw.get("img_src")
+                or raw.get("image_url")
+            )
+            direct_width, direct_height = dimensions(raw, card)
+        else:
+            cover = _media_url(raw)
+            direct_width, direct_height = dimensions(card)
         if cover:
-            return cover, 0, 0
+            direct_cover = cover
+            break
+    if direct_cover and direct_width > 0 and direct_height > 0:
+        return direct_cover, direct_width, direct_height
+    list_cover = ""
     for key in ("pics", "covers", "images", "items"):
         values = card.get(key)
         if not isinstance(values, list):
@@ -337,7 +389,13 @@ def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
                     height = int(height)
                 except (TypeError, ValueError):
                     width = height = 0
-                return cover, max(0, width), max(0, height)
+                if width > 0 and height > 0:
+                    return cover, width, height
+                list_cover = list_cover or cover
+    if direct_cover:
+        return direct_cover, direct_width, direct_height
+    if list_cover:
+        return list_cover, 0, 0
     return "", 0, 0
 
 

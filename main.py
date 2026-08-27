@@ -32,7 +32,11 @@ from .bilibili import (
     poll_qr_login,
     start_qr_login,
 )
-from .bilibili_card import build_bilibili_card, render_bilibili_card
+from .bilibili_card import (
+    build_bilibili_card,
+    download_bilibili_image,
+    render_bilibili_card,
+)
 from .image_ocr import (
     embedded_image_text,
     is_remote_gif_ref,
@@ -4004,9 +4008,28 @@ class QQGroupAdmin(Star):
             return True
         success = True
         card_image: bytes | None = None
+        native_image: bytes | None = None
         if card_data:
+            image_only = str(card_data.get("image_only") or "").lower() in {
+                "1",
+                "true",
+                "yes",
+                "on",
+            }
+            if image_only and card_data.get("cover"):
+                try:
+                    native_image = await asyncio.wait_for(
+                        asyncio.to_thread(
+                            download_bilibili_image,
+                            card_data.get("cover"),
+                        ),
+                        timeout=8,
+                    )
+                except Exception as exc:  # noqa: BLE001 - use rich-card fallback
+                    self.logger.debug("B 站原图下载失败，改用通知卡片：%s", exc)
             try:
-                card_image = await self._render_bilibili_card(card_data)
+                if native_image is None:
+                    card_image = await self._render_bilibili_card(card_data)
             except Exception as exc:  # noqa: BLE001 - renderer is optional
                 self.logger.debug("B 站图片卡片不可用，降级 Markdown：%s", exc)
         for target in eligible_targets:
@@ -4016,19 +4039,48 @@ class QQGroupAdmin(Star):
                 continue
             group_openid = str(target["group_openid"])
             try:
-                if card_image:
+                media_image = native_image or card_image
+                if media_image:
                     try:
                         await self._send_group_card(
                             client,
                             group_openid,
-                            card_image,
+                            media_image,
                             link=str((card_data or {}).get("link") or ""),
                             link_label=str(
                                 (card_data or {}).get("link_label") or "查看原动态"
                             ),
                         )
                         link = str((card_data or {}).get("link") or "").strip()
-                        if link:
+                        if native_image:
+                            author = self._markdown_text(
+                                (card_data or {}).get("author") or "B站用户",
+                                80,
+                            )
+                            kind = self._markdown_text(
+                                (card_data or {}).get("kind") or "图文",
+                                24,
+                            )
+                            caption = f"**{author}** · {kind}"
+                            if link:
+                                label = self._markdown_text(
+                                    (card_data or {}).get("link_label") or "查看原动态",
+                                    40,
+                                )
+                                caption += f"\n\n[{label} ↗]({link})"
+                            try:
+                                await self._send_group_markdown(
+                                    client,
+                                    group_openid,
+                                    caption,
+                                )
+                            except Exception:
+                                await self._send_group_text(
+                                    client,
+                                    group_openid,
+                                    self._markdown_fallback_text(caption),
+                                )
+                        elif link:
                             label = str(
                                 (card_data or {}).get("link_label") or "查看原动态"
                             ).strip()

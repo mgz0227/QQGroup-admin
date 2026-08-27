@@ -3032,6 +3032,49 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "[查看原动态 ↗](https://www.bilibili.com/opus/1)",
         )
 
+    async def test_bilibili_image_only_push_uses_native_poster_and_caption(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
+        with (
+            patch.object(
+                module,
+                "download_bilibili_image",
+                return_value=b"\xff\xd8\xffposter",
+            ) as download,
+            patch.object(plugin, "_render_bilibili_card", AsyncMock()) as render,
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    }
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "image_only": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "link": "https://www.bilibili.com/opus/4",
+                    "link_label": "查看原动态",
+                },
+            )
+
+        self.assertTrue(delivered)
+        download.assert_called_once()
+        render.assert_not_awaited()
+        self.assertEqual(send_card.await_args.args[2], b"\xff\xd8\xffposter")
+        self.assertEqual(
+            client.api.messages[-1]["markdown"]["content"],
+            "**UP** · 图文\n\n[查看原动态 ↗](https://www.bilibili.com/opus/4)",
+        )
+
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
         plugin, _client = self.plugin()
         temp_path = __import__("tempfile").NamedTemporaryFile(

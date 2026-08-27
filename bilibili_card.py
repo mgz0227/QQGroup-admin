@@ -127,6 +127,52 @@ def _download_image(value: object):
         return None
 
 
+def download_bilibili_image(value: object, *, max_bytes: int = 8 * 1024 * 1024) -> bytes | None:
+    """Download a Bilibili poster for a native QQ image message.
+
+    The rich card renderer intentionally creates a small notification canvas.
+    Poster-only dynamics should instead keep their original readable width, so
+    this helper returns a bounded, orientation-correct image without exposing
+    arbitrary remote URLs.
+    """
+
+    from PIL import Image, ImageOps
+
+    url = _image_url(value)
+    if not url or max_bytes <= 0:
+        return None
+    try:
+        request = Request(
+            url,
+            headers={
+                "User-Agent": "Mozilla/5.0 BilibiliPush/1.0",
+                "Referer": "https://www.bilibili.com/",
+            },
+        )
+        with build_opener(_BilibiliRedirectHandler()).open(request, timeout=4) as response:
+            content_length = int(response.headers.get("Content-Length") or 0)
+            if content_length > max_bytes:
+                return None
+            data = response.read(max_bytes + 1)
+        if len(data) > max_bytes:
+            return None
+        image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+        # QQ clients display very tall originals poorly.  Keep the full poster
+        # while bounding its longest edge and upload size.
+        image.thumbnail((1600, 2400), resample=Image.Resampling.LANCZOS)
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=92, optimize=True)
+        encoded = output.getvalue()
+        if len(encoded) <= max_bytes:
+            return encoded
+        output = BytesIO()
+        image.save(output, format="JPEG", quality=82, optimize=True)
+        encoded = output.getvalue()
+        return encoded if len(encoded) <= max_bytes else None
+    except (OSError, SyntaxError, URLError, ValueError):
+        return None
+
+
 def _wrap_text(
     draw: Any,
     text: str,
@@ -230,7 +276,6 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     )
     image_only = bool(
         cover is not None
-        and portrait_source
         and not title
         and not summary
         and str(card_data.get("image_only") or "").lower()
@@ -262,7 +307,7 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     if cover is not None:
         if source_width > 0 and source_height > 0:
             portrait_layout = portrait_source
-            max_width = 340 if image_only else (278 if portrait_layout else inner_width)
+            max_width = inner_width if image_only else (278 if portrait_layout else inner_width)
             max_height = 560 if image_only else (470 if portrait_layout else 520)
             scale = min(max_width / source_width, max_height / source_height)
             cover_display_size = (
@@ -542,12 +587,17 @@ def build_bilibili_card(
         and source_height > 0
         and source_width / source_height < 0.78
     )
-    image_only_cover = bool(
-        portrait_cover
+    image_only_requested = bool(
+        cover_url
         and not title_text
         and not summary_html
         and str(image_only or "").lower() in {"1", "true", "yes", "on"}
     )
+    # Some Bilibili responses expose only the cover URL.  The browser knows
+    # the intrinsic aspect ratio after loading it, so do not send these
+    # poster-only dynamics back through the wide legacy layout just because
+    # width/height metadata was omitted by the API.
+    image_only_cover = image_only_requested
     portrait_cover_style = ""
     if portrait_cover:
         max_width = 350 if image_only_cover else 278

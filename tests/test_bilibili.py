@@ -115,6 +115,44 @@ class BilibiliTest(unittest.TestCase):
         self.assertEqual(parse_dynamic_items(payload)[0]["title"], "")
         self.assertEqual(parse_dynamic_items(payload)[0]["text"], "")
 
+    def test_dynamic_parser_keeps_direct_cover_and_reads_nested_dimensions(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "draw-direct",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_author": {"name": "UP"},
+                            "module_dynamic": {
+                                "desc": {"text": ""},
+                                "major": {
+                                    "draw": {
+                                        "pic": "//i0.hdslb.com/bfs/draw-preview.jpg",
+                                        "items": [
+                                            {
+                                                "src": "//i0.hdslb.com/bfs/draw-original.jpg",
+                                                "width": 1320,
+                                                "height": 2468,
+                                            }
+                                        ],
+                                    }
+                                },
+                            },
+                        },
+                    }
+                ]
+            },
+        }
+
+        item = parse_dynamic_items(payload)[0]
+        self.assertEqual(
+            item["cover"], "https://i0.hdslb.com/bfs/draw-original.jpg"
+        )
+        self.assertEqual(item["cover_width"], 1320)
+        self.assertEqual(item["cover_height"], 2468)
+
     def test_video_parser_prefers_video_description_over_generic_dynamic_text(self):
         payload = {
             "code": 0,

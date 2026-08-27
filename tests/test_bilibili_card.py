@@ -2,7 +2,12 @@ import unittest
 from io import BytesIO
 from unittest.mock import patch
 
-from bilibili_card import _image_url, build_bilibili_card, render_bilibili_card
+from bilibili_card import (
+    _image_url,
+    build_bilibili_card,
+    download_bilibili_image,
+    render_bilibili_card,
+)
 
 
 class BilibiliCardTest(unittest.TestCase):
@@ -37,6 +42,47 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertEqual(_image_url("https://internal.example.test/a.jpg"), "")
         self.assertTrue(_image_url("https://i0.hdslb.com/bfs/a.jpg"))
 
+    def test_download_bilibili_image_rejects_non_bilibili_url(self):
+        self.assertIsNone(download_bilibili_image("https://example.test/a.jpg"))
+
+    def test_download_bilibili_image_transcodes_and_bounds_remote_poster(self):
+        from PIL import Image
+
+        source = BytesIO()
+        Image.new("RGB", (2200, 3200), "#734820").save(source, format="PNG")
+
+        class Response:
+            headers = {"Content-Length": str(len(source.getvalue()))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                self.limit = limit
+                return source.getvalue()
+
+        class Opener:
+            def open(self, request, timeout):
+                self.request = request
+                self.timeout = timeout
+                return Response()
+
+        opener = Opener()
+        with patch("bilibili_card.build_opener", return_value=opener):
+            encoded = download_bilibili_image(
+                "https://i0.hdslb.com/bfs/draw-original.png"
+            )
+
+        self.assertIsNotNone(encoded)
+        rendered = Image.open(BytesIO(encoded))
+        self.assertEqual(rendered.format, "JPEG")
+        self.assertLessEqual(max(rendered.size), 2400)
+        self.assertLessEqual(len(encoded), 8 * 1024 * 1024)
+        self.assertEqual(opener.timeout, 4)
+
     def test_html_card_gives_small_portrait_covers_a_readable_width(self):
         html = build_bilibili_card(
             author="UP",
@@ -51,6 +97,19 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertIn("图文动态 · 正文已包含在海报中", html)
         self.assertIn("width: 560px", html)
         self.assertIn("height: auto", html)
+
+    def test_html_image_only_card_stays_focus_layout_without_dimensions(self):
+        html = build_bilibili_card(
+            author="UP",
+            kind="图文",
+            cover="https://i0.hdslb.com/bfs/new-draw.jpg",
+            link="https://www.bilibili.com/opus/2",
+            image_only=True,
+        )
+
+        self.assertIn("focus-content", html)
+        self.assertIn("width: 560px", html)
+        self.assertNotIn('<div class="portrait-content">', html)
 
     def test_empty_content_does_not_leave_empty_blocks(self):
         html = build_bilibili_card(
@@ -144,6 +203,27 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertEqual(rendered.width, 560)
         self.assertGreater(rendered.height, 700)
         self.assertLess(rendered.height, 950)
+
+    def test_local_image_only_square_cover_uses_focus_width(self):
+        from PIL import Image
+
+        square = Image.new("RGB", (1088, 1080), "#734820")
+        with patch("bilibili_card._download_image", return_value=square):
+            image = render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "图文",
+                    "cover": "https://i0.hdslb.com/bfs/draw-preview.jpg",
+                    "image_only": True,
+                    "link": "https://www.bilibili.com/opus/3",
+                }
+            )
+
+        rendered = Image.open(BytesIO(image))
+        self.assertEqual(rendered.width, 560)
+        # The square poster should fill the focus card instead of being
+        # constrained to the old portrait column.
+        self.assertGreaterEqual(rendered.height, 650)
 
     def test_local_card_uses_custom_link_label_and_clips_author(self):
         from PIL import ImageDraw
