@@ -3052,7 +3052,53 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(push.await_args.kwargs["card_data"]["image_only"])
         self.assertTrue(push.await_args.kwargs["card_data"]["native_cover"])
+        self.assertFalse(push.await_args.kwargs["card_data"]["focus_cover"])
         self.assertIn("图片动态：正文已包含在海报中。", push.await_args.args[1])
+
+    async def test_bilibili_text_poster_uses_one_focus_card(self):
+        plugin, _ = self.plugin()
+        plugin.config["bilibili_cookie"] = "cookie"
+        plugin._bilibili_state["dynamic"]["188144093"] = {
+            "seen": [],
+            "max_pub_ts": 0,
+        }
+        subscriptions = {
+            "188144093": [
+                {
+                    "group_openid": "group-1",
+                    "platform_id": "platform-1",
+                    "dynamic": True,
+                    "live": False,
+                }
+            ]
+        }
+        item = {
+            "id": "draw-copy-1",
+            "uid": "188144093",
+            "author": "UP",
+            "pub_ts": 100,
+            "type": "DYNAMIC_TYPE_DRAW",
+            "title": "动态标题",
+            "text": "动态简短说明\n第二段",
+            "url": "https://www.bilibili.com/opus/draw-copy-1",
+            "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+            "cover_width": 1320,
+            "cover_height": 2468,
+        }
+        push = AsyncMock(return_value=True)
+        with (
+            patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
+            patch.object(module, "fetch_space_dynamics", return_value={}),
+            patch.object(module, "parse_dynamic_items", return_value=[item]),
+            patch.object(plugin, "_push_bilibili_message", push),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
+
+        card_data = push.await_args.kwargs["card_data"]
+        self.assertFalse(card_data["image_only"])
+        self.assertFalse(card_data["native_cover"])
+        self.assertTrue(card_data["focus_cover"])
+        self.assertEqual(card_data["summary"], "动态简短说明\n第二段")
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
@@ -3093,6 +3139,47 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
             "[查看原动态 ↗](https://www.bilibili.com/opus/1)",
+        )
+
+    async def test_bilibili_rendered_card_does_not_bake_duplicate_link(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        render = AsyncMock(return_value=b"\x89PNG\r\ncard")
+        with (
+            patch.object(plugin, "_render_bilibili_card", render),
+            patch.object(
+                plugin,
+                "_send_group_card",
+                AsyncMock(return_value=SimpleNamespace(id="card-1")),
+            ),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                    }
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "summary": "动态正文摘要",
+                    "focus_cover": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "link": "https://www.bilibili.com/opus/4",
+                    "link_label": "查看原动态",
+                },
+            )
+
+        self.assertTrue(delivered)
+        self.assertEqual(render.await_args.args[0]["link"], "")
+        self.assertEqual(render.await_args.args[0]["link_label"], "")
+        self.assertEqual(
+            client.api.messages[-1]["markdown"]["content"],
+            "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
         )
 
     async def test_bilibili_draw_push_uses_native_poster_and_caption(self):
@@ -3238,6 +3325,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(delivered)
         self.assertTrue(render.await_args.args[0]["focus_cover"])
+        self.assertEqual(render.await_args.args[0]["link"], "")
         self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\nfocus")
 
     async def test_bilibili_draw_download_failure_prefers_public_url_media(self):

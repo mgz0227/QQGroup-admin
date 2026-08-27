@@ -290,12 +290,16 @@ def _clean_dynamic_text(value: Any) -> str:
 
 
 def _rich_text(value: Any) -> str:
+    if isinstance(value, Mapping):
+        value = value.get("rich_text_nodes") or value.get("nodes")
     nodes = value if isinstance(value, list) else []
     parts: list[str] = []
     for node in nodes:
-        if not isinstance(node, dict):
+        if not isinstance(node, Mapping):
             continue
-        text = _clean_dynamic_text(node.get("text") or node.get("orig_text"))
+        text = _clean_dynamic_text(
+            node.get("text") or node.get("orig_text") or node.get("content")
+        )
         if text:
             parts.append(text)
     return _clean_dynamic_text(" ".join(parts))
@@ -363,9 +367,8 @@ def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
         if cover:
             direct_cover = cover
             break
-    if direct_cover and direct_width > 0 and direct_height > 0:
-        return direct_cover, direct_width, direct_height
     list_cover = ""
+    list_width = list_height = 0
     for key in ("pics", "covers", "images", "items"):
         values = card.get(key)
         if not isinstance(values, list):
@@ -391,11 +394,15 @@ def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
                     width = height = 0
                 if width > 0 and height > 0:
                     return cover, width, height
-                list_cover = list_cover or cover
+                if not list_cover:
+                    list_cover = cover
+                    list_width, list_height = width, height
+    if direct_cover and direct_width > 0 and direct_height > 0:
+        return direct_cover, direct_width, direct_height
     if direct_cover:
         return direct_cover, direct_width, direct_height
     if list_cover:
-        return list_cover, 0, 0
+        return list_cover, list_width, list_height
     return "", 0, 0
 
 
@@ -428,30 +435,66 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
         )
         desc = dynamic.get("desc") if isinstance(dynamic.get("desc"), dict) else {}
         major = dynamic.get("major") if isinstance(dynamic.get("major"), dict) else {}
-        card = next(
-            (
-                major[name]
-                for name in (
-                    "opus",
-                    "archive",
-                    "article",
-                    "draw",
-                    "ugc_season",
-                    "live",
-                    "common",
-                    "music",
-                    "pgc",
-                    "courses",
-                    "forward",
-                )
-                if isinstance(major.get(name), dict)
-            ),
-            {},
+        dynamic_type = str(item.get("type") or "")
+        orig = (
+            item.get("orig")
+            if dynamic_type == "DYNAMIC_TYPE_FORWARD"
+            and isinstance(item.get("orig"), dict)
+            else {}
         )
-        summary = card.get("summary") if isinstance(card.get("summary"), dict) else {}
+        orig_modules = (
+            orig.get("modules")
+            if isinstance(orig.get("modules"), dict)
+            else {}
+        )
+        orig_dynamic = (
+            orig_modules.get("module_dynamic")
+            if isinstance(orig_modules.get("module_dynamic"), dict)
+            else {}
+        )
+        orig_desc = (
+            orig_dynamic.get("desc")
+            if isinstance(orig_dynamic.get("desc"), dict)
+            else {}
+        )
+        orig_major = (
+            orig_dynamic.get("major")
+            if isinstance(orig_dynamic.get("major"), dict)
+            else {}
+        )
+
+        def first_card(value: dict[str, Any]) -> dict[str, Any]:
+            return next(
+                (
+                    value[name]
+                    for name in (
+                        "opus",
+                        "archive",
+                        "article",
+                        "draw",
+                        "ugc_season",
+                        "live",
+                        "common",
+                        "music",
+                        "pgc",
+                        "courses",
+                        "forward",
+                    )
+                    if isinstance(value.get(name), dict)
+                ),
+                {},
+            )
+
+        cards = [card for card in (first_card(major), first_card(orig_major)) if card]
+        summaries = [
+            card.get("summary")
+            for card in cards
+            if isinstance(card.get("summary"), dict)
+        ]
         title = next(
             (
                 value
+                for card in cards
                 for value in (
                     _clean_dynamic_text(card.get("title")),
                     _clean_dynamic_text(card.get("name")),
@@ -460,23 +503,37 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             ),
             "",
         )
-        dynamic_type = str(item.get("type") or "")
+        card_text = [
+            value
+            for card in cards
+            for value in (
+                _clean_dynamic_text(card.get("desc")),
+                _clean_dynamic_text(card.get("description")),
+            )
+            if value
+        ]
+        desc_text = [
+            value
+            for current_desc in (desc, orig_desc)
+            for value in (
+                _clean_dynamic_text(current_desc.get("text")),
+                _rich_text(current_desc),
+            )
+            if value
+        ]
+        summary_text = [
+            value
+            for summary in summaries
+            for value in (
+                _clean_dynamic_text(summary.get("text")),
+                _rich_text(summary),
+            )
+            if value
+        ]
         text_candidates = (
-            (
-                _clean_dynamic_text(card.get("desc")),
-                _clean_dynamic_text(card.get("description")),
-                _clean_dynamic_text(desc.get("text")),
-                _rich_text(desc.get("rich_text_nodes")),
-                _clean_dynamic_text(summary.get("text")),
-            )
+            (*card_text, *desc_text, *summary_text)
             if dynamic_type == "DYNAMIC_TYPE_AV"
-            else (
-                _clean_dynamic_text(desc.get("text")),
-                _rich_text(desc.get("rich_text_nodes")),
-                _clean_dynamic_text(summary.get("text")),
-                _clean_dynamic_text(card.get("desc")),
-                _clean_dynamic_text(card.get("description")),
-            )
+            else (*desc_text, *summary_text, *card_text)
         )
         text = next(
             (
@@ -487,7 +544,19 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             "",
         )
         basic = item.get("basic") if isinstance(item.get("basic"), dict) else {}
-        url = str(basic.get("jump_url") or card.get("jump_url") or "").strip()
+        orig_basic = orig.get("basic") if isinstance(orig.get("basic"), dict) else {}
+        url = next(
+            (
+                str(value).strip()
+                for value in (
+                    basic.get("jump_url"),
+                    *(card.get("jump_url") for card in cards),
+                    orig_basic.get("jump_url"),
+                )
+                if str(value or "").strip()
+            ),
+            "",
+        )
         if url.startswith("//"):
             url = "https:" + url
         elif url.startswith("/"):
@@ -498,7 +567,12 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             pub_ts = int(author.get("pub_ts") or 0)
         except (TypeError, ValueError):
             pub_ts = 0
-        cover, cover_width, cover_height = _first_cover_info(card)
+        cover = ""
+        cover_width = cover_height = 0
+        for candidate in cards:
+            cover, cover_width, cover_height = _first_cover_info(candidate)
+            if cover:
+                break
         parsed_item = {
             "id": dynamic_id,
             "type": dynamic_type,

@@ -207,6 +207,67 @@ class BilibiliTest(unittest.TestCase):
         }
         self.assertEqual(parse_dynamic_items(payload)[0]["text"], "第一段 第二段")
 
+    def test_dynamic_parser_reads_summary_nodes_and_forward_origin(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "forward-1",
+                        "type": "DYNAMIC_TYPE_FORWARD",
+                        "basic": {"jump_url": "//www.bilibili.com/opus/forward-1"},
+                        "modules": {
+                            "module_author": {
+                                "mid": 188144093,
+                                "name": "转发者",
+                            },
+                            "module_dynamic": {
+                                "desc": {"text": "推荐一下"},
+                                "major": {},
+                            },
+                        },
+                        "orig": {
+                            "modules": {
+                                "module_dynamic": {
+                                    "major": {
+                                        "opus": {
+                                            "title": "原动态标题",
+                                            "summary": {
+                                                "text": "",
+                                                "rich_text_nodes": [
+                                                    {"text": "第一段"},
+                                                    {"orig_text": "第二段"},
+                                                ],
+                                            },
+                                            "pics": [
+                                                {
+                                                    "url": "//i0.hdslb.com/bfs/original.jpg",
+                                                    "width": 1320,
+                                                    "height": 2468,
+                                                }
+                                            ],
+                                        }
+                                    }
+                                }
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        item = parse_dynamic_items(payload)[0]
+        self.assertEqual(item["title"], "原动态标题")
+        self.assertEqual(item["text"], "推荐一下")
+        self.assertEqual(item["cover"], "https://i0.hdslb.com/bfs/original.jpg")
+        self.assertEqual(item["cover_width"], 1320)
+        self.assertEqual(item["cover_height"], 2468)
+
+        payload["data"]["items"][0]["modules"]["module_dynamic"]["desc"] = {
+            "text": ""
+        }
+        self.assertEqual(parse_dynamic_items(payload)[0]["text"], "第一段 第二段")
+
     def test_live_transition_seeds_and_detects_changes(self):
         offline = {"live_status": 0, "live_time": 0}
         live = {"live_status": 1, "live_time": 100}

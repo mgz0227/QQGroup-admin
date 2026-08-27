@@ -4086,7 +4086,9 @@ class QQGroupAdmin(Star):
                 # sent directly by QQ, so do not render a local card unless
                 # both native media routes fail.
                 if native_image is None and not native_cover:
-                    render_data = dict(card_data)
+                    # The link is sent as a separate Markdown/text message.
+                    # Do not bake a second, non-clickable CTA into the image.
+                    render_data = {**card_data, "link": "", "link_label": ""}
                     card_image = await self._render_bilibili_card(render_data)
             except Exception as exc:  # noqa: BLE001 - renderer is optional
                 self.logger.debug("B 站图片卡片不可用，降级 Markdown：%s", exc)
@@ -4159,7 +4161,12 @@ class QQGroupAdmin(Star):
                     try:
                         if focus_fallback_image is None:
                             focus_fallback_image = await self._render_bilibili_card(
-                                {**(card_data or {}), "focus_cover": True}
+                                {
+                                    **(card_data or {}),
+                                    "focus_cover": True,
+                                    "link": "",
+                                    "link_label": "",
+                                }
                             )
                         await self._send_group_card(
                             client,
@@ -4245,6 +4252,8 @@ class QQGroupAdmin(Star):
             caption += "\n\n**" + self._markdown_text(title, 180) + "**"
         if summary:
             caption += "\n\n" + self._markdown_text(summary, 240)
+        if not title and not summary:
+            caption += "\n\n图片动态：正文已包含在海报中。"
         link = str(card_data.get("link") or "").strip()
         if link:
             label = self._markdown_text(card_data.get("link_label") or "查看原动态", 40)
@@ -4513,7 +4522,13 @@ class QQGroupAdmin(Star):
             for item in new_items:
                 name = self._markdown_text(item.get("author") or f"UID {uid}")
                 raw_title = self._bilibili_display_text(item.get("title"))
-                raw_summary = self._bilibili_display_text(item.get("text"))
+                raw_summary = "\n".join(
+                    " ".join(line.split())
+                    for line in str(item.get("text") or "").splitlines()
+                    if line.split()
+                ).strip()
+                if raw_summary in {"-", "--", "—", "暂无", "暂无内容"}:
+                    raw_summary = ""
                 if raw_summary in {"新动态", "发布了新动态"}:
                     raw_summary = ""
                 kind = self._bilibili_dynamic_type(item.get("type"))
@@ -4542,10 +4557,13 @@ class QQGroupAdmin(Star):
                 sections = ["# B站视频" if is_video else "# B站动态", meta]
                 if cover:
                     sections.append(cover)
-                native_cover = bool(
-                    item.get("cover") and kind in {"图文", "转发"}
-                )
-                image_only = bool(native_cover and not title and not summary)
+                has_poster = bool(item.get("cover") and kind in {"图文", "转发"})
+                image_only = bool(has_poster and not title and not summary)
+                # A poster with API text needs a single readable composition;
+                # keep the original-image shortcut only for true image-only
+                # dynamics whose copy is already embedded in the poster.
+                native_cover = image_only
+                focus_cover = bool(has_poster and not image_only)
                 if image_only:
                     sections.append("图片动态：正文已包含在海报中。")
                 if title:
@@ -4579,9 +4597,10 @@ class QQGroupAdmin(Star):
                     # Some Bilibili draw posts have no API title/description:
                     # all copy is baked into the portrait poster itself.
                     "image_only": image_only,
-                    # QQ preserves Bilibili posters more clearly as native images;
-                    # keep the copy in the following caption instead of shrinking it.
+                    # Text-bearing posters use the stacked focus layout so the
+                    # title/summary remains readable beside a portrait image.
                     "native_cover": native_cover,
+                    "focus_cover": focus_cover,
                     "avatar": item.get("avatar"),
                     "status": "",
                     "link": item.get("url"),
