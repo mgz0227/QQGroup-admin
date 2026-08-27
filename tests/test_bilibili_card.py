@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 from bilibili_card import (
     _image_url,
+    _image_url_candidates,
     build_bilibili_card,
     download_bilibili_image,
     render_bilibili_card,
@@ -44,6 +45,21 @@ class BilibiliCardTest(unittest.TestCase):
 
     def test_download_bilibili_image_rejects_non_bilibili_url(self):
         self.assertIsNone(download_bilibili_image("https://example.test/a.jpg"))
+
+    def test_image_url_candidates_normalize_cdn_and_restore_original_name(self):
+        self.assertEqual(
+            _image_url_candidates(
+                "http://i0.hdslb.com/bfs/new_dyn/post@672w_1c.webp?sign=ok#fragment"
+            ),
+            [
+                "https://i0.hdslb.com/bfs/new_dyn/post@672w_1c.webp?sign=ok",
+                "https://i0.hdslb.com/bfs/new_dyn/post.webp?sign=ok",
+            ],
+        )
+        self.assertEqual(
+            _image_url("https://user:pass@i0.hdslb.com/bfs/post.jpg"),
+            "",
+        )
 
     def test_download_bilibili_image_transcodes_and_bounds_remote_poster(self):
         from PIL import Image

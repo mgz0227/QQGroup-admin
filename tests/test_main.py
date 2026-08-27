@@ -1683,6 +1683,53 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 {"group-1"},
             )
 
+    async def test_global_policy_web_persists_verification_message_settings(self):
+        plugin, _client = self.plugin()
+        profiles = module.GroupAdminWeb._global_policy_profiles(
+            [
+                {
+                    "profile_id": "verification",
+                    "name": "真人验证",
+                    "enabled": True,
+                    "group_openids": ["group-1"],
+                    "verification_message_recall_enabled": False,
+                    "verification_message_timeout_seconds": 300,
+                }
+            ],
+            {"group-1"},
+        )
+        await plugin.web_save_global_policies({"profiles": profiles})
+        stored = plugin.config["global_policy_profiles"][0]
+        self.assertFalse(stored["verification_message_recall_enabled"])
+        self.assertEqual(stored["verification_message_timeout_seconds"], 300)
+
+        with self.assertRaisesRegex(TypeError, "真人验证消息自动撤回必须是布尔值"):
+            module.GroupAdminWeb._global_policy_profiles(
+                [
+                    {
+                        "profile_id": "verification-type",
+                        "name": "类型错误",
+                        "enabled": True,
+                        "group_openids": ["group-1"],
+                        "verification_message_recall_enabled": "false",
+                    }
+                ],
+                {"group-1"},
+            )
+        with self.assertRaisesRegex(ValueError, "真人验证超时必须在 15-600 之间"):
+            module.GroupAdminWeb._global_policy_profiles(
+                [
+                    {
+                        "profile_id": "verification-range",
+                        "name": "范围错误",
+                        "enabled": True,
+                        "group_openids": ["group-1"],
+                        "verification_message_timeout_seconds": 601,
+                    }
+                ],
+                {"group-1"},
+            )
+
     def test_global_policy_web_validation_accepts_rate_limit_fields(self):
         profiles = module.GroupAdminWeb._global_policy_profiles(
             [
@@ -2097,7 +2144,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(blocked.stopped)
         self.assertIn(
             "成员命中本群黑名单，消息已撤回。",
-            client.api.messages[-1]["markdown"]["content"],
+            client.api.messages[-1]["content"],
         )
         api.recall_group_message.assert_awaited_once_with("group-1", "message-2")
 
@@ -2420,9 +2467,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         await plugin.audit_group_message(event)
 
-        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
+            client.api.messages[-1]["content"],
             '<qqbot-at-user id="admin-1" /> 这条消息已撤回。',
         )
 
@@ -2450,9 +2497,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         await plugin.audit_group_message(event)
 
-        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
+            client.api.messages[-1]["content"],
             '<qqbot-at-user id="admin-1" />',
         )
 
@@ -3129,6 +3176,46 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(render.await_args.args[0]["focus_cover"])
         self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\nfocus")
 
+    async def test_bilibili_draw_download_failure_prefers_public_url_media(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_url = AsyncMock(return_value={"id": "url-1"})
+        render = AsyncMock()
+        with (
+            patch.object(module, "download_bilibili_image", return_value=None),
+            patch.object(plugin, "_send_group_card_url", send_url),
+            patch.object(plugin, "_render_bilibili_card", render),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    }
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "native_cover": True,
+                    "cover": "http://i0.hdslb.com/bfs/draw@672w_1c.webp",
+                    "summary": "动态正文摘要",
+                    "link": "https://www.bilibili.com/opus/4",
+                },
+            )
+
+        self.assertTrue(delivered)
+        send_url.assert_awaited_once_with(
+            client,
+            "group-1",
+            "https://i0.hdslb.com/bfs/draw@672w_1c.webp",
+        )
+        render.assert_not_awaited()
+        self.assertIn("动态正文摘要", client.api.messages[-1]["markdown"]["content"])
+
     async def test_bilibili_native_upload_failure_retries_focus_card(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
@@ -3252,6 +3339,39 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "msg_type": 7,
                 "media": {"file_info": "info-1"},
             },
+        )
+
+    async def test_bilibili_public_url_media_prefers_original_candidate(self):
+        plugin, client = self.plugin()
+        api = SimpleNamespace(
+            upload_group_file=AsyncMock(
+                side_effect=[RuntimeError("original unavailable"), {"id": "url-1"}]
+            )
+        )
+        with patch.object(module, "QQGroupAPI", return_value=api):
+            result = await plugin._send_group_card_url(
+                client,
+                "group-1",
+                "http://i0.hdslb.com/bfs/new_dyn/post@672w_1c.webp?sign=ok",
+            )
+
+        self.assertEqual(result, {"id": "url-1"})
+        self.assertEqual(
+            api.upload_group_file.await_args_list,
+            [
+                unittest.mock.call(
+                    "group-1",
+                    "https://i0.hdslb.com/bfs/new_dyn/post.webp?sign=ok",
+                    file_name="bilibili-poster.jpg",
+                    file_type=1,
+                ),
+                unittest.mock.call(
+                    "group-1",
+                    "https://i0.hdslb.com/bfs/new_dyn/post@672w_1c.webp?sign=ok",
+                    file_name="bilibili-poster.jpg",
+                    file_type=1,
+                ),
+            ],
         )
 
     async def test_bilibili_live_push_uses_named_room_link(self):
@@ -3461,13 +3581,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
+            client.api.messages[-1]["content"],
             '已禁言 45 秒：<qqbot-at-user id="member-1" />',
         )
-        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertIn(
             '<qqbot-at-user id="member-1" />',
-            client.api.messages[-1]["markdown"]["content"],
+            client.api.messages[-1]["content"],
         )
 
     async def test_standard_mute_stops_after_direct_mention_reply(self):
@@ -3487,7 +3607,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         self.assertTrue(
-            client.api.messages[-1]["markdown"]["content"].startswith(
+            client.api.messages[-1]["content"].startswith(
                 '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
             )
         )
@@ -3495,7 +3615,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_notice_fallback_never_exposes_raw_mention_markup(self):
         plugin, client = self.plugin()
         client.api.post_group_message = AsyncMock(
-            side_effect=[RuntimeError("markdown disabled"), SimpleNamespace(id="sent")]
+            side_effect=[RuntimeError("text failed"), SimpleNamespace(id="sent")]
         )
 
         await plugin._send_group_notice(
@@ -3506,7 +3626,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         calls = client.api.post_group_message.await_args_list
-        self.assertEqual(calls[0].kwargs["msg_type"], 2)
+        self.assertEqual(calls[0].kwargs["msg_type"], 0)
         self.assertEqual(calls[1].kwargs["msg_type"], 0)
         self.assertNotIn("qqbot-at-user", calls[1].kwargs["content"])
         self.assertEqual(calls[1].kwargs["content"], "图片文字命中禁止关键词，已撤回。")
@@ -3524,15 +3644,18 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
-        content = client.api.messages[-1]["markdown"]["content"]
-        self.assertLessEqual(len(content), 4000)
+        content = client.api.messages[-1]["content"]
+        self.assertLessEqual(len(content), 1000)
         self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
-        content = client.api.messages[-1]["markdown"]["content"]
+        content = client.api.messages[-1]["content"]
+        self.assertLessEqual(len(content), 1000)
         mention = '<qqbot-at-user id="member-1" />'
-        self.assertEqual(content, mention * 40)
+        self.assertTrue(content.startswith(mention))
+        self.assertTrue(content.endswith(" />"))
+        self.assertNotRegex(content, r"<qqbot-at-user\\b[^>]*$")
 
     async def test_web_batch_save_and_sync(self):
         plugin, _client = self.plugin()
@@ -5443,10 +5566,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(client.api.messages), 1)
         message = client.api.messages[0]
-        self.assertEqual(message["msg_type"], 2)
-        self.assertIn("欢迎 新人 加入 测试群", message["markdown"]["content"])
-        self.assertIn("UID=188144093", message["markdown"]["content"])
-        self.assertIn('<qqbot-at-user id="member-1" />', message["markdown"]["content"])
+        self.assertEqual(message["msg_type"], 0)
+        self.assertIn("欢迎 新人 加入 测试群", message["content"])
+        self.assertIn("UID=188144093", message["content"])
+        self.assertIn('<qqbot-at-user id="member-1" />', message["content"])
 
     def test_single_welcome_template_mapping_is_preserved(self):
         plugin, _client = self.plugin()

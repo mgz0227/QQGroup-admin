@@ -4,9 +4,10 @@ from collections.abc import Mapping
 from html import escape
 from io import BytesIO
 from pathlib import Path
+import re
 from typing import Any
 from urllib.error import URLError
-from urllib.parse import urlsplit
+from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
@@ -40,19 +41,59 @@ def _plain(value: object, limit: int) -> str:
 
 
 def _image_url(value: object) -> str:
-    """Only fetch Bilibili media hosts when building a local card."""
+    """Return a normalized, allow-listed Bilibili media URL."""
 
     url = str(value or "").strip()
     parsed = urlsplit(url)
     host = (parsed.hostname or "").lower().rstrip(".")
-    if parsed.scheme not in {"http", "https"} or not host:
+    if (
+        parsed.scheme not in {"http", "https"}
+        or not host
+        or parsed.username
+        or parsed.password
+    ):
         return ""
     roots = {"hdslb.com", "bilivideo.com", "biliimg.com", "bilibili.com"}
     if host not in roots and not host.endswith(
         (".hdslb.com", ".bilivideo.com", ".biliimg.com", ".bilibili.com")
     ):
         return ""
-    return url
+    # CDN links in dynamic feeds are often emitted as http or with a resized
+    # ``@672w_...`` suffix.  HTTPS is more reliable in server environments;
+    # the suffix-free candidate below lets callers request the readable source
+    # poster without changing the displayed URL.
+    return urlunsplit(("https", parsed.netloc, parsed.path, parsed.query, ""))
+
+
+def _image_url_candidates(value: object) -> list[str]:
+    """Return a small ordered set of safe CDN URLs (normal, then original)."""
+
+    normalized = _image_url(value)
+    if not normalized:
+        return []
+    candidates = [normalized]
+    parsed = urlsplit(normalized)
+    filename = parsed.path.rsplit("/", 1)[-1]
+    marker = filename.find("@")
+    if marker > 0 and re.search(r"@[^/]*\d+[wh]", filename[marker:], re.I):
+        suffix = ""
+        if "." in filename[marker:]:
+            suffix = filename.rsplit(".", 1)[-1]
+        original_filename = filename[:marker] + (f".{suffix}" if suffix else "")
+        parent = parsed.path[: -len(filename)] if filename else parsed.path
+        original_path = parent + original_filename
+        original = urlunsplit(
+            (parsed.scheme, parsed.netloc, original_path, parsed.query, "")
+        )
+        if original != normalized:
+            candidates.append(original)
+    return candidates
+
+
+def bilibili_media_url_candidates(value: object) -> list[str]:
+    """Return safe CDN URLs suitable for QQ's public-URL media endpoint."""
+
+    return _image_url_candidates(value)
 
 
 class _BilibiliRedirectHandler(HTTPRedirectHandler):
@@ -101,30 +142,32 @@ def _font(size: int, *, bold: bool = False):
 def _download_image(value: object):
     from PIL import Image, ImageOps
 
-    url = _image_url(value)
-    if not url:
+    urls = _image_url_candidates(value)
+    if not urls:
         return None
-    try:
-        request = Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 BilibiliPush/1.0",
-                "Referer": "https://www.bilibili.com/",
-            },
-        )
-        with build_opener(_BilibiliRedirectHandler()).open(request, timeout=4) as response:
-            content_length = int(response.headers.get("Content-Length") or 0)
-            if content_length > 4 * 1024 * 1024:
-                return None
-            data = response.read(4 * 1024 * 1024 + 1)
-        if len(data) > 4 * 1024 * 1024:
-            return None
-        image = Image.open(BytesIO(data))
-        image = ImageOps.exif_transpose(image).convert("RGB")
-        image.thumbnail((1600, 1000))
-        return image
-    except (OSError, SyntaxError, URLError, ValueError):
-        return None
+    for url in urls:
+        try:
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 BilibiliPush/1.0",
+                    "Referer": "https://www.bilibili.com/",
+                },
+            )
+            with build_opener(_BilibiliRedirectHandler()).open(request, timeout=4) as response:
+                content_length = int(response.headers.get("Content-Length") or 0)
+                if content_length > 4 * 1024 * 1024:
+                    continue
+                data = response.read(4 * 1024 * 1024 + 1)
+            if len(data) > 4 * 1024 * 1024:
+                continue
+            image = Image.open(BytesIO(data))
+            image = ImageOps.exif_transpose(image).convert("RGB")
+            image.thumbnail((1600, 1000))
+            return image
+        except (OSError, SyntaxError, URLError, ValueError):
+            continue
+    return None
 
 
 def download_bilibili_image(value: object, *, max_bytes: int = 8 * 1024 * 1024) -> bytes | None:
@@ -138,39 +181,42 @@ def download_bilibili_image(value: object, *, max_bytes: int = 8 * 1024 * 1024) 
 
     from PIL import Image, ImageOps
 
-    url = _image_url(value)
-    if not url or max_bytes <= 0:
+    urls = _image_url_candidates(value)
+    if not urls or max_bytes <= 0:
         return None
-    try:
-        request = Request(
-            url,
-            headers={
-                "User-Agent": "Mozilla/5.0 BilibiliPush/1.0",
-                "Referer": "https://www.bilibili.com/",
-            },
-        )
-        with build_opener(_BilibiliRedirectHandler()).open(request, timeout=4) as response:
-            content_length = int(response.headers.get("Content-Length") or 0)
-            if content_length > max_bytes:
-                return None
-            data = response.read(max_bytes + 1)
-        if len(data) > max_bytes:
-            return None
-        image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
-        # QQ clients display very tall originals poorly.  Keep the full poster
-        # while bounding its longest edge and upload size.
-        image.thumbnail((1600, 2400), resample=Image.Resampling.LANCZOS)
-        output = BytesIO()
-        image.save(output, format="JPEG", quality=92, optimize=True)
-        encoded = output.getvalue()
-        if len(encoded) <= max_bytes:
-            return encoded
-        output = BytesIO()
-        image.save(output, format="JPEG", quality=82, optimize=True)
-        encoded = output.getvalue()
-        return encoded if len(encoded) <= max_bytes else None
-    except (OSError, SyntaxError, URLError, ValueError):
-        return None
+    for url in urls:
+        try:
+            request = Request(
+                url,
+                headers={
+                    "User-Agent": "Mozilla/5.0 BilibiliPush/1.0",
+                    "Referer": "https://www.bilibili.com/",
+                },
+            )
+            with build_opener(_BilibiliRedirectHandler()).open(request, timeout=4) as response:
+                content_length = int(response.headers.get("Content-Length") or 0)
+                if content_length > max_bytes:
+                    continue
+                data = response.read(max_bytes + 1)
+            if len(data) > max_bytes:
+                continue
+            image = ImageOps.exif_transpose(Image.open(BytesIO(data))).convert("RGB")
+            # QQ clients display very tall originals poorly.  Keep the full poster
+            # while bounding its longest edge and upload size.
+            image.thumbnail((1600, 2400), resample=Image.Resampling.LANCZOS)
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=92, optimize=True)
+            encoded = output.getvalue()
+            if len(encoded) <= max_bytes:
+                return encoded
+            output = BytesIO()
+            image.save(output, format="JPEG", quality=82, optimize=True)
+            encoded = output.getvalue()
+            if len(encoded) <= max_bytes:
+                return encoded
+        except (OSError, SyntaxError, URLError, ValueError):
+            continue
+    return None
 
 
 def _wrap_text(

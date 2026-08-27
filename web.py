@@ -27,6 +27,8 @@ GLOBAL_POLICY_LIMIT = 50
 GLOBAL_POLICY_FIELDS = (
     "settings_command_enabled",
     "settings_panel_auto_recall",
+    "verification_message_recall_enabled",
+    "verification_message_timeout_seconds",
     "mute_success_message",
     "global_reject_keywords",
     "global_message_reject_keywords",
@@ -606,6 +608,20 @@ class GroupAdminWeb:
             "settings_command_enabled": cls._bool(
                 payload, "settings_command_enabled", True, "审核设置命令"
             ),
+            "verification_message_recall_enabled": cls._bool(
+                payload,
+                "verification_message_recall_enabled",
+                True,
+                "真人验证消息自动撤回",
+            ),
+            "verification_message_timeout_seconds": cls._int(
+                payload,
+                "verification_message_timeout_seconds",
+                120,
+                15,
+                600,
+                "真人验证超时",
+            ),
             "global_reject_keywords": "\n".join(
                 parse_keywords(
                     cls._text(
@@ -979,6 +995,8 @@ class GroupAdminWeb:
             "global_member_whitelist",
             "global_blacklist_reply",
             "global_blacklist_at_member",
+            "verification_message_recall_enabled",
+            "verification_message_timeout_seconds",
             "global_image_reject_reply",
             "global_image_reject_at_member",
             "global_ai_reject_reply",
