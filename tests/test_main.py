@@ -3133,6 +3133,23 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_card.await_args.args[2], b"poster")
         self.assertIn("动态标题", client.api.messages[-1]["markdown"]["content"])
 
+    async def test_bilibili_poster_caption_keeps_compact_metadata_and_paragraphs(self):
+        plugin, _client = self.plugin()
+
+        caption = plugin._bilibili_poster_caption(
+            {
+                "author": "UP主",
+                "kind": "图文",
+                "timestamp": "08-28 08:00",
+                "summary": "第一段\n第二段",
+                "link": "https://www.bilibili.com/opus/1",
+            }
+        )
+
+        self.assertIn("**UP主**\n图文 · 08\\-28 08:00", caption)
+        self.assertIn("第一段\n第二段", caption)
+        self.assertIn("[查看原动态 ↗]", caption)
+
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
@@ -3260,9 +3277,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         render.assert_awaited_once()
         self.assertTrue(render.await_args.args[0]["focus_cover"])
         self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\ncard")
-        self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
+        caption = client.api.messages[-1]["markdown"]["content"]
+        self.assertIn("动态正文摘要", caption)
+        self.assertIn(
             "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
+            caption,
         )
 
     async def test_bilibili_image_only_push_prefers_native_poster_over_tall_card(self):
@@ -3420,8 +3439,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         render.assert_awaited_once()
 
     async def test_bilibili_draw_download_failure_uses_focus_fallback(self):
-        plugin, _client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": _client}
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
         render = AsyncMock(return_value=b"\x89PNG\r\nfocus")
         send_card = AsyncMock(return_value=SimpleNamespace(id="focus-1"))
         with (
@@ -3454,6 +3473,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(render.await_args.args[0]["focus_cover"])
         self.assertEqual(render.await_args.args[0]["link"], "")
         self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\nfocus")
+        caption = client.api.messages[-1]["markdown"]["content"]
+        self.assertIn("动态正文摘要", caption)
+        self.assertIn(
+            "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
+            caption,
+        )
 
     async def test_bilibili_draw_download_failure_prefers_public_url_media(self):
         plugin, client = self.plugin()

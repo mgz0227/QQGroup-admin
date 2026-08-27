@@ -4153,6 +4153,21 @@ class QQGroupAdmin(Star):
                         len(native_images),
                     )
 
+        async def send_poster_caption(client: Any, group_openid: str) -> None:
+            if poster_caption:
+                try:
+                    await self._send_group_markdown(
+                        client,
+                        group_openid,
+                        poster_caption,
+                    )
+                except Exception:
+                    await self._send_group_text(
+                        client,
+                        group_openid,
+                        self._markdown_fallback_text(poster_caption),
+                    )
+
         async def send_native_poster(client: Any, group_openid: str) -> bool:
             """Send the original poster when the composed card is unavailable."""
 
@@ -4199,19 +4214,7 @@ class QQGroupAdmin(Star):
                     )
             if not poster_sent:
                 return False
-            if poster_caption:
-                try:
-                    await self._send_group_markdown(
-                        client,
-                        group_openid,
-                        poster_caption,
-                    )
-                except Exception:
-                    await self._send_group_text(
-                        client,
-                        group_openid,
-                        self._markdown_fallback_text(poster_caption),
-                    )
+            await send_poster_caption(client, group_openid)
             return True
 
         for target in eligible_targets:
@@ -4246,11 +4249,7 @@ class QQGroupAdmin(Star):
                                 (card_data or {}).get("link_label") or "查看原动态"
                             ),
                         )
-                        await self._send_bilibili_link(
-                            client,
-                            group_openid,
-                            card_data or {},
-                        )
+                        await send_poster_caption(client, group_openid)
                         continue
                     except Exception as fallback_card_exc:  # noqa: BLE001
                         self.logger.debug(
@@ -4269,23 +4268,14 @@ class QQGroupAdmin(Star):
                                 (card_data or {}).get("link_label") or "查看原动态"
                             ),
                         )
-                        link = str((card_data or {}).get("link") or "").strip()
-                        if link:
-                            label = str(
-                                (card_data or {}).get("link_label") or "查看原动态"
-                            ).strip()
-                            try:
-                                await self._send_group_markdown(
-                                    client,
-                                    group_openid,
-                                    f"[{label} ↗]({link})",
-                                )
-                            except Exception:
-                                await self._send_group_text(
-                                    client,
-                                    group_openid,
-                                    f"{label}：{link}",
-                                )
+                        if native_cover:
+                            await send_poster_caption(client, group_openid)
+                        else:
+                            await self._send_bilibili_link(
+                                client,
+                                group_openid,
+                                card_data or {},
+                            )
                         continue
                     except Exception as card_exc:  # noqa: BLE001 - optional card
                         if native_cover and await send_native_poster(
@@ -4317,7 +4307,7 @@ class QQGroupAdmin(Star):
     def _bilibili_poster_caption(self, card_data: dict[str, Any]) -> str:
         author = self._markdown_text(card_data.get("author") or "B站用户", 80)
         kind = self._markdown_text(card_data.get("kind") or "图文", 24)
-        caption = f"**{author}** · {kind}"
+        caption = f"**{author}**\n{kind}"
         timestamp = str(card_data.get("timestamp") or "").strip()
         if timestamp:
             caption += " · " + self._markdown_text(timestamp, 32)
@@ -4337,7 +4327,12 @@ class QQGroupAdmin(Star):
         if title:
             caption += "\n\n**" + self._markdown_text(title, 180) + "**"
         if summary:
-            caption += "\n\n" + self._markdown_text(summary, 240)
+            lines = [
+                self._markdown_text(line, 240)
+                for line in summary[:360].splitlines()
+                if line.strip()
+            ]
+            caption += "\n\n" + "\n".join(lines)
         if not title and not summary:
             caption += "\n\n图片动态：正文已包含在海报中。"
         link = str(card_data.get("link") or "").strip()

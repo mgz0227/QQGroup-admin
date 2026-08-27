@@ -263,7 +263,12 @@ def fetch_space_dynamics(
         raise BilibiliConfigError("B 站空间动态需要配置完整 Cookie")
     keys = wbi_keys or fetch_wbi_keys(cookie, timeout=timeout)
     params = sign_wbi(
-        {"host_mid": _uid(uid), "platform": "web", "timezone_offset": -480},
+        {
+            "host_mid": _uid(uid),
+            "platform": "web",
+            "timezone_offset": -480,
+            "features": "itemOpusStyle",
+        },
         *keys,
     )
     url = f"{DYNAMIC_URL}?{urlencode(params, quote_via=quote)}"
@@ -297,12 +302,30 @@ def _rich_text(value: Any) -> str:
     for node in nodes:
         if not isinstance(node, Mapping):
             continue
-        text = _clean_dynamic_text(
-            node.get("text") or node.get("orig_text") or node.get("content")
-        )
-        if text:
+        node_type = str(node.get("type") or "")
+        if node_type == "RICH_TEXT_NODE_TYPE_WEB":
+            raw_text = node.get("orig_text") or node.get("text")
+        else:
+            raw_text = (
+                node.get("text") or node.get("orig_text") or node.get("content")
+            )
+        text = str(raw_text or "")
+        if not text.strip():
+            jump_url = str(node.get("jump_url") or "").strip()
+            if jump_url.startswith("//"):
+                jump_url = "https:" + jump_url
+            elif jump_url.startswith("/"):
+                jump_url = "https://www.bilibili.com" + jump_url
+            if jump_url.startswith(("https://", "http://")):
+                text = jump_url
+        elif node_type == "RICH_TEXT_NODE_TYPE_WEB" and text.startswith("//"):
+            text = "https:" + text
+        if _clean_dynamic_text(text):
+            # Rich-text nodes are contiguous source fragments.  Preserve their
+            # original whitespace so paragraph breaks and link boundaries are
+            # not flattened into a single line.
             parts.append(text)
-    return _clean_dynamic_text(" ".join(parts))
+    return _clean_dynamic_text("".join(parts))
 
 
 def _first_cover_info(card: dict[str, Any]) -> tuple[str, int, int]:
@@ -557,8 +580,8 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             value
             for current_desc in (desc, orig_desc)
             for value in (
-                _clean_dynamic_text(current_desc.get("text")),
                 _rich_text(current_desc),
+                _clean_dynamic_text(current_desc.get("text")),
             )
             if value
         ]
@@ -566,8 +589,8 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             value
             for summary in summaries
             for value in (
-                _clean_dynamic_text(summary.get("text")),
                 _rich_text(summary),
+                _clean_dynamic_text(summary.get("text")),
             )
             if value
         ]

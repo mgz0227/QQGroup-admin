@@ -27,6 +27,21 @@ class BilibiliTest(unittest.TestCase):
         with self.assertRaises(BilibiliConfigError):
             fetch_space_dynamics("188144093", "")
 
+    def test_space_dynamics_requests_opus_fields(self):
+        payload = {"code": 0, "data": {"items": []}}
+        with patch("bilibili._get_json", return_value=payload) as request:
+            result = fetch_space_dynamics(
+                "188144093",
+                "SESSDATA=test",
+                wbi_keys=(
+                    "7cd084941338484aae1ad9425b84077c",
+                    "4932caff0ff746eab6f01bf08b70ac45",
+                ),
+            )
+
+        self.assertIs(result, payload)
+        self.assertIn("features=itemOpusStyle", request.call_args.args[0])
+
     def test_dynamic_parser_returns_stable_fields(self):
         payload = {
             "code": 0,
@@ -275,7 +290,7 @@ class BilibiliTest(unittest.TestCase):
                                                 "text": "",
                                                 "rich_text_nodes": [
                                                     {"text": "第一段"},
-                                                    {"orig_text": "第二段"},
+                                                    {"orig_text": " 第二段"},
                                                 ],
                                             },
                                             "pics": [
@@ -306,6 +321,88 @@ class BilibiliTest(unittest.TestCase):
             "text": ""
         }
         self.assertEqual(parse_dynamic_items(payload)[0]["text"], "第一段 第二段")
+
+    def test_dynamic_parser_prefers_desc_nodes_and_preserves_link_newlines(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "rich-desc",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_dynamic": {
+                                "desc": {
+                                    "text": "第一行网页链接第二行",
+                                    "rich_text_nodes": [
+                                        {"text": "第一行\n"},
+                                        {
+                                            "type": "RICH_TEXT_NODE_TYPE_WEB",
+                                            "text": "网页链接",
+                                            "orig_text": "//example.com/page",
+                                        },
+                                        {"text": "\n第二行"},
+                                    ],
+                                }
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        self.assertEqual(
+            parse_dynamic_items(payload)[0]["text"],
+            "第一行\nhttps://example.com/page\n第二行",
+        )
+
+    def test_dynamic_parser_reads_opus_summary_and_link_only_nodes(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "opus-summary",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_dynamic": {
+                                "desc": None,
+                                "major": {
+                                    "opus": {
+                                        "summary": {
+                                            "text": "",
+                                            "rich_text_nodes": [
+                                                {"text": "正文第一段\n\n"},
+                                                {
+                                                    "type": "RICH_TEXT_NODE_TYPE_WEB",
+                                                    "text": "",
+                                                    "orig_text": "",
+                                                    "jump_url": "//www.bilibili.com/video/BV1xx",
+                                                },
+                                            ],
+                                        },
+                                        "pics": [
+                                            {
+                                                "url": "//i0.hdslb.com/bfs/opus.jpg",
+                                                "width": 1200,
+                                                "height": 1800,
+                                            }
+                                        ],
+                                    }
+                                },
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        item = parse_dynamic_items(payload)[0]
+        self.assertEqual(
+            item["text"],
+            "正文第一段\n\nhttps://www.bilibili.com/video/BV1xx",
+        )
+        self.assertEqual(item["cover"], "https://i0.hdslb.com/bfs/opus.jpg")
 
     def test_live_transition_seeds_and_detects_changes(self):
         offline = {"live_status": 0, "live_time": 0}
