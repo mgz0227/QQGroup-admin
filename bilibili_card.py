@@ -11,6 +11,10 @@ from urllib.parse import urlsplit, urlunsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 
+class BilibiliCoverUnavailable(RuntimeError):
+    """Raised when a card explicitly requires a cover but it could not load."""
+
+
 def _text(value: object, limit: int) -> str:
     text = " ".join(str(value or "").split()).strip()
     return escape(text[:limit])
@@ -27,10 +31,16 @@ def _body(value: object, limit: int) -> str:
 
 def _url(value: object, *, bilibili_media: bool = False) -> str:
     url = str(value or "").strip()
+    if bilibili_media:
+        # Dynamic feeds commonly return a resized ``@100w``/``@672w`` URL.
+        # Use the suffix-free candidate for browser cards so the renderer does
+        # not lock the image to a tiny thumbnail's intrinsic dimensions.
+        candidates = _image_url_candidates(url)
+        if not candidates:
+            return ""
+        url = candidates[-1]
     parsed = urlsplit(url)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return ""
-    if bilibili_media and not _image_url(url):
         return ""
     return escape(url, quote=True)
 
@@ -145,12 +155,20 @@ def _font(size: int, *, bold: bool = False):
     return ImageFont.load_default()
 
 
-def _download_image(value: object, *, max_size: tuple[int, int] = (1600, 1000)):
+def _download_image(
+    value: object,
+    *,
+    max_size: tuple[int, int] = (1600, 1000),
+):
     from PIL import Image, ImageOps
 
     urls = _image_url_candidates(value)
     if not urls:
         return None
+    # Prefer the suffix-free source.  Resized feed URLs (for example
+    # ``@672w_1c``) are useful only as a bounded fallback and make blurry
+    # notification cards when used as the primary image.
+    urls = list(reversed(urls))
     for url in urls:
         try:
             request = Request(
@@ -389,6 +407,12 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         card_data.get("cover"),
         max_size=(1600, 2400) if focus_requested else (1600, 1000),
     )
+    if (
+        card_data.get("cover")
+        and bool(card_data.get("require_cover"))
+        and cover is None
+    ):
+        raise BilibiliCoverUnavailable("B 站封面下载失败")
 
     # A draw dynamic can contain all of its copy in one portrait poster.  A
     # wide side-by-side card makes that poster occupy too little of the QQ
@@ -778,10 +802,12 @@ def build_bilibili_card(
         else ""
     )
     if image_only_cover:
-        note_markup = '<div class="focus-note">图文动态 · 正文已包含在海报中</div>'
+        note_markup = (
+            f'<div class="focus-note">{kind_text}动态 · 正文已包含在海报中</div>'
+        )
         content_markup = f'<div class="focus-content">{note_markup}{cover_markup}</div>'
     elif focus_cover_requested:
-        note_markup = '<div class="focus-note">图文动态 · 海报优先展示</div>'
+        note_markup = f'<div class="focus-note">{kind_text}动态 · 海报优先展示</div>'
         content_markup = (
             f'<div class="focus-content">{title_markup}{summary_markup}'
             f"{note_markup}{cover_markup}</div>"

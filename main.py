@@ -33,6 +33,7 @@ from .bilibili import (
     start_qr_login,
 )
 from .bilibili_card import (
+    BilibiliCoverUnavailable,
     build_bilibili_card,
     bilibili_media_url_candidates,
     download_bilibili_image,
@@ -3603,10 +3604,12 @@ class QQGroupAdmin(Star):
         url = str(value or "").strip()
         if url.startswith("//"):
             url = "https:" + url
-        if not url.startswith(("https://", "http://")) or any(
-            char.isspace() or char in "()" for char in url
-        ):
+        candidates = bilibili_media_url_candidates(url)
+        if not candidates:
             return ""
+        # Prefer the suffix-free source image.  QQ/Markdown otherwise keeps
+        # the thumbnail's tiny intrinsic size even when the original exists.
+        url = candidates[-1]
         try:
             source_width = int(width)
             source_height = int(height)
@@ -4054,6 +4057,9 @@ class QQGroupAdmin(Star):
             native_cover = native_cover or image_only
             if (image_only or native_cover) and card_data.get("cover"):
                 native_urls = bilibili_media_url_candidates(card_data.get("cover"))
+                # Keep the original feed URL here.  _send_group_card_url
+                # receives the full candidate list and tries the suffix-free
+                # source first, then the thumbnail if QQ cannot fetch it.
                 native_url = native_urls[0] if native_urls else ""
             if native_cover:
                 poster_caption = self._bilibili_poster_caption(card_data)
@@ -4066,6 +4072,10 @@ class QQGroupAdmin(Star):
                         **card_data,
                         "focus_cover": bool(native_cover)
                         or card_data.get("focus_cover", False),
+                        "require_cover": bool(
+                            card_data.get("cover")
+                            and (native_cover or card_data.get("focus_cover"))
+                        ),
                         "link": "",
                         "link_label": "",
                     }
@@ -4175,6 +4185,9 @@ class QQGroupAdmin(Star):
                                 {
                                     **(card_data or {}),
                                     "focus_cover": True,
+                                    "require_cover": bool(
+                                        (card_data or {}).get("cover")
+                                    ),
                                     "link": "",
                                     "link_label": "",
                                 }
@@ -4304,15 +4317,22 @@ class QQGroupAdmin(Star):
             )
             if image.startswith(b"\x89PNG") and len(image) <= 8 * 1024 * 1024:
                 return image
+        except BilibiliCoverUnavailable:
+            # A poster-only notification must not be replaced by a successful
+            # looking card with an empty cover; let the native poster fallback
+            # in _push_bilibili_message handle it.
+            raise
         except Exception as exc:  # noqa: BLE001 - HTML remains a compatibility fallback
             self.logger.debug("B 站本地图片卡片不可用，尝试 AstrBot T2I：%s", exc)
 
         renderer = getattr(self, "html_render", None)
         if not callable(renderer):
             raise TypeError("AstrBot HTML 渲染不可用")
+        html_data = dict(card_data)
+        html_data.pop("require_cover", None)
         result = await asyncio.wait_for(
             renderer(
-                tmpl=build_bilibili_card(**card_data),
+                tmpl=build_bilibili_card(**html_data),
                 data={},
                 return_url=False,
                 options={

@@ -3,6 +3,8 @@ from io import BytesIO
 from unittest.mock import patch
 
 from bilibili_card import (
+    BilibiliCoverUnavailable,
+    _download_image,
     _image_url,
     _image_url_candidates,
     build_bilibili_card,
@@ -105,6 +107,38 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertLessEqual(max(rendered.size), 2400)
         self.assertLessEqual(len(encoded), 8 * 1024 * 1024)
         self.assertEqual(opener.timeout, 4)
+
+    def test_card_download_prefers_suffix_free_source(self):
+        from PIL import Image
+
+        source = BytesIO()
+        Image.new("RGB", (12, 12), "#734820").save(source, format="PNG")
+        requested: list[str] = []
+
+        class Response:
+            headers = {"Content-Length": str(len(source.getvalue()))}
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return False
+
+            def read(self, limit):
+                return source.getvalue()
+
+        class Opener:
+            def open(self, request, timeout):
+                requested.append(request.full_url)
+                return Response()
+
+        with patch("bilibili_card.build_opener", return_value=Opener()):
+            self.assertIsNotNone(
+                _download_image(
+                    "https://i0.hdslb.com/bfs/draw@672w_1c.webp"
+                )
+            )
+        self.assertEqual(requested[0], "https://i0.hdslb.com/bfs/draw.webp")
 
     def test_native_download_prefers_suffix_free_original_before_thumbnail(self):
         from PIL import Image
@@ -281,6 +315,21 @@ class BilibiliCardTest(unittest.TestCase):
 
         self.assertTrue(image.startswith(b"\x89PNG\r\n\x1a\n"))
         self.assertLess(len(image), 8 * 1024 * 1024)
+
+    def test_required_poster_does_not_render_an_empty_success_card(self):
+        with (
+            patch("bilibili_card._download_image", return_value=None),
+            self.assertRaises(BilibiliCoverUnavailable),
+        ):
+            render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "图文",
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "image_only": True,
+                    "require_cover": True,
+                }
+            )
 
     def test_local_card_expands_portrait_cover_without_cropping(self):
         from PIL import Image
