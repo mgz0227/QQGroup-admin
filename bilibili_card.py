@@ -205,9 +205,6 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
 
     width = 720
     margin = 24
-    card_left, card_right = margin, width - margin
-    inner_left, inner_right = 54, width - 54
-    inner_width = inner_right - inner_left
     author = _plain(card_data.get("author"), 52) or "B站用户"
     kind = _plain(card_data.get("kind"), 18) or "动态"
     timestamp = _plain(card_data.get("timestamp"), 24)
@@ -219,6 +216,34 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     link_label = _plain(card_data.get("link_label"), 40) or default_link_label
     avatar = _download_image(card_data.get("avatar"))
     cover = _download_image(card_data.get("cover"))
+
+    # A draw dynamic can contain all of its copy in one portrait poster.  A
+    # wide side-by-side card makes that poster occupy too little of the QQ
+    # message bubble, so use a narrower focus canvas for this case only.
+    source_width = source_height = 0
+    if cover is not None:
+        source_width, source_height = cover.size
+    portrait_source = bool(
+        source_width > 0
+        and source_height > 0
+        and source_width / source_height < 0.78
+    )
+    image_only = bool(
+        cover is not None
+        and portrait_source
+        and not title
+        and not summary
+        and str(card_data.get("image_only") or "").lower()
+        in {"1", "true", "yes", "on"}
+    )
+    if image_only:
+        width = 560
+        margin = 18
+
+    card_left, card_right = margin, width - margin
+    inner_padding = 34 if image_only else 54
+    inner_left, inner_right = inner_padding, width - inner_padding
+    inner_width = inner_right - inner_left
 
     regular = _font(18)
     small = _font(15)
@@ -235,11 +260,10 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
     cover_display_size = None
     portrait_layout = False
     if cover is not None:
-        source_width, source_height = cover.size
         if source_width > 0 and source_height > 0:
-            portrait_layout = source_width / source_height < 0.78
-            max_width = 278 if portrait_layout else inner_width
-            max_height = 470 if portrait_layout else 520
+            portrait_layout = portrait_source
+            max_width = 340 if image_only else (278 if portrait_layout else inner_width)
+            max_height = 560 if image_only else (470 if portrait_layout else 520)
             scale = min(max_width / source_width, max_height / source_height)
             cover_display_size = (
                 max(1, int(source_width * scale)),
@@ -248,17 +272,24 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
 
     side_title_lines: list[str] = []
     side_summary_lines: list[str] = []
+    if image_only:
+        # The poster already contains the original text; leave the side copy
+        # empty and add a short, unambiguous label above the image instead.
+        title_lines = []
+        summary_lines = []
     if portrait_layout and cover_display_size is not None:
         side_width = max(180, inner_width - cover_display_size[0] - 24)
         side_title_lines = _wrap_text(draw, title, title_font, side_width, 4)
         side_summary_lines = _wrap_text(draw, summary, regular, side_width - 18, 8)
-        if not side_title_lines and not side_summary_lines:
+        if not image_only and not side_title_lines and not side_summary_lines:
             side_title_lines = [f"发布了一条{kind}动态"]
 
     content_height = 0
     if status:
         content_height += 32
-    if portrait_layout and cover_display_size is not None:
+    if image_only and cover_display_size is not None:
+        content_height += 36 + cover_display_size[1] + 16
+    elif portrait_layout and cover_display_size is not None:
         side_height = len(side_title_lines) * 36 + (10 if side_title_lines else 0)
         side_height += len(side_summary_lines) * 28 + (24 if side_summary_lines else 0)
         content_height += max(cover_display_size[1], side_height) + 16
@@ -356,7 +387,25 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         )
         draw.text((inner_left + 12, y + 4), status, font=small, fill="#e85d5d")
         y += 38
-    if portrait_layout and cover_display_size is not None:
+    if image_only and cover_display_size is not None:
+        note = f"{kind}动态 · 正文已包含在海报中"
+        note_width = int(draw.textlength(note, font=small)) + 24
+        draw.rounded_rectangle(
+            (inner_left, y, inner_left + note_width, y + 26),
+            13,
+            fill="#fff1f5",
+        )
+        draw.text((inner_left + 12, y + 4), note, font=small, fill="#e85d87")
+        y += 38
+        display_width, display_height = cover_display_size
+        cover_left = inner_left + (inner_width - display_width) // 2
+        _rounded_image(
+            canvas,
+            cover,
+            (cover_left, y, cover_left + display_width, y + display_height),
+            14,
+        )
+    elif portrait_layout and cover_display_size is not None:
         display_width, display_height = cover_display_size
         _rounded_image(
             canvas,
@@ -467,6 +516,7 @@ def build_bilibili_card(
     link_label: object = "",
     cover_width: object = 0,
     cover_height: object = 0,
+    image_only: object = False,
 ) -> str:
     """Build a compact card for AstrBot's built-in HTML-to-image renderer."""
 
@@ -492,9 +542,17 @@ def build_bilibili_card(
         and source_height > 0
         and source_width / source_height < 0.78
     )
+    image_only_cover = bool(
+        portrait_cover
+        and not title_text
+        and not summary_html
+        and str(image_only or "").lower() in {"1", "true", "yes", "on"}
+    )
     portrait_cover_style = ""
     if portrait_cover:
-        scale = min(278 / source_width, 470 / source_height)
+        max_width = 350 if image_only_cover else 278
+        max_height = 560 if image_only_cover else 470
+        scale = min(max_width / source_width, max_height / source_height)
         display_width = max(1, int(source_width * scale))
         display_height = max(1, int(source_height * scale))
         portrait_cover_style = (
@@ -526,7 +584,10 @@ def build_bilibili_card(
         if link_url
         else ""
     )
-    if portrait_cover:
+    if image_only_cover:
+        note_markup = '<div class="focus-note">图文动态 · 正文已包含在海报中</div>'
+        content_markup = f'<div class="focus-content">{note_markup}{cover_markup}</div>'
+    elif portrait_cover:
         content_markup = (
             '<div class="portrait-content">'
             f'<div class="portrait-cover">{cover_markup}</div>'
@@ -536,6 +597,8 @@ def build_bilibili_card(
     else:
         content_markup = f"{title_markup}{summary_markup}{cover_markup}"
 
+    body_width = 560 if image_only_cover else 720
+    card_width = body_width - 44
     return f"""<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -549,14 +612,14 @@ html, body {{
   background: transparent;
 }}
 body {{
-  width: 720px;
+  width: {body_width}px;
   padding: 22px;
   color: #18191c;
   background: #f3f5f7;
   font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", "Microsoft YaHei", sans-serif;
 }}
 .card {{
-  width: 676px;
+  width: {card_width}px;
   overflow: hidden;
   border: 1px solid #e8ebef;
   border-radius: 18px;
@@ -579,9 +642,12 @@ body {{
  .portrait-content {{ display: flex; align-items: flex-start; gap: 22px; }}
  .portrait-cover {{ flex: 0 0 auto; }}
  .portrait-copy {{ min-width: 0; flex: 1 1 auto; }}
+.focus-content {{ text-align: center; }}
+.focus-note {{ display: inline-block; margin: 0 auto 14px; padding: 5px 12px; border-radius: 999px; background: #fff1f5; color: #e85d87; font-size: 13px; font-weight: 700; }}
+.focus-content .cover-wrap {{ width: 100%; margin-top: 0; }}
 .cover-wrap {{ display: flex; justify-content: center; overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
 .portrait-cover .cover-wrap {{ margin-top: 0; }}
-.cover {{ display: block; width: auto; max-width: 100%; max-height: 520px; object-fit: contain; background: #f1f2f3; }}
+.cover {{ display: block; width: auto; max-width: 100%; max-height: {560 if image_only_cover else 520}px; height: auto; object-fit: contain; background: #f1f2f3; }}
 .footer {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px 20px; border-top: 1px solid #f0f1f2; background: #fcfcfd; }}
 .source {{ color: #c0c4cc; font-size: 12px; letter-spacing: .5px; }}
 .open-link {{ padding: 8px 14px; border-radius: 9px; background: #eaf8ff; color: #008ac5; font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }}

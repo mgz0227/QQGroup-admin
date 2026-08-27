@@ -3585,7 +3585,9 @@ class QQGroupAdmin(Star):
         except (TypeError, ValueError):
             source_width = source_height = 0
         if source_width > 0 and source_height > 0:
-            scale = min(600 / source_width, 420 / source_height)
+            # Keep portrait poster fallbacks readable when the rich card is
+            # unavailable, while preserving the source aspect ratio.
+            scale = min(600 / source_width, 560 / source_height)
             display_width = max(1, int(source_width * scale))
             display_height = max(1, int(source_height * scale))
             return f"![封面 #{display_width}px #{display_height}px]({url})"
@@ -4310,6 +4312,14 @@ class QQGroupAdmin(Star):
                 sections = ["# B站视频" if is_video else "# B站动态", meta]
                 if cover:
                     sections.append(cover)
+                image_only = bool(
+                    item.get("cover")
+                    and kind in {"图文", "转发"}
+                    and not title
+                    and not summary
+                )
+                if image_only:
+                    sections.append("图片动态：正文已包含在海报中。")
                 if title:
                     sections.append(f"**{title}**")
                 if summary:
@@ -4338,6 +4348,9 @@ class QQGroupAdmin(Star):
                     "cover": item.get("cover"),
                     "cover_width": item.get("cover_width", 0),
                     "cover_height": item.get("cover_height", 0),
+                    # Some Bilibili draw posts have no API title/description:
+                    # all copy is baked into the portrait poster itself.
+                    "image_only": image_only,
                     "avatar": item.get("avatar"),
                     "status": "",
                     "link": item.get("url"),

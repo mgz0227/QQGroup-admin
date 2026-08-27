@@ -37,6 +37,21 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertEqual(_image_url("https://internal.example.test/a.jpg"), "")
         self.assertTrue(_image_url("https://i0.hdslb.com/bfs/a.jpg"))
 
+    def test_html_card_gives_small_portrait_covers_a_readable_width(self):
+        html = build_bilibili_card(
+            author="UP",
+            kind="图文",
+            cover="https://i0.hdslb.com/bfs/new_dyn/post.png",
+            link="https://www.bilibili.com/opus/1",
+            cover_width=1320,
+            cover_height=2468,
+            image_only=True,
+        )
+
+        self.assertIn("图文动态 · 正文已包含在海报中", html)
+        self.assertIn("width: 560px", html)
+        self.assertIn("height: auto", html)
+
     def test_empty_content_does_not_leave_empty_blocks(self):
         html = build_bilibili_card(
             author="UP",
@@ -74,6 +89,19 @@ class BilibiliCardTest(unittest.TestCase):
         html = build_bilibili_card(
             author="UP",
             kind="图文",
+            cover="https://i0.hdslb.com/bfs/draw.jpg",
+            cover_width=1320,
+            cover_height=2468,
+            image_only=True,
+        )
+        self.assertIn("focus-content", html)
+        self.assertIn('width:299px;height:560px', html)
+        self.assertIn("图文动态 · 正文已包含在海报中", html)
+
+    def test_html_portrait_with_copy_keeps_side_by_side_layout(self):
+        html = build_bilibili_card(
+            author="UP",
+            kind="图文",
             title="海报说明",
             cover="https://i0.hdslb.com/bfs/draw.jpg",
             cover_width=1320,
@@ -107,13 +135,15 @@ class BilibiliCardTest(unittest.TestCase):
                     "author": "UP",
                     "kind": "图文",
                     "cover": "https://i0.hdslb.com/bfs/new_dyn/post.png",
+                    "image_only": True,
                     "link": "https://www.bilibili.com/opus/1",
                 }
             )
 
         rendered = Image.open(BytesIO(image))
+        self.assertEqual(rendered.width, 560)
         self.assertGreater(rendered.height, 700)
-        self.assertLess(rendered.height, 850)
+        self.assertLess(rendered.height, 950)
 
     def test_local_card_uses_custom_link_label_and_clips_author(self):
         from PIL import ImageDraw

@@ -2946,8 +2946,50 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             image,
-            "![封面 #224px #420px](https://i0.hdslb.com/bfs/draw.jpg)",
+            "![封面 #299px #560px](https://i0.hdslb.com/bfs/draw.jpg)",
         )
+
+    async def test_bilibili_image_only_dynamic_uses_focus_card(self):
+        plugin, _ = self.plugin()
+        plugin.config["bilibili_cookie"] = "cookie"
+        plugin._bilibili_state["dynamic"]["188144093"] = {
+            "seen": [],
+            "max_pub_ts": 0,
+        }
+        subscriptions = {
+            "188144093": [
+                {
+                    "group_openid": "group-1",
+                    "platform_id": "platform-1",
+                    "dynamic": True,
+                    "live": False,
+                }
+            ]
+        }
+        item = {
+            "id": "draw-1",
+            "uid": "188144093",
+            "author": "UP",
+            "pub_ts": 100,
+            "type": "DYNAMIC_TYPE_DRAW",
+            "title": "",
+            "text": "",
+            "url": "https://www.bilibili.com/opus/draw-1",
+            "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+            "cover_width": 1320,
+            "cover_height": 2468,
+        }
+        push = AsyncMock(return_value=True)
+        with (
+            patch.object(module, "fetch_wbi_keys", return_value=("a", "b")),
+            patch.object(module, "fetch_space_dynamics", return_value={}),
+            patch.object(module, "parse_dynamic_items", return_value=[item]),
+            patch.object(plugin, "_push_bilibili_message", push),
+        ):
+            self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
+
+        self.assertTrue(push.await_args.kwargs["card_data"]["image_only"])
+        self.assertIn("图片动态：正文已包含在海报中。", push.await_args.args[1])
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
