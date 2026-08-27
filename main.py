@@ -3615,7 +3615,7 @@ class QQGroupAdmin(Star):
         if source_width > 0 and source_height > 0:
             # Keep portrait poster fallbacks readable when the rich card is
             # unavailable, while preserving the source aspect ratio.
-            scale = min(600 / source_width, 560 / source_height)
+            scale = min(600 / source_width, 760 / source_height)
             display_width = max(1, int(source_width * scale))
             display_height = max(1, int(source_height * scale))
             return f"![封面 #{display_width}px #{display_height}px]({url})"
@@ -4055,6 +4055,24 @@ class QQGroupAdmin(Star):
             if (image_only or native_cover) and card_data.get("cover"):
                 native_urls = bilibili_media_url_candidates(card_data.get("cover"))
                 native_url = native_urls[0] if native_urls else ""
+            if native_cover:
+                poster_caption = self._bilibili_poster_caption(card_data)
+            try:
+                # Prefer one consistent, readable card for every Bilibili
+                # cover.  A raw poster is retained below as a delivery
+                # fallback for hosts where local image fetching is blocked.
+                if card_data:
+                    render_data = {
+                        **card_data,
+                        "focus_cover": bool(native_cover)
+                        or card_data.get("focus_cover", False),
+                        "link": "",
+                        "link_label": "",
+                    }
+                    card_image = await self._render_bilibili_card(render_data)
+            except Exception as exc:  # noqa: BLE001 - renderer is optional
+                self.logger.debug("B 站统一卡片不可用，尝试原始海报：%s", exc)
+            if native_cover and card_image is None and card_data.get("cover"):
                 try:
                     native_image = await asyncio.wait_for(
                         asyncio.to_thread(
@@ -4063,7 +4081,7 @@ class QQGroupAdmin(Star):
                         ),
                         timeout=8,
                     )
-                except Exception as exc:  # noqa: BLE001 - use rich-card fallback
+                except Exception as exc:  # noqa: BLE001 - use URL/Markdown fallback
                     self.logger.debug("B 站原图下载失败，改用通知卡片：%s", exc)
                 if native_image is not None:
                     try:
@@ -4079,19 +4097,68 @@ class QQGroupAdmin(Star):
                             "B 站竖版海报分段发送：parts=%s",
                             len(native_images),
                         )
-            if native_cover:
-                poster_caption = self._bilibili_poster_caption(card_data)
-            try:
-                # Keep the native-poster path lazy: a public CDN URL can be
-                # sent directly by QQ, so do not render a local card unless
-                # both native media routes fail.
-                if native_image is None and not native_cover:
-                    # The link is sent as a separate Markdown/text message.
-                    # Do not bake a second, non-clickable CTA into the image.
-                    render_data = {**card_data, "link": "", "link_label": ""}
-                    card_image = await self._render_bilibili_card(render_data)
-            except Exception as exc:  # noqa: BLE001 - renderer is optional
-                self.logger.debug("B 站图片卡片不可用，降级 Markdown：%s", exc)
+
+        async def send_native_poster(client: Any, group_openid: str) -> bool:
+            """Send the original poster when the composed card is unavailable."""
+
+            if not native_cover:
+                return False
+            poster_sent = False
+            if native_images:
+                sent_parts = 0
+                try:
+                    for poster in native_images:
+                        await self._send_group_card(
+                            client,
+                            group_openid,
+                            poster,
+                            link=str((card_data or {}).get("link") or ""),
+                            link_label=str(
+                                (card_data or {}).get("link_label") or "查看原动态"
+                            ),
+                        )
+                        sent_parts += 1
+                    poster_sent = sent_parts == len(native_images)
+                except Exception as card_exc:  # noqa: BLE001 - try URL path
+                    if sent_parts:
+                        # Do not append a full fallback after a partial poster;
+                        # that would duplicate the first images.
+                        poster_sent = True
+                        self.logger.warning(
+                            "B 站海报分段发送不完整：sent=%s total=%s error=%s",
+                            sent_parts,
+                            len(native_images),
+                            card_exc,
+                        )
+                    else:
+                        self.logger.debug(
+                            "B 站原图媒体发送失败，尝试公开 URL：%s", card_exc
+                        )
+            if not poster_sent and native_url:
+                try:
+                    await self._send_group_card_url(client, group_openid, native_url)
+                    poster_sent = True
+                except Exception as url_exc:  # noqa: BLE001 - local fallback
+                    self.logger.debug(
+                        "B 站公开 URL 图片发送失败，改用聚焦卡片：%s", url_exc
+                    )
+            if not poster_sent:
+                return False
+            if poster_caption:
+                try:
+                    await self._send_group_markdown(
+                        client,
+                        group_openid,
+                        poster_caption,
+                    )
+                except Exception:
+                    await self._send_group_text(
+                        client,
+                        group_openid,
+                        self._markdown_fallback_text(poster_caption),
+                    )
+            return True
+
         for target in eligible_targets:
             client = clients.get(str(target.get("platform_id") or ""))
             if client is None:
@@ -4099,64 +4166,8 @@ class QQGroupAdmin(Star):
                 continue
             group_openid = str(target["group_openid"])
             try:
-                if native_cover:
-                    poster_sent = False
-                    if native_images:
-                        sent_parts = 0
-                        try:
-                            for poster in native_images:
-                                await self._send_group_card(
-                                    client,
-                                    group_openid,
-                                    poster,
-                                    link=str((card_data or {}).get("link") or ""),
-                                    link_label=str(
-                                        (card_data or {}).get("link_label") or "查看原动态"
-                                    ),
-                                )
-                                sent_parts += 1
-                            poster_sent = sent_parts == len(native_images)
-                        except Exception as card_exc:  # noqa: BLE001 - try URL path
-                            if sent_parts:
-                                # Do not append a full fallback after a partial
-                                # poster; that would duplicate the first images.
-                                poster_sent = True
-                                self.logger.warning(
-                                    "B 站海报分段发送不完整：sent=%s total=%s error=%s",
-                                    sent_parts,
-                                    len(native_images),
-                                    card_exc,
-                                )
-                            else:
-                                self.logger.debug(
-                                    "B 站原图媒体发送失败，尝试公开 URL：%s", card_exc
-                                )
-                    if not poster_sent and native_url:
-                        try:
-                            await self._send_group_card_url(
-                                client,
-                                group_openid,
-                                native_url,
-                            )
-                            poster_sent = True
-                        except Exception as url_exc:  # noqa: BLE001 - local fallback
-                            self.logger.debug(
-                                "B 站公开 URL 图片发送失败，改用聚焦卡片：%s", url_exc
-                            )
-                    if poster_sent:
-                        if poster_caption:
-                            try:
-                                await self._send_group_markdown(
-                                    client,
-                                    group_openid,
-                                    poster_caption,
-                                )
-                            except Exception:
-                                await self._send_group_text(
-                                    client,
-                                    group_openid,
-                                    self._markdown_fallback_text(poster_caption),
-                                )
+                if native_cover and card_image is None:
+                    if await send_native_poster(client, group_openid):
                         continue
                     try:
                         if focus_fallback_image is None:
@@ -4219,7 +4230,13 @@ class QQGroupAdmin(Star):
                                 )
                         continue
                     except Exception as card_exc:  # noqa: BLE001 - optional card
-                        self.logger.debug("B 站图片卡片发送失败，降级 Markdown：%s", card_exc)
+                        if native_cover and await send_native_poster(
+                            client, group_openid
+                        ):
+                            continue
+                        self.logger.debug(
+                            "B 站图片卡片发送失败，降级 Markdown：%s", card_exc
+                        )
                 await self._send_group_markdown(client, group_openid, text)
                 continue
             except Exception as exc:  # noqa: BLE001 - proactive QQ boundary
@@ -5401,7 +5418,7 @@ class QQGroupAdmin(Star):
                         self._ai_warning_at = time.monotonic() + 300
                     return True
                 confirm_errors: list[tuple[str, str]] = []
-                for confirm_provider in confirm_candidates:
+                for confirm_index, confirm_provider in enumerate(confirm_candidates):
                     if confirm_provider in candidates:
                         confirm_errors.append(
                             (confirm_provider, "确认模型与初判候选模型重复")
@@ -5422,6 +5439,15 @@ class QQGroupAdmin(Star):
                             (confirm_provider, "达到 AI 审核总超时")
                         )
                         break
+                    remaining_confirm_candidates = len(confirm_candidates) - confirm_index
+                    confirm_timeout = max(
+                        1.0,
+                        min(
+                            30.0,
+                            confirm_remaining
+                            / max(1, remaining_confirm_candidates),
+                        ),
+                    )
                     try:
                         confirm_response = await generate_review(
                             confirm_provider,
@@ -5429,7 +5455,7 @@ class QQGroupAdmin(Star):
                                 "你是独立的群消息复核器，宁可放行不确定内容。"
                                 "只按消息本身判断，不得扩大违规范围。"
                             ),
-                            min(30.0, confirm_remaining),
+                            min(confirm_timeout, confirm_remaining),
                         )
                         raw_confirm = str(
                             self._ai_response_field(

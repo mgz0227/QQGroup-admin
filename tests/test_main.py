@@ -3008,7 +3008,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(
             image,
-            "![封面 #299px #560px](https://i0.hdslb.com/bfs/draw.jpg)",
+            "![封面 #406px #760px](https://i0.hdslb.com/bfs/draw.jpg)",
         )
 
     async def test_bilibili_image_only_dynamic_uses_focus_card(self):
@@ -3192,7 +3192,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "download_bilibili_image",
                 return_value=b"\xff\xd8\xffposter",
             ) as download,
-            patch.object(plugin, "_render_bilibili_card", AsyncMock()) as render,
+            patch.object(
+                plugin,
+                "_render_bilibili_card",
+                AsyncMock(return_value=b"\x89PNG\r\ncard"),
+            ) as render,
             patch.object(plugin, "_send_group_card", send_card),
         ):
             delivered = await plugin._push_bilibili_message(
@@ -3219,12 +3223,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(delivered)
-        download.assert_called_once()
-        render.assert_not_awaited()
-        self.assertEqual(send_card.await_args.args[2], b"\xff\xd8\xffposter")
+        download.assert_not_called()
+        render.assert_awaited_once()
+        self.assertTrue(render.await_args.args[0]["focus_cover"])
+        self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\ncard")
         self.assertEqual(
             client.api.messages[-1]["markdown"]["content"],
-            "**UP** · 图文 · 08\\-27 01:17\n\n动态正文摘要\n\n"
             "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
         )
 
@@ -3235,6 +3239,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         with (
             patch.object(module, "download_bilibili_image", return_value=b"poster"),
             patch.object(module, "split_bilibili_poster", return_value=[b"part-1", b"part-2"]),
+            patch.object(
+                plugin,
+                "_render_bilibili_card",
+                AsyncMock(side_effect=RuntimeError("renderer unavailable")),
+            ),
             patch.object(plugin, "_send_group_card", send_card),
         ):
             delivered = await plugin._push_bilibili_message(
@@ -3272,7 +3281,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             patch.object(module, "split_bilibili_poster", return_value=[b"part-1", b"part-2"]),
             patch.object(plugin, "_send_group_card", send_card),
             patch.object(plugin, "_send_group_card_url", AsyncMock()) as send_url,
-            patch.object(plugin, "_render_bilibili_card", AsyncMock()) as render,
+            patch.object(
+                plugin,
+                "_render_bilibili_card",
+                AsyncMock(side_effect=RuntimeError("renderer unavailable")),
+            ) as render,
         ):
             delivered = await plugin._push_bilibili_message(
                 [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
@@ -3290,7 +3303,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(delivered)
         self.assertEqual(send_card.await_count, 2)
         send_url.assert_not_awaited()
-        render.assert_not_awaited()
+        render.assert_awaited_once()
 
     async def test_bilibili_draw_download_failure_uses_focus_fallback(self):
         plugin, _client = self.plugin()
@@ -3332,7 +3345,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
         send_url = AsyncMock(return_value={"id": "url-1"})
-        render = AsyncMock()
+        render = AsyncMock(side_effect=RuntimeError("renderer unavailable"))
         with (
             patch.object(module, "download_bilibili_image", return_value=None),
             patch.object(plugin, "_send_group_card_url", send_url),
@@ -3365,13 +3378,18 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "group-1",
             "https://i0.hdslb.com/bfs/draw@672w_1c.webp",
         )
-        render.assert_not_awaited()
+        render.assert_awaited_once()
         self.assertIn("动态正文摘要", client.api.messages[-1]["markdown"]["content"])
 
     async def test_bilibili_native_upload_failure_retries_focus_card(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
-        render = AsyncMock(return_value=b"\x89PNG\r\nfocus")
+        render = AsyncMock(
+            side_effect=[
+                RuntimeError("initial renderer unavailable"),
+                b"\x89PNG\r\nfocus",
+            ]
+        )
         send_card = AsyncMock(
             side_effect=[
                 RuntimeError("native upload failed"),
@@ -3385,6 +3403,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 module,
                 "download_bilibili_image",
                 return_value=b"\xff\xd8\xffposter",
+            ),
+            patch.object(
+                plugin,
+                "_send_group_card_url",
+                AsyncMock(side_effect=RuntimeError("public URL unavailable")),
             ),
             patch.object(plugin, "_render_bilibili_card", render),
             patch.object(plugin, "_send_group_card", send_card),
@@ -3419,7 +3442,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_card.await_count, 4)
         self.assertEqual(send_card.await_args_list[1].args[2], b"\x89PNG\r\nfocus")
         self.assertEqual(send_card.await_args_list[3].args[2], b"\x89PNG\r\nfocus")
-        self.assertEqual(render.await_count, 1)
+        self.assertEqual(render.await_count, 2)
         self.assertTrue(render.await_args.args[0]["focus_cover"])
 
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
@@ -4498,6 +4521,67 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(result["confirm_provider"], "confirm-fallback")
         self.assertFalse(result["confirmation_failed"])
+
+    async def test_ai_confirmation_timeout_keeps_budget_for_ordered_fallback(self):
+        plugin, client = self.plugin()
+        clock = [0.0]
+        active_timeout = [0.0]
+        timeout_values = []
+        calls = []
+
+        class NoopTimeout:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        def capture_timeout(delay):
+            timeout_values.append(delay)
+            active_timeout[0] = delay
+            return NoopTimeout()
+
+        async def provider_call(**kwargs):
+            provider = kwargs["chat_provider_id"]
+            calls.append(provider)
+            if provider == "confirm":
+                # Simulate the first confirmation provider consuming its
+                # complete time slice without making the test wait in real time.
+                clock[0] += active_timeout[0]
+                raise asyncio.TimeoutError
+            if provider == "primary":
+                return SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=疑似违规",
+                )
+            return SimpleNamespace(
+                role="assistant",
+                completion_text="ALLOW confidence=99 reason=正常聊天",
+            )
+
+        plugin.context.llm_generate = provider_call
+        result = {}
+        with (
+            patch.object(module.time, "monotonic", side_effect=lambda: clock[0]),
+            patch.object(module.asyncio, "timeout", side_effect=capture_timeout),
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "待审核"),
+                "待审核",
+                [],
+                "primary",
+                confirm_provider_id="confirm",
+                confirm_fallback_provider_ids=["confirm-fallback"],
+                timeout_seconds=8,
+                result=result,
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(calls, ["primary", "confirm", "confirm-fallback"])
+        self.assertEqual(result["confirm_provider"], "confirm-fallback")
+        self.assertFalse(result["confirmation_failed"])
+        self.assertAlmostEqual(timeout_values[1], 4.0, places=5)
+        self.assertAlmostEqual(timeout_values[2], 4.0, places=5)
 
     async def test_ai_confirmation_block_confirms_primary_block(self):
         plugin, client = self.plugin()
