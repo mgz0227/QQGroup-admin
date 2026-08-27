@@ -4064,10 +4064,12 @@ class QQGroupAdmin(Star):
             if native_cover:
                 poster_caption = self._bilibili_poster_caption(card_data)
             try:
-                # Prefer one consistent, readable card for every Bilibili
-                # cover.  A raw poster is retained below as a delivery
-                # fallback for hosts where local image fetching is blocked.
-                if card_data:
+                # A poster-only dynamic already contains its complete copy.
+                # Sending a second, tall notification card makes QQ scale the
+                # poster down to the card height.  Send the bounded native
+                # poster first; cards remain the preferred layout when the
+                # dynamic has API text to show beside the cover.
+                if card_data and not image_only:
                     render_data = {
                         **card_data,
                         "focus_cover": bool(native_cover)

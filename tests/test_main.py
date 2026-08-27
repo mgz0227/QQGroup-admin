@@ -3232,6 +3232,45 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
         )
 
+    async def test_bilibili_image_only_push_prefers_native_poster_over_tall_card(self):
+        plugin, client = self.plugin()
+        plugin._platform_clients = lambda: {"platform-1": client}
+        send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
+        render = AsyncMock(return_value=b"\x89PNG\r\ncard")
+        with (
+            patch.object(module, "download_bilibili_image", return_value=b"poster") as download,
+            patch.object(module, "split_bilibili_poster", return_value=[b"poster"]) as split,
+            patch.object(plugin, "_render_bilibili_card", render),
+            patch.object(plugin, "_send_group_card", send_card),
+        ):
+            delivered = await plugin._push_bilibili_message(
+                [
+                    {
+                        "group_openid": "group-1",
+                        "platform_id": "platform-1",
+                        "dynamic": True,
+                        "live": False,
+                    }
+                ],
+                "# B站动态",
+                "dynamic",
+                card_data={
+                    "author": "UP",
+                    "kind": "图文",
+                    "image_only": True,
+                    "native_cover": True,
+                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "link": "https://www.bilibili.com/opus/7",
+                },
+            )
+
+        self.assertTrue(delivered)
+        download.assert_called_once()
+        split.assert_called_once_with(b"poster")
+        render.assert_not_awaited()
+        self.assertEqual(send_card.await_args.args[2], b"poster")
+        self.assertIn("查看原动态", client.api.messages[-1]["markdown"]["content"])
+
     async def test_bilibili_tall_poster_sends_each_readable_part_once(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
