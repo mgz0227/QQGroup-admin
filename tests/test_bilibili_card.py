@@ -197,6 +197,16 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertTrue(all(Image.open(BytesIO(part)).width == 1320 for part in parts))
         self.assertEqual(len(split_bilibili_poster(b"not-an-image")), 1)
 
+    def test_small_portrait_poster_is_split_by_aspect_ratio(self):
+        from PIL import Image
+
+        source = BytesIO()
+        Image.new("RGB", (480, 860), "#734820").save(source, format="JPEG")
+        parts = split_bilibili_poster(source.getvalue())
+
+        self.assertEqual(len(parts), 2)
+        self.assertTrue(all(Image.open(BytesIO(part)).width == 480 for part in parts))
+
     def test_html_card_gives_small_portrait_covers_a_readable_width(self):
         html = build_bilibili_card(
             author="UP",

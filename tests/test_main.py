@@ -2224,6 +2224,32 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["content"], "语音消息已撤回。")
         self.assertIn("这是语音违规内容", plugin._violation_records[-1]["content"])
 
+    async def test_violation_uses_raw_author_and_records_recall_failure(self):
+        plugin, client = self.plugin()
+        plugin.config.update(
+            global_message_reject_keywords="禁止词",
+            global_message_reject_at_member=False,
+        )
+        event = FakeEvent(client, "包含禁止词")
+        event.message_obj.raw_message.raw_data = {
+            "author": {
+                "member_openid": "member-1",
+                "username": "字典成员",
+                "union_openid": "union-dict",
+            }
+        }
+        api = SimpleNamespace(
+            recall_group_message=AsyncMock(side_effect=module.QQAPIError(status=500))
+        )
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        record = plugin._violation_records[-1]
+        self.assertEqual(record["username"], "字典成员")
+        self.assertEqual(record["union_openid"], "union-dict")
+        self.assertEqual(record["action"], "recall_failed")
+
     async def test_scoped_global_keyword_runs_when_group_audit_is_disabled(self):
         plugin, client = self.plugin()
         plugin.config["global_policy_profiles"] = [
@@ -2668,6 +2694,23 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         api.recall_group_message.assert_awaited_once_with("group-1", "message-1")
         self.assertEqual(client.api.messages[-1]["content"], "黑名单消息已撤回。")
+        self.assertEqual(plugin._violation_records[-1]["action"], "recall")
+
+    async def test_member_blacklist_records_recall_failure(self):
+        plugin, client = self.plugin()
+        plugin.config.update(global_member_blacklist="member-1")
+        event = FakeEvent(client, "普通消息")
+        event.message_obj.raw_message.author.member_openid = "member-1"
+        api = SimpleNamespace(
+            recall_group_message=AsyncMock(side_effect=module.QQAPIError(status=500))
+        )
+        plugin._api = lambda _event: api
+
+        await plugin.audit_group_message(event)
+
+        record = plugin._violation_records[-1]
+        self.assertEqual(record["action"], "recall_failed")
+        self.assertIn("撤回失败", record["reason"])
 
     async def test_member_whitelist_skips_group_audit_but_keeps_keyword_reply(self):
         plugin, client = self.plugin()
@@ -3072,6 +3115,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 }
             ]
         }
+        full_summary = "动态简短说明\n第二段\n" + "尾部" * 140
         item = {
             "id": "draw-copy-1",
             "uid": "188144093",
@@ -3079,11 +3123,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "pub_ts": 100,
             "type": "DYNAMIC_TYPE_DRAW",
             "title": "动态标题",
-            "text": "动态简短说明\n第二段",
+            "text": full_summary,
             "url": "https://www.bilibili.com/opus/draw-copy-1",
             "cover": "https://i0.hdslb.com/bfs/draw.jpg",
             "cover_width": 1320,
             "cover_height": 2468,
+            "image_count": 7,
         }
         push = AsyncMock(return_value=True)
         with (
@@ -3099,17 +3144,30 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(card_data["native_cover"])
         self.assertTrue(card_data["native_poster_preferred"])
         self.assertFalse(card_data["focus_cover"])
-        self.assertEqual(card_data["summary"], "动态简短说明\n第二段")
+        self.assertEqual(card_data["summary"], full_summary)
+        self.assertEqual(card_data["image_count"], 7)
 
     async def test_bilibili_text_poster_skips_tall_card_when_native_upload_succeeds(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
-        send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
+        delivery_order = []
+        send_markdown = plugin._send_group_markdown
+
+        async def record_caption(*args, **kwargs):
+            delivery_order.append("caption")
+            return await send_markdown(*args, **kwargs)
+
+        async def record_poster(*_args, **_kwargs):
+            delivery_order.append("poster")
+            return SimpleNamespace(id="poster-1")
+
+        send_card = AsyncMock(side_effect=record_poster)
         render = AsyncMock(side_effect=AssertionError("poster should not render as a tall card"))
         with (
             patch.object(module, "download_bilibili_image", return_value=b"poster"),
             patch.object(module, "split_bilibili_poster", return_value=[b"poster"]),
             patch.object(plugin, "_render_bilibili_card", render),
+            patch.object(plugin, "_send_group_markdown", side_effect=record_caption),
             patch.object(plugin, "_send_group_card", send_card),
         ):
             delivered = await plugin._push_bilibili_message(
@@ -3131,23 +3189,26 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(delivered)
         render.assert_not_awaited()
         self.assertEqual(send_card.await_args.args[2], b"poster")
+        self.assertEqual(delivery_order, ["caption", "poster"])
         self.assertIn("动态标题", client.api.messages[-1]["markdown"]["content"])
 
     async def test_bilibili_poster_caption_keeps_compact_metadata_and_paragraphs(self):
         plugin, _client = self.plugin()
+        summary = "第一段\n" + "正文" * 190 + "\n结尾标记"
 
         caption = plugin._bilibili_poster_caption(
             {
                 "author": "UP主",
                 "kind": "图文",
                 "timestamp": "08-28 08:00",
-                "summary": "第一段\n第二段",
+                "summary": summary,
                 "link": "https://www.bilibili.com/opus/1",
             }
         )
 
         self.assertIn("**UP主**\n图文 · 08\\-28 08:00", caption)
-        self.assertIn("第一段\n第二段", caption)
+        self.assertIn("第一段", caption)
+        self.assertIn("结尾标记", caption)
         self.assertIn("[查看原动态 ↗]", caption)
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
@@ -3371,7 +3432,9 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "download_bilibili_image",
                 side_effect=[b"one", b"two", b"three"],
             ) as download,
-            patch.object(module, "split_bilibili_poster", side_effect=lambda value: [value]),
+            patch.object(
+                module, "split_bilibili_poster", side_effect=lambda value: [value]
+            ) as split,
             patch.object(plugin, "_send_group_card", send_card),
         ):
             delivered = await plugin._push_bilibili_message(
@@ -3397,6 +3460,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(delivered)
         self.assertEqual(download.call_count, 3)
+        split.assert_not_called()
         self.assertEqual(
             [call.args[2] for call in send_card.await_args_list],
             [b"one", b"two", b"three"],
@@ -3583,6 +3647,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(send_card.await_args_list[3].args[2], b"\x89PNG\r\nfocus")
         self.assertEqual(render.await_count, 2)
         self.assertTrue(render.await_args.args[0]["focus_cover"])
+        self.assertEqual(len(client.api.messages), 2)
 
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
         plugin, _client = self.plugin()
@@ -4661,6 +4726,47 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["confirm_provider"], "confirm-fallback")
         self.assertFalse(result["confirmation_failed"])
 
+    async def test_ai_confirmation_keeps_image_for_ordered_fallback(self):
+        plugin, client = self.plugin()
+        plugin.context.get_provider_by_id = lambda _provider_id: None
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=疑似违规",
+                ),
+                RuntimeError("provider does not support vision"),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="ALLOW confidence=99 reason=正常聊天",
+                ),
+            ]
+        )
+
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "primary",
+                image_review_enabled=True,
+                confirm_provider_id="confirm",
+                confirm_fallback_provider_ids=["confirm-fallback"],
+            )
+
+        self.assertFalse(blocked)
+        calls = plugin.context.llm_generate.await_args_list
+        self.assertEqual(
+            [call.kwargs["chat_provider_id"] for call in calls],
+            ["primary", "confirm", "confirm-fallback"],
+        )
+        self.assertEqual(
+            [call.kwargs["image_urls"] for call in calls],
+            [["vision-ref"], ["vision-ref"], ["vision-ref"]],
+        )
+
     async def test_ai_confirmation_timeout_keeps_budget_for_ordered_fallback(self):
         plugin, client = self.plugin()
         clock = [0.0]
@@ -5089,6 +5195,48 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["primary", "confirm"],
         )
 
+    async def test_ai_single_candidates_can_use_full_configured_timeout(self):
+        plugin, client = self.plugin()
+        timeouts = []
+
+        class NoopTimeout:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, _exc_type, _exc, _tb):
+                return False
+
+        def capture_timeout(delay):
+            timeouts.append(delay)
+            return NoopTimeout()
+
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=98 reason=明确违规",
+                ),
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="ALLOW confidence=99 reason=正常聊天",
+                ),
+            ]
+        )
+
+        with patch.object(module.asyncio, "timeout", side_effect=capture_timeout):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "待审核"),
+                "待审核",
+                [],
+                "primary",
+                timeout_seconds=120,
+                confirm_provider_id="confirm",
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(len(timeouts), 2)
+        self.assertTrue(all(timeout > 100 for timeout in timeouts))
+
     async def test_ai_review_fails_fast_when_concurrency_gate_is_busy(self):
         plugin, client = self.plugin()
         plugin.context.llm_generate = AsyncMock()
@@ -5297,6 +5445,24 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 95,
             )
         )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","confidence":0.96,"reason":"明确违规"}',
+                95,
+            )
+        )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision(
+                "BLOCK confidence=0.96 reason=明确违规",
+                95,
+            )
+        )
+        self.assertTrue(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","confidence":1,"reason":"明确违规"}',
+                95,
+            )
+        )
         self.assertFalse(
             module.QQGroupAdmin._ai_decision(
                 '{"verdict":"ALLOW","score":99,"reason":"正常"}',
@@ -5314,6 +5480,65 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 '{"decision":"BLOCK","reason":"缺少置信度"}',
                 95,
             )
+        )
+        self.assertIsNone(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","reason":"理由中的 confidence=99 不是字段"}',
+                95,
+            )
+        )
+        self.assertIsNone(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","confidence":101,"reason":"越界"}',
+                95,
+            )
+        )
+        self.assertIsNone(
+            module.QQGroupAdmin._ai_decision(
+                "BLOCK confidence=101 reason=越界",
+                95,
+            )
+        )
+        self.assertIsNone(
+            module.QQGroupAdmin._ai_decision(
+                '{"decision":"BLOCK","confidence":-0.01,"reason":"越界"}',
+                95,
+            )
+        )
+
+    async def test_ai_invalid_json_confidence_uses_fallback(self):
+        plugin, client = self.plugin()
+        plugin.context.llm_generate = AsyncMock(
+            side_effect=[
+                {
+                    "role": "assistant",
+                    "completion_text": (
+                        '{"decision":"BLOCK","confidence":101,'
+                        '"reason":"越界"}'
+                    ),
+                },
+                SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=96 reason=明确违规",
+                ),
+            ]
+        )
+
+        blocked = await plugin._ai_blocks_message(
+            FakeEvent(client, "待审核"),
+            "待审核",
+            [],
+            "primary",
+            ["fallback"],
+        )
+
+        self.assertTrue(blocked)
+        self.assertEqual(
+            [
+                call.kwargs["chat_provider_id"]
+                for call in plugin.context.llm_generate.await_args_list
+            ],
+            ["primary", "fallback"],
         )
 
     async def test_ai_json_response_does_not_trigger_unneeded_fallback(self):
@@ -5739,6 +5964,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("if (requestId !== loadGeneration) return;", script)
         self.assertIn("loadIdentities(true)", script)
         self.assertIn("appendUnboundGroupChoices", script)
+        self.assertIn("各群成员 OpenID", script)
+        self.assertIn('action === "recall_failed"', script)
         self.assertIn("if (!all && !selectedGroups.length) throw", script)
         self.assertIn(".sub-list-header { display: flex;", styles)
         self.assertIn(
@@ -5795,7 +6022,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 {
                     "username": "=2+2",
                     "content": "\t=HYPERLINK(\"https://example.invalid\")",
-                    "action": "record_only",
+                    "action": "recall_failed",
                     "ai_confirm_provider": "confirm",
                     "ai_confirm_decision": "ERROR",
                     "ai_confirm_reason": "timeout",
@@ -5814,6 +6041,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("确认模型", export_data["content"])
         self.assertIn("confirm", export_data["content"])
         self.assertIn("timeout", export_data["content"])
+        self.assertIn("撤回失败", export_data["content"])
         plugin.web_violation_export.assert_awaited_once_with("违规", "false_positive")
 
         html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")

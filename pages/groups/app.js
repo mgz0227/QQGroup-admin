@@ -255,6 +255,25 @@
     return labels.join("、") || groupLabel(binding.last_violation_group);
   }
 
+  function identityMembers(binding) {
+    var members = binding && binding.members;
+    if (!members || typeof members !== "object" || Array.isArray(members)) {
+      return identityText(binding && binding.member_openid);
+    }
+    var names = binding.group_names_by_id && typeof binding.group_names_by_id === "object"
+      ? binding.group_names_by_id : {};
+    var values = Object.keys(members).map(function (groupOpenid) {
+      return (names[groupOpenid] || groupLabel(groupOpenid)) + "：" + identityText(members[groupOpenid]);
+    });
+    return values.join("；") || identityText(binding.member_openid);
+  }
+
+  function violationActionLabel(action) {
+    if (action === "record_only") return "仅记录，未撤回";
+    if (action === "recall_failed") return "撤回失败";
+    return action === "recall" ? "已撤回" : identityText(action);
+  }
+
   function renderPager(id, kind, total, totalPages) {
     var pager = element(id);
     pager.replaceChildren();
@@ -323,7 +342,7 @@
       var body = document.createElement("div");
       body.className = "identity-card-body";
       recordField(body, "B站 UID", binding.uid, true);
-      recordField(body, "成员 OpenID", binding.member_openid, true);
+      recordField(body, "各群成员 OpenID", identityMembers(binding), true);
       recordField(body, "联合 OpenID", binding.union_openid, true);
       recordField(body, "唯一身份键", binding.identity, true);
       recordField(body, "群", identityGroups(binding));
@@ -423,7 +442,7 @@
       recordField(body, "QQ OpenID", record.member_openid || record.qq_openid || record.openid || record.union_openid, true);
       recordField(body, "群", recordGroupLabel(record));
       recordField(body, "命中规则", record.reason || record.rule || record.category);
-      recordField(body, "处理动作", record.action === "record_only" ? "仅记录，未撤回" : "已撤回");
+      recordField(body, "处理动作", violationActionLabel(record.action));
       if (record.ai_provider || record.ai_decision || record.ai_reason) {
         recordField(body, "审核模型", record.ai_provider || "-");
         recordField(

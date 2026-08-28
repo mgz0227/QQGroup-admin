@@ -278,7 +278,7 @@ def split_bilibili_poster(
     try:
         source = ImageOps.exif_transpose(Image.open(BytesIO(image_data))).convert("RGB")
         width, height = source.size
-        if height <= max_part_height or height / max(width, 1) <= 1.45:
+        if height / max(width, 1) <= 1.45:
             return [image_data]
         parts = min(max_parts, max(2, (height + max_part_height - 1) // max_part_height))
         part_height = (height + parts - 1) // parts

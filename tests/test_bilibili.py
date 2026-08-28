@@ -85,7 +85,7 @@ class BilibiliTest(unittest.TestCase):
                     "pub_ts": 100,
                     "title": "新视频",
                     "text": "新动态",
-                    "url": "https://www.bilibili.com/opus/123",
+                    "url": "https://www.bilibili.com/video/BV1xx",
                     "cover": "https://i0.hdslb.com/bfs/archive/cover.jpg",
                 }
             ],
@@ -206,6 +206,7 @@ class BilibiliTest(unittest.TestCase):
                 "https://i0.hdslb.com/bfs/3.jpg",
             ],
         )
+        self.assertEqual(item["image_count"], 4)
 
     def test_video_parser_prefers_video_description_over_generic_dynamic_text(self):
         payload = {
@@ -403,6 +404,49 @@ class BilibiliTest(unittest.TestCase):
             "正文第一段\n\nhttps://www.bilibili.com/video/BV1xx",
         )
         self.assertEqual(item["cover"], "https://i0.hdslb.com/bfs/opus.jpg")
+
+    def test_opus_prefers_full_summary_and_unwraps_web_redirect(self):
+        payload = {
+            "code": 0,
+            "data": {
+                "items": [
+                    {
+                        "id_str": "opus-full",
+                        "type": "DYNAMIC_TYPE_DRAW",
+                        "modules": {
+                            "module_dynamic": {
+                                "desc": {"text": "发布了新动态"},
+                                "major": {
+                                    "opus": {
+                                        "title": "完整正文",
+                                        "summary": {
+                                            "rich_text_nodes": [
+                                                {"text": "完整正文\n"},
+                                                {
+                                                    "type": "RICH_TEXT_NODE_TYPE_WEB",
+                                                    "text": "网页链接",
+                                                    "jump_url": (
+                                                        "https://www.bilibili.com/york/link-middle-page?"
+                                                        "redirect_url=https%3A%2F%2Fgithub.com%2Fmgz0227%2Fproject"
+                                                    ),
+                                                },
+                                            ]
+                                        }
+                                    }
+                                },
+                            }
+                        },
+                    }
+                ]
+            },
+        }
+
+        item = parse_dynamic_items(payload)[0]
+        self.assertEqual(item["title"], "")
+        self.assertEqual(
+            item["text"],
+            "完整正文\nhttps://github.com/mgz0227/project",
+        )
 
     def test_live_transition_seeds_and_detects_changes(self):
         offline = {"live_status": 0, "live_time": 0}

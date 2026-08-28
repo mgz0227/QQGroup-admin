@@ -4,6 +4,7 @@ import asyncio
 import base64
 import copy
 import json
+import math
 import re
 import secrets
 import time
@@ -4042,7 +4043,10 @@ class QQGroupAdmin(Star):
         native_url = ""
         native_cover = False
         native_preferred = False
+        gallery_mode = False
+        image_only = False
         poster_caption = ""
+        caption_sent: set[tuple[int, str]] = set()
         cover_values: list[str] = []
         if card_data:
             raw_covers = card_data.get("covers") or card_data.get("images") or []
@@ -4063,6 +4067,12 @@ class QQGroupAdmin(Star):
                     first_cover,
                     *(value for value in cover_values if value != first_cover),
                 ]
+            gallery_mode = self._bounded_int(
+                card_data.get("image_count") or len(cover_values),
+                len(cover_values),
+                0,
+                99,
+            ) > 1
             image_only = str(card_data.get("image_only") or "").lower() in {
                 "1",
                 "true",
@@ -4135,14 +4145,17 @@ class QQGroupAdmin(Star):
                     if remaining <= 0.5:
                         native_images.append(native_image)
                         break
-                    try:
-                        parts = await asyncio.wait_for(
-                            asyncio.to_thread(split_bilibili_poster, native_image),
-                            timeout=min(8, remaining),
-                        )
-                    except Exception as exc:  # noqa: BLE001 - keep original poster
+                    if gallery_mode:
                         parts = [native_image]
-                        self.logger.debug("B 站海报分段失败，保留整图：%s", exc)
+                    else:
+                        try:
+                            parts = await asyncio.wait_for(
+                                asyncio.to_thread(split_bilibili_poster, native_image),
+                                timeout=min(8, remaining),
+                            )
+                        except Exception as exc:  # noqa: BLE001 - keep original poster
+                            parts = [native_image]
+                            self.logger.debug("B 站海报分段失败，保留整图：%s", exc)
                     native_images.extend(parts)
                     if len(native_images) >= 3:
                         native_images = native_images[:3]
@@ -4154,25 +4167,30 @@ class QQGroupAdmin(Star):
                     )
 
         async def send_poster_caption(client: Any, group_openid: str) -> None:
-            if poster_caption:
-                try:
-                    await self._send_group_markdown(
-                        client,
-                        group_openid,
-                        poster_caption,
-                    )
-                except Exception:
-                    await self._send_group_text(
-                        client,
-                        group_openid,
-                        self._markdown_fallback_text(poster_caption),
-                    )
+            caption_key = (id(client), group_openid)
+            if not poster_caption or caption_key in caption_sent:
+                return
+            try:
+                await self._send_group_markdown(
+                    client,
+                    group_openid,
+                    poster_caption,
+                )
+            except Exception:
+                await self._send_group_text(
+                    client,
+                    group_openid,
+                    self._markdown_fallback_text(poster_caption),
+                )
+            caption_sent.add(caption_key)
 
         async def send_native_poster(client: Any, group_openid: str) -> bool:
             """Send the original poster when the composed card is unavailable."""
 
             if not native_cover:
                 return False
+            if not image_only:
+                await send_poster_caption(client, group_openid)
             poster_sent = False
             if native_images:
                 sent_parts = 0
@@ -4214,7 +4232,8 @@ class QQGroupAdmin(Star):
                     )
             if not poster_sent:
                 return False
-            await send_poster_caption(client, group_openid)
+            if image_only:
+                await send_poster_caption(client, group_openid)
             return True
 
         for target in eligible_targets:
@@ -4240,6 +4259,8 @@ class QQGroupAdmin(Star):
                                     "link_label": "",
                                 }
                             )
+                        if not image_only:
+                            await send_poster_caption(client, group_openid)
                         await self._send_group_card(
                             client,
                             group_openid,
@@ -4259,6 +4280,8 @@ class QQGroupAdmin(Star):
                 media_image = card_image
                 if media_image:
                     try:
+                        if native_cover and not image_only:
+                            await send_poster_caption(client, group_openid)
                         await self._send_group_card(
                             client,
                             group_openid,
@@ -4328,8 +4351,8 @@ class QQGroupAdmin(Star):
             caption += "\n\n**" + self._markdown_text(title, 180) + "**"
         if summary:
             lines = [
-                self._markdown_text(line, 240)
-                for line in summary[:360].splitlines()
+                self._markdown_text(line, 320)
+                for line in summary[:600].splitlines()
                 if line.strip()
             ]
             caption += "\n\n" + "\n".join(lines)
@@ -4627,7 +4650,7 @@ class QQGroupAdmin(Star):
                     else ""
                 )
                 summary = (
-                    self._markdown_text(raw_summary, 360 if is_video else 240)
+                    self._markdown_text(raw_summary, 600)
                     if raw_summary not in {"", "-", raw_title}
                     else ""
                 )
@@ -4686,13 +4709,18 @@ class QQGroupAdmin(Star):
                     if raw_title and raw_title not in {"新动态", "发布了新动态"}
                     else "",
                     "summary": (
-                        raw_summary[:360 if is_video else 240]
+                        raw_summary[:600]
                         if raw_summary != raw_title
                         else ""
                     ),
                     "cover": item.get("cover"),
                     "covers": covers[:3],
-                    "image_count": len(covers),
+                    "image_count": self._bounded_int(
+                        item.get("image_count") or len(covers),
+                        len(covers),
+                        0,
+                        99,
+                    ),
                     "cover_width": item.get("cover_width", 0),
                     "cover_height": item.get("cover_height", 0),
                     # Some Bilibili draw posts have no API title/description:
@@ -5082,6 +5110,8 @@ class QQGroupAdmin(Star):
             flags=re.IGNORECASE,
         ).strip()
         decision = ""
+        json_decision_parsed = False
+        json_confidence: int | None = None
         leading = re.match(r"^(ALLOW|BLOCK)\b", text, re.IGNORECASE)
         if leading:
             decision = leading.group(1).upper()
@@ -5120,14 +5150,34 @@ class QQGroupAdmin(Star):
                 }.get(normalized, normalized)
                 if normalized in {"ALLOW", "BLOCK"}:
                     decision = normalized
-                    confidence_value = next(
+                    json_decision_parsed = True
+                    confidence_key = next(
                         (
-                            payload.get(key)
+                            key
                             for key in ("confidence", "score", "置信度", "分数")
-                            if payload.get(key) is not None
+                            if key in payload
                         ),
-                        None,
+                        "",
                     )
+                    if confidence_key:
+                        confidence_value = payload.get(confidence_key)
+                        try:
+                            numeric_confidence = (
+                                float(confidence_value)
+                                if not isinstance(confidence_value, bool)
+                                else math.nan
+                            )
+                        except (TypeError, ValueError):
+                            numeric_confidence = math.nan
+                        if math.isfinite(numeric_confidence):
+                            if 0 <= numeric_confidence <= 1:
+                                numeric_confidence *= 100
+                            if 0 <= numeric_confidence <= 100:
+                                json_confidence = round(numeric_confidence)
+                        if json_confidence is None:
+                            # A supplied but invalid confidence makes the whole
+                            # JSON verdict ambiguous so the next model can run.
+                            decision = ""
                     reason_value = next(
                         (
                             payload.get(key)
@@ -5136,26 +5186,27 @@ class QQGroupAdmin(Star):
                         ),
                         "",
                     )
-                    # Reuse the existing bounded regex parsing below.
-                    text = (
-                        f"{normalized} CONFIDENCE={confidence_value} "
-                        f"REASON={reason_value}"
-                    )
+                    text = f"{normalized} REASON={reason_value}"
         confidence_match = (
             re.search(
-                r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d{1,3})",
+                r"(?:CONFIDENCE|SCORE|置信度|分数)\s*[:=：]?\s*(\d+(?:\.\d+)?)",
                 text,
                 re.IGNORECASE,
             )
-            if decision
+            if decision and not json_decision_parsed
             else None
         )
-        confidence = None
+        confidence = json_confidence if json_decision_parsed else None
         if confidence_match:
             try:
-                confidence = min(100, int(confidence_match.group(1)))
+                numeric_confidence = float(confidence_match.group(1))
             except ValueError:
-                confidence = None
+                numeric_confidence = math.nan
+            if math.isfinite(numeric_confidence):
+                if 0 <= numeric_confidence <= 1:
+                    numeric_confidence *= 100
+                if 0 <= numeric_confidence <= 100:
+                    confidence = round(numeric_confidence)
         reason_match = (
             re.search(
                 r"(?:REASON|理由|原因)\s*[:=：]\s*(.+)",
@@ -5429,7 +5480,7 @@ class QQGroupAdmin(Star):
             remaining_candidates = len(candidates) - index
             provider_timeout = max(
                 1.0,
-                min(30.0, remaining / max(1, remaining_candidates)),
+                remaining / max(1, remaining_candidates),
             )
             try:
                 response = await generate_review(
@@ -5527,11 +5578,7 @@ class QQGroupAdmin(Star):
                     remaining_confirm_candidates = len(confirm_candidates) - confirm_index
                     confirm_timeout = max(
                         1.0,
-                        min(
-                            30.0,
-                            confirm_remaining
-                            / max(1, remaining_confirm_candidates),
-                        ),
+                        confirm_remaining / max(1, remaining_confirm_candidates),
                     )
                     try:
                         confirm_response = await generate_review(
@@ -5541,6 +5588,7 @@ class QQGroupAdmin(Star):
                                 "只按消息本身判断，不得扩大违规范围。"
                             ),
                             min(confirm_timeout, confirm_remaining),
+                            confirm_index == len(confirm_candidates) - 1,
                         )
                         raw_confirm = str(
                             self._ai_response_field(
@@ -5723,16 +5771,18 @@ class QQGroupAdmin(Star):
         )
         raw = getattr(event.message_obj, "raw_message", None)
         author = getattr(raw, "author", None)
+        raw_author = self._raw_data(event).get("author")
+        raw_author = raw_author if isinstance(raw_author, dict) else {}
         union_openid = (
             str(author.get("union_openid") or "")
             if isinstance(author, dict)
             else str(getattr(author, "union_openid", "") or "")
-        )
+        ) or str(raw_author.get("union_openid") or "")
         username = (
             str(author.get("username") or "")
             if isinstance(author, dict)
             else str(getattr(author, "username", "") or "")
-        )
+        ) or str(raw_author.get("username") or "")
         text = str(event.get_message_str() or "").strip()
         voice_text = self._voice_asr_text(event)
         if voice_text and voice_text.casefold() not in text.casefold():
@@ -5741,19 +5791,6 @@ class QQGroupAdmin(Star):
         uid = self._uid_for_member(group_openid, member_openid)
         if hasattr(event, "stop_event"):
             event.stop_event()
-        await self._record_uid_violation(
-            uid,
-            group_openid,
-            member_openid,
-            reason,
-            content=text or ("[图片]" * max(1, len(images))),
-            message_id=message_id,
-            action_member_openid=member_openid,
-            request={
-                "username": username,
-                "union_openid": union_openid,
-            },
-        )
         try:
             reply = settings[
                 "global_blacklist_reply" if global_match else "blacklist_reply"
@@ -5773,6 +5810,27 @@ class QQGroupAdmin(Star):
             self.logger.warning("发送黑名单提示失败：%s", exc)
         failed = await self._recall_messages(
             self._api(event), group_openid, [message_id]
+        )
+        record_reason = (
+            reason.replace("已撤回", "撤回失败")
+            if failed and "已撤回" in reason
+            else f"{reason}（消息撤回失败）"
+            if failed
+            else reason
+        )
+        await self._record_uid_violation(
+            uid,
+            group_openid,
+            member_openid,
+            record_reason,
+            content=text or ("[图片]" * max(1, len(images))),
+            message_id=message_id,
+            action_member_openid=member_openid,
+            request={
+                "username": username,
+                "union_openid": union_openid,
+            },
+            action="recall_failed" if failed else "recall",
         )
         if not failed:
             self._moderation.remember(delivery_key, True)
@@ -6279,23 +6337,30 @@ class QQGroupAdmin(Star):
             reason,
         )
         author = getattr(event.message_obj.raw_message, "author", None)
-        await self._record_uid_violation(
-            uid,
-            group_openid,
-            member_openid,
-            reason,
-            content=(text or ("[图片]" * max(1, len(images))))
-            + (f"\n[图片文字]\n{ocr_text[:2000]}" if ocr_text else ""),
-            message_id=message_id,
-            action_member_openid=target_member,
-            action="record_only" if ai_record_only else "recall",
-            ai_review=ai_review,
-            request={
-                "username": str(getattr(author, "username", "") or ""),
-                "union_openid": str(getattr(author, "union_openid", "") or ""),
-            },
+        raw_author = raw_data.get("author")
+        raw_author = raw_author if isinstance(raw_author, dict) else {}
+        violation_content = (text or ("[图片]" * max(1, len(images)))) + (
+            f"\n[图片文字]\n{ocr_text[:2000]}" if ocr_text else ""
         )
+        violation_request = {
+            "username": str(getattr(author, "username", "") or "")
+            or str(raw_author.get("username") or ""),
+            "union_openid": str(getattr(author, "union_openid", "") or "")
+            or str(raw_author.get("union_openid") or ""),
+        }
         if ai_record_only:
+            await self._record_uid_violation(
+                uid,
+                group_openid,
+                member_openid,
+                reason,
+                content=violation_content,
+                message_id=message_id,
+                action_member_openid=target_member,
+                action="record_only",
+                ai_review=ai_review,
+                request=violation_request,
+            )
             await self._reply_to_keyword(event, group_openid, message_id, text, entry)
             self._moderation.remember(delivery_key, False)
             return
@@ -6316,6 +6381,25 @@ class QQGroupAdmin(Star):
             self.logger.warning("发送群消息审核警告失败：%s", exc)
         failed = await self._recall_messages(
             self._api(event), group_openid, recall_ids or [message_id]
+        )
+        record_reason = (
+            reason.replace("已撤回", "撤回失败")
+            if failed and "已撤回" in reason
+            else f"{reason}（消息撤回失败）"
+            if failed
+            else reason
+        )
+        await self._record_uid_violation(
+            uid,
+            group_openid,
+            member_openid,
+            record_reason,
+            content=violation_content,
+            message_id=message_id,
+            action_member_openid=target_member,
+            action="recall_failed" if failed else "recall",
+            ai_review=ai_review,
+            request=violation_request,
         )
         if not failed:
             self._moderation.remember(delivery_key, True)

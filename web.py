@@ -1714,7 +1714,13 @@ class GroupAdminWeb:
                     or record.get("category"),
                     "仅记录"
                     if action == "record_only"
-                    else ("已撤回" if action == "recall" else action),
+                    else (
+                        "已撤回"
+                        if action == "recall"
+                        else "撤回失败"
+                        if action == "recall_failed"
+                        else action
+                    ),
                     record.get("content")
                     or record.get("message")
                     or record.get("message_content")

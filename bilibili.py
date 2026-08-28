@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from http.cookiejar import CookieJar
 from typing import Any, Literal
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlsplit
+from urllib.parse import parse_qs, quote, urlencode, urlsplit
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 NAV_URL = "https://api.bilibili.com/x/web-interface/nav"
@@ -304,7 +304,9 @@ def _rich_text(value: Any) -> str:
             continue
         node_type = str(node.get("type") or "")
         if node_type == "RICH_TEXT_NODE_TYPE_WEB":
-            raw_text = node.get("orig_text") or node.get("text")
+            raw_text = (
+                node.get("jump_url") or node.get("orig_text") or node.get("text")
+            )
         else:
             raw_text = (
                 node.get("text") or node.get("orig_text") or node.get("content")
@@ -320,6 +322,13 @@ def _rich_text(value: Any) -> str:
                 text = jump_url
         elif node_type == "RICH_TEXT_NODE_TYPE_WEB" and text.startswith("//"):
             text = "https:" + text
+        if node_type == "RICH_TEXT_NODE_TYPE_WEB":
+            parsed = urlsplit(text)
+            redirect = parse_qs(parsed.query).get("redirect_url", [])
+            target = str(redirect[0] if redirect else "").strip()
+            target_parsed = urlsplit(target)
+            if target_parsed.scheme in {"http", "https"} and target_parsed.netloc:
+                text = target
         if _clean_dynamic_text(text):
             # Rich-text nodes are contiguous source fragments.  Preserve their
             # original whitespace so paragraph breaks and link boundaries are
@@ -594,11 +603,26 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
             )
             if value
         ]
-        text_candidates = (
-            (*card_text, *desc_text, *summary_text)
-            if dynamic_type == "DYNAMIC_TYPE_AV"
-            else (*desc_text, *summary_text, *card_text)
+        has_opus = any(
+            isinstance(value.get("opus"), dict) for value in (major, orig_major)
         )
+        if has_opus and title and any(
+            value != title and value.startswith(title) for value in summary_text
+        ):
+            # The Opus feed often exposes the first few body characters as a
+            # synthetic title.  Rendering it above the full summary repeats
+            # the same sentence in QQ, so retain only genuinely distinct
+            # titles.
+            title = ""
+        primary_opus = isinstance(major.get("opus"), dict)
+        if dynamic_type == "DYNAMIC_TYPE_AV":
+            text_candidates = (*card_text, *desc_text, *summary_text)
+        elif dynamic_type == "DYNAMIC_TYPE_FORWARD":
+            text_candidates = (*desc_text, *summary_text, *card_text)
+        elif primary_opus:
+            text_candidates = (*summary_text, *desc_text, *card_text)
+        else:
+            text_candidates = (*desc_text, *summary_text, *card_text)
         text = next(
             (
                 value
@@ -609,14 +633,23 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
         )
         basic = item.get("basic") if isinstance(item.get("basic"), dict) else {}
         orig_basic = orig.get("basic") if isinstance(orig.get("basic"), dict) else {}
+        jump_urls = (
+            (
+                *(card.get("jump_url") for card in cards),
+                basic.get("jump_url"),
+                orig_basic.get("jump_url"),
+            )
+            if dynamic_type == "DYNAMIC_TYPE_AV"
+            else (
+                basic.get("jump_url"),
+                *(card.get("jump_url") for card in cards),
+                orig_basic.get("jump_url"),
+            )
+        )
         url = next(
             (
                 str(value).strip()
-                for value in (
-                    basic.get("jump_url"),
-                    *(card.get("jump_url") for card in cards),
-                    orig_basic.get("jump_url"),
-                )
+                for value in jump_urls
                 if str(value or "").strip()
             ),
             "",
@@ -634,9 +667,12 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
         cover = ""
         cover_width = cover_height = 0
         gallery: list[tuple[str, int, int]] = []
+        image_count = 0
         for candidate in cards:
-            gallery = _cover_infos(candidate)
-            if gallery:
+            all_images = _cover_infos(candidate, max_items=99)
+            if all_images:
+                gallery = all_images[:3]
+                image_count = len(all_images)
                 cover, cover_width, cover_height = gallery[0]
                 break
         parsed_item = {
@@ -653,6 +689,8 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
         if cover_width and cover_height:
             parsed_item["cover_width"] = cover_width
             parsed_item["cover_height"] = cover_height
+        if image_count > 1:
+            parsed_item["image_count"] = image_count
         if len(gallery) > 1:
             parsed_item["images"] = [
                 {"url": url, "width": width, "height": height}
