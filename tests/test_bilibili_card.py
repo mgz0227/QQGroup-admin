@@ -140,6 +140,36 @@ class BilibiliCardTest(unittest.TestCase):
             )
         self.assertEqual(requested[0], "https://i0.hdslb.com/bfs/draw.webp")
 
+    def test_rendered_gallery_composes_three_images_into_one_card(self):
+        from PIL import Image
+
+        images = [
+            Image.new("RGB", (400, 400), color)
+            for color in ("#ff0000", "#00ff00", "#0000ff")
+        ]
+        with patch(
+            "bilibili_card._download_image",
+            side_effect=[None, *images],
+        ) as download:
+            encoded = render_bilibili_card(
+                {
+                    "author": "UP",
+                    "kind": "图文",
+                    "summary": "三图动态",
+                    "cover": "https://i0.hdslb.com/bfs/1.jpg",
+                    "covers": [
+                        "https://i0.hdslb.com/bfs/1.jpg",
+                        {"url": "https://i0.hdslb.com/bfs/2.jpg"},
+                        "https://i0.hdslb.com/bfs/3.jpg",
+                    ],
+                }
+            )
+
+        rendered = Image.open(BytesIO(encoded)).convert("RGB")
+        colors = {color for _count, color in rendered.getcolors(rendered.width * rendered.height)}
+        self.assertEqual(download.call_count, 4)
+        self.assertTrue({(255, 0, 0), (0, 255, 0), (0, 0, 255)} <= colors)
+
     def test_native_download_prefers_suffix_free_original_before_thumbnail(self):
         from PIL import Image
 
@@ -234,6 +264,23 @@ class BilibiliCardTest(unittest.TestCase):
         self.assertIn("focus-content", html)
         self.assertIn("width: 560px", html)
         self.assertNotIn('<div class="portrait-content">', html)
+
+    def test_html_card_keeps_three_gallery_images_in_one_card(self):
+        html = build_bilibili_card(
+            author="UP",
+            kind="图文",
+            summary="三图动态",
+            cover="https://i0.hdslb.com/bfs/1.jpg",
+            covers=[
+                "https://i0.hdslb.com/bfs/1.jpg",
+                "https://i0.hdslb.com/bfs/2.jpg",
+                "https://i0.hdslb.com/bfs/3.jpg",
+            ],
+        )
+
+        self.assertEqual(html.count('class="gallery-image"'), 3)
+        self.assertIn('class="cover-gallery gallery-3"', html)
+        self.assertIn("object-fit: contain", html)
 
     def test_empty_content_does_not_leave_empty_blocks(self):
         html = build_bilibili_card(

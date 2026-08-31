@@ -1384,6 +1384,136 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         second = plugin._moderation_settings(entry)
         self.assertEqual(second["global_keywords"], ["默认"])
 
+    async def test_group_text_auto_recall_uses_scoped_policy(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 30,
+            },
+            {
+                "profile_id": "keep",
+                "name": "保留消息",
+                "enabled": True,
+                "group_openids": ["group-2"],
+                "bot_message_recall_seconds": 0,
+            },
+        ]
+
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            await plugin._send_group_text(client, "group-1", "第一群")
+            await plugin._send_group_text(client, "group-2", "第二群")
+
+        schedule_recall.assert_called_once_with(
+            client, "group-1", "sent-1", 30, "bot-message"
+        )
+
+    def test_group_mention_uses_qq_client_compatible_token(self):
+        plugin, _client = self.plugin()
+
+        self.assertEqual(plugin._mention("member-1"), "<@member-1>")
+        self.assertEqual(plugin._mention("member>1"), "")
+
+    async def test_group_text_can_skip_policy_auto_recall(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 30,
+            }
+        ]
+
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            await plugin._send_group_text(
+                client,
+                "group-1",
+                "由功能自行管理撤回",
+                policy_auto_recall=False,
+            )
+
+        schedule_recall.assert_not_called()
+
+    async def test_group_text_does_not_schedule_recall_without_message_id(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 30,
+            }
+        ]
+        client.api.post_group_message = AsyncMock(
+            side_effect=[{}, {"id": None}]
+        )
+
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            await plugin._send_group_text(client, "group-1", "无响应 ID")
+            await plugin._send_group_text(client, "group-1", "空响应 ID")
+
+        schedule_recall.assert_not_called()
+
+    def test_global_policy_web_validates_bot_message_recall_seconds(self):
+        base = {
+            "profile_id": "recall",
+            "name": "自动撤回",
+            "enabled": True,
+            "group_openids": ["group-1"],
+        }
+        for seconds in (0, 120):
+            profile = module.GroupAdminWeb._global_policy_profiles(
+                [{**base, "bot_message_recall_seconds": seconds}],
+                {"group-1"},
+            )[0]
+            self.assertEqual(profile["bot_message_recall_seconds"], seconds)
+
+        with self.assertRaisesRegex(
+            ValueError, "机器人主动消息自动撤回必须在 0-120 之间"
+        ):
+            module.GroupAdminWeb._global_policy_profiles(
+                [{**base, "bot_message_recall_seconds": 121}],
+                {"group-1"},
+            )
+
+    async def test_cached_webui_keeps_existing_bot_message_recall_seconds(self):
+        plugin, _ = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 30,
+            }
+        ]
+
+        await plugin.web_save_global_policies(
+            {
+                "profiles": [
+                    {
+                        "profile_id": "recall",
+                        "name": "自动撤回",
+                        "enabled": True,
+                        "group_openids": ["group-1"],
+                    }
+                ]
+            }
+        )
+
+        self.assertEqual(
+            plugin.config["global_policy_profiles"][0][
+                "bot_message_recall_seconds"
+            ],
+            30,
+        )
+
     def test_ai_settings_are_global_across_scoped_profiles(self):
         plugin, _ = self.plugin()
         plugin.config.update(
@@ -2496,7 +2626,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
             client.api.messages[-1]["content"],
-            '<qqbot-at-user id="admin-1" /> 这条消息已撤回。',
+            "<@admin-1> 这条消息已撤回。",
         )
 
     async def test_empty_recall_reply_can_disable_notice_when_mention_is_off(self):
@@ -2526,7 +2656,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
             client.api.messages[-1]["content"],
-            '<qqbot-at-user id="admin-1" />',
+            "<@admin-1>",
         )
 
     async def test_global_image_keyword_has_separate_reply_and_mention_setting(self):
@@ -3093,12 +3223,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         ):
             self.assertTrue(await plugin._poll_bilibili_dynamics(subscriptions))
 
-        self.assertTrue(push.await_args.kwargs["card_data"]["image_only"])
-        self.assertTrue(push.await_args.kwargs["card_data"]["native_cover"])
-        self.assertFalse(push.await_args.kwargs["card_data"]["focus_cover"])
+        card_data = push.await_args.kwargs["card_data"]
+        self.assertTrue(card_data["image_only"])
+        self.assertNotIn("native_cover", card_data)
         self.assertIn("图片动态：正文已包含在海报中。", push.await_args.args[1])
 
-    async def test_bilibili_text_poster_prefers_native_poster_and_caption(self):
+    async def test_bilibili_text_poster_keeps_complete_copy_for_composed_card(self):
         plugin, _ = self.plugin()
         plugin.config["bilibili_cookie"] = "cookie"
         plugin._bilibili_state["dynamic"]["188144093"] = {
@@ -3128,6 +3258,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "cover": "https://i0.hdslb.com/bfs/draw.jpg",
             "cover_width": 1320,
             "cover_height": 2468,
+            "images": [
+                {
+                    "url": "https://i0.hdslb.com/bfs/draw.jpg",
+                    "width": 1320,
+                    "height": 2468,
+                },
+                {"url": "https://i0.hdslb.com/bfs/2.jpg", "width": 800, "height": 800},
+                {"url": "https://i0.hdslb.com/bfs/3.jpg", "width": 800, "height": 800},
+            ],
             "image_count": 7,
         }
         push = AsyncMock(return_value=True)
@@ -3141,75 +3280,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         card_data = push.await_args.kwargs["card_data"]
         self.assertFalse(card_data["image_only"])
-        self.assertTrue(card_data["native_cover"])
-        self.assertTrue(card_data["native_poster_preferred"])
-        self.assertFalse(card_data["focus_cover"])
+        self.assertNotIn("native_cover", card_data)
         self.assertEqual(card_data["summary"], full_summary)
         self.assertEqual(card_data["image_count"], 7)
-
-    async def test_bilibili_text_poster_skips_tall_card_when_native_upload_succeeds(self):
-        plugin, client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": client}
-        delivery_order = []
-        send_markdown = plugin._send_group_markdown
-
-        async def record_caption(*args, **kwargs):
-            delivery_order.append("caption")
-            return await send_markdown(*args, **kwargs)
-
-        async def record_poster(*_args, **_kwargs):
-            delivery_order.append("poster")
-            return SimpleNamespace(id="poster-1")
-
-        send_card = AsyncMock(side_effect=record_poster)
-        render = AsyncMock(side_effect=AssertionError("poster should not render as a tall card"))
-        with (
-            patch.object(module, "download_bilibili_image", return_value=b"poster"),
-            patch.object(module, "split_bilibili_poster", return_value=[b"poster"]),
-            patch.object(plugin, "_render_bilibili_card", render),
-            patch.object(plugin, "_send_group_markdown", side_effect=record_caption),
-            patch.object(plugin, "_send_group_card", send_card),
-        ):
-            delivered = await plugin._push_bilibili_message(
-                [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
-                "# B站动态\n\n动态标题\n\n动态简短说明",
-                "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "native_cover": True,
-                    "native_poster_preferred": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "title": "动态标题",
-                    "summary": "动态简短说明",
-                    "link": "https://www.bilibili.com/opus/text-poster",
-                },
-            )
-
-        self.assertTrue(delivered)
-        render.assert_not_awaited()
-        self.assertEqual(send_card.await_args.args[2], b"poster")
-        self.assertEqual(delivery_order, ["caption", "poster"])
-        self.assertIn("动态标题", client.api.messages[-1]["markdown"]["content"])
-
-    async def test_bilibili_poster_caption_keeps_compact_metadata_and_paragraphs(self):
-        plugin, _client = self.plugin()
-        summary = "第一段\n" + "正文" * 190 + "\n结尾标记"
-
-        caption = plugin._bilibili_poster_caption(
-            {
-                "author": "UP主",
-                "kind": "图文",
-                "timestamp": "08-28 08:00",
-                "summary": summary,
-                "link": "https://www.bilibili.com/opus/1",
-            }
-        )
-
-        self.assertIn("**UP主**\n图文 · 08\\-28 08:00", caption)
-        self.assertIn("第一段", caption)
-        self.assertIn("结尾标记", caption)
-        self.assertIn("[查看原动态 ↗]", caption)
+        self.assertEqual(len(card_data["covers"]), 3)
+        self.assertEqual(push.await_args.args[1].count("![封面"), 3)
 
     async def test_bilibili_card_delivery_uses_media_and_keeps_original_link(self):
         plugin, client = self.plugin()
@@ -3247,22 +3322,17 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             send_card.await_args.kwargs["link"],
             "https://www.bilibili.com/opus/1",
         )
-        self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
-            "[查看原动态 ↗](https://www.bilibili.com/opus/1)",
-        )
+        self.assertFalse(send_card.await_args.kwargs["policy_auto_recall"])
+        self.assertEqual(send_card.await_count, 1)
 
-    async def test_bilibili_rendered_card_does_not_bake_duplicate_link(self):
+    async def test_bilibili_rendered_card_keeps_link_in_same_message(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
         render = AsyncMock(return_value=b"\x89PNG\r\ncard")
+        send_card = AsyncMock(return_value=SimpleNamespace(id="card-1"))
         with (
             patch.object(plugin, "_render_bilibili_card", render),
-            patch.object(
-                plugin,
-                "_send_group_card",
-                AsyncMock(return_value=SimpleNamespace(id="card-1")),
-            ),
+            patch.object(plugin, "_send_group_card", send_card),
         ):
             delivered = await plugin._push_bilibili_message(
                 [
@@ -3286,156 +3356,27 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(delivered)
-        self.assertEqual(render.await_args.args[0]["link"], "")
-        self.assertEqual(render.await_args.args[0]["link_label"], "")
         self.assertEqual(
-            client.api.messages[-1]["markdown"]["content"],
-            "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
+            render.await_args.args[0]["link"],
+            "https://www.bilibili.com/opus/4",
         )
+        self.assertEqual(send_card.await_count, 1)
+        self.assertEqual(
+            send_card.await_args.kwargs["link"],
+            "https://www.bilibili.com/opus/4",
+        )
+        self.assertFalse(send_card.await_args.kwargs["policy_auto_recall"])
 
-    async def test_bilibili_draw_push_uses_native_poster_and_caption(self):
+    async def test_bilibili_gallery_is_composed_and_sent_once(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
-        send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
+        send_card = AsyncMock(return_value=SimpleNamespace(id="poster"))
         with (
             patch.object(
-                module,
-                "download_bilibili_image",
-                return_value=b"\xff\xd8\xffposter",
-            ) as download,
-            patch.object(
-                plugin,
-                "_render_bilibili_card",
-                AsyncMock(return_value=b"\x89PNG\r\ncard"),
+                plugin, "_render_bilibili_card", AsyncMock(return_value=b"gallery-card")
             ) as render,
             patch.object(plugin, "_send_group_card", send_card),
-        ):
-            delivered = await plugin._push_bilibili_message(
-                [
-                    {
-                        "group_openid": "group-1",
-                        "platform_id": "platform-1",
-                        "dynamic": True,
-                        "live": False,
-                    }
-                ],
-                "# B站动态",
-                "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "native_cover": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "timestamp": "08-27 01:17",
-                    "summary": "动态正文摘要",
-                    "link": "https://www.bilibili.com/opus/4",
-                    "link_label": "查看原动态",
-                },
-            )
-
-        self.assertTrue(delivered)
-        download.assert_not_called()
-        render.assert_awaited_once()
-        self.assertTrue(render.await_args.args[0]["focus_cover"])
-        self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\ncard")
-        caption = client.api.messages[-1]["markdown"]["content"]
-        self.assertIn("动态正文摘要", caption)
-        self.assertIn(
-            "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
-            caption,
-        )
-
-    async def test_bilibili_image_only_push_prefers_native_poster_over_tall_card(self):
-        plugin, client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": client}
-        send_card = AsyncMock(return_value=SimpleNamespace(id="poster-1"))
-        render = AsyncMock(return_value=b"\x89PNG\r\ncard")
-        with (
-            patch.object(module, "download_bilibili_image", return_value=b"poster") as download,
-            patch.object(module, "split_bilibili_poster", return_value=[b"poster"]) as split,
-            patch.object(plugin, "_render_bilibili_card", render),
-            patch.object(plugin, "_send_group_card", send_card),
-        ):
-            delivered = await plugin._push_bilibili_message(
-                [
-                    {
-                        "group_openid": "group-1",
-                        "platform_id": "platform-1",
-                        "dynamic": True,
-                        "live": False,
-                    }
-                ],
-                "# B站动态",
-                "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "image_only": True,
-                    "native_cover": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "link": "https://www.bilibili.com/opus/7",
-                },
-            )
-
-        self.assertTrue(delivered)
-        download.assert_called_once()
-        split.assert_called_once_with(b"poster")
-        render.assert_not_awaited()
-        self.assertEqual(send_card.await_args.args[2], b"poster")
-        self.assertIn("查看原动态", client.api.messages[-1]["markdown"]["content"])
-
-    async def test_bilibili_tall_poster_sends_each_readable_part_once(self):
-        plugin, client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": client}
-        send_card = AsyncMock(return_value=SimpleNamespace(id="poster"))
-        with (
-            patch.object(module, "download_bilibili_image", return_value=b"poster"),
-            patch.object(module, "split_bilibili_poster", return_value=[b"part-1", b"part-2"]),
-            patch.object(
-                plugin,
-                "_render_bilibili_card",
-                AsyncMock(side_effect=RuntimeError("renderer unavailable")),
-            ),
-            patch.object(plugin, "_send_group_card", send_card),
-        ):
-            delivered = await plugin._push_bilibili_message(
-                [
-                    {
-                        "group_openid": "group-1",
-                        "platform_id": "platform-1",
-                        "dynamic": True,
-                        "live": False,
-                    }
-                ],
-                "# B站动态",
-                "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "native_cover": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "link": "https://www.bilibili.com/opus/5",
-                },
-            )
-
-        self.assertTrue(delivered)
-        self.assertEqual([call.args[2] for call in send_card.await_args_list], [b"part-1", b"part-2"])
-        self.assertIn("查看原动态", client.api.messages[-1]["markdown"]["content"])
-
-    async def test_bilibili_gallery_sends_at_most_three_native_images(self):
-        plugin, client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": client}
-        send_card = AsyncMock(return_value=SimpleNamespace(id="poster"))
-        with (
-            patch.object(
-                module,
-                "download_bilibili_image",
-                side_effect=[b"one", b"two", b"three"],
-            ) as download,
-            patch.object(
-                module, "split_bilibili_poster", side_effect=lambda value: [value]
-            ) as split,
-            patch.object(plugin, "_send_group_card", send_card),
+            patch.object(plugin, "_send_group_markdown", AsyncMock()) as markdown,
         ):
             delivered = await plugin._push_bilibili_message(
                 [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
@@ -3459,58 +3400,30 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertTrue(delivered)
-        self.assertEqual(download.call_count, 3)
-        split.assert_not_called()
-        self.assertEqual(
-            [call.args[2] for call in send_card.await_args_list],
-            [b"one", b"two", b"three"],
-        )
-        self.assertIn("4 张图片", client.api.messages[-1]["markdown"]["content"])
+        render.assert_awaited_once()
+        self.assertEqual(send_card.await_count, 1)
+        self.assertEqual(send_card.await_args.args[2], b"gallery-card")
+        self.assertFalse(send_card.await_args.kwargs["policy_auto_recall"])
+        markdown.assert_not_awaited()
 
-    async def test_bilibili_partial_poster_send_does_not_append_duplicate_fallback(self):
+    async def test_bilibili_card_render_failure_sends_one_complete_markdown(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
-        send_card = AsyncMock(
-            side_effect=[SimpleNamespace(id="part-1"), RuntimeError("part-2 failed")]
+        markdown = AsyncMock(return_value=SimpleNamespace(id="markdown-1"))
+        send_card = AsyncMock()
+        text = (
+            "# B站动态\n\n正文\n\n"
+            "![封面](https://i0.hdslb.com/bfs/1.jpg)\n\n"
+            "[查看原动态](https://www.bilibili.com/opus/1)"
         )
         with (
-            patch.object(module, "download_bilibili_image", return_value=b"poster"),
-            patch.object(module, "split_bilibili_poster", return_value=[b"part-1", b"part-2"]),
-            patch.object(plugin, "_send_group_card", send_card),
-            patch.object(plugin, "_send_group_card_url", AsyncMock()) as send_url,
             patch.object(
                 plugin,
                 "_render_bilibili_card",
                 AsyncMock(side_effect=RuntimeError("renderer unavailable")),
-            ) as render,
-        ):
-            delivered = await plugin._push_bilibili_message(
-                [{"group_openid": "group-1", "platform_id": "platform-1", "dynamic": True}],
-                "# B站动态",
-                "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "native_cover": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "link": "https://www.bilibili.com/opus/6",
-                },
-            )
-
-        self.assertTrue(delivered)
-        self.assertEqual(send_card.await_count, 2)
-        send_url.assert_not_awaited()
-        render.assert_awaited_once()
-
-    async def test_bilibili_draw_download_failure_uses_focus_fallback(self):
-        plugin, client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": client}
-        render = AsyncMock(return_value=b"\x89PNG\r\nfocus")
-        send_card = AsyncMock(return_value=SimpleNamespace(id="focus-1"))
-        with (
-            patch.object(module, "download_bilibili_image", return_value=None),
-            patch.object(plugin, "_render_bilibili_card", render),
+            ),
             patch.object(plugin, "_send_group_card", send_card),
+            patch.object(plugin, "_send_group_markdown", markdown),
         ):
             delivered = await plugin._push_bilibili_message(
                 [
@@ -3518,102 +3431,40 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                         "group_openid": "group-1",
                         "platform_id": "platform-1",
                         "dynamic": True,
-                        "live": False,
                     }
                 ],
-                "# B站动态",
+                text,
                 "dynamic",
                 card_data={
                     "author": "UP",
                     "kind": "图文",
-                    "native_cover": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "summary": "动态正文摘要",
-                    "link": "https://www.bilibili.com/opus/4",
+                    "cover": "https://i0.hdslb.com/bfs/1.jpg",
+                    "link": "https://www.bilibili.com/opus/1",
                 },
             )
 
         self.assertTrue(delivered)
-        self.assertTrue(render.await_args.args[0]["focus_cover"])
-        self.assertEqual(render.await_args.args[0]["link"], "")
-        self.assertEqual(send_card.await_args.args[2], b"\x89PNG\r\nfocus")
-        caption = client.api.messages[-1]["markdown"]["content"]
-        self.assertIn("动态正文摘要", caption)
-        self.assertIn(
-            "[查看原动态 ↗](https://www.bilibili.com/opus/4)",
-            caption,
-        )
-
-    async def test_bilibili_draw_download_failure_prefers_public_url_media(self):
-        plugin, client = self.plugin()
-        plugin._platform_clients = lambda: {"platform-1": client}
-        send_url = AsyncMock(return_value={"id": "url-1"})
-        render = AsyncMock(side_effect=RuntimeError("renderer unavailable"))
-        with (
-            patch.object(module, "download_bilibili_image", return_value=None),
-            patch.object(plugin, "_send_group_card_url", send_url),
-            patch.object(plugin, "_render_bilibili_card", render),
-        ):
-            delivered = await plugin._push_bilibili_message(
-                [
-                    {
-                        "group_openid": "group-1",
-                        "platform_id": "platform-1",
-                        "dynamic": True,
-                        "live": False,
-                    }
-                ],
-                "# B站动态",
-                "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "native_cover": True,
-                    "cover": "http://i0.hdslb.com/bfs/draw@672w_1c.webp",
-                    "summary": "动态正文摘要",
-                    "link": "https://www.bilibili.com/opus/4",
-                },
-            )
-
-        self.assertTrue(delivered)
-        send_url.assert_awaited_once_with(
+        send_card.assert_not_awaited()
+        markdown.assert_awaited_once_with(
             client,
             "group-1",
-            "https://i0.hdslb.com/bfs/draw@672w_1c.webp",
+            text,
+            policy_auto_recall=False,
         )
-        render.assert_awaited_once()
-        self.assertIn("动态正文摘要", client.api.messages[-1]["markdown"]["content"])
 
-    async def test_bilibili_native_upload_failure_retries_focus_card(self):
+    async def test_bilibili_render_and_markdown_failure_uses_one_text_fallback(self):
         plugin, client = self.plugin()
         plugin._platform_clients = lambda: {"platform-1": client}
-        render = AsyncMock(
-            side_effect=[
-                RuntimeError("initial renderer unavailable"),
-                b"\x89PNG\r\nfocus",
-            ]
-        )
-        send_card = AsyncMock(
-            side_effect=[
-                RuntimeError("native upload failed"),
-                SimpleNamespace(id="focus-1"),
-                RuntimeError("native upload failed"),
-                SimpleNamespace(id="focus-2"),
-            ]
-        )
+        markdown = AsyncMock(side_effect=RuntimeError("markdown unavailable"))
+        plain = AsyncMock(return_value=SimpleNamespace(id="text-1"))
         with (
             patch.object(
-                module,
-                "download_bilibili_image",
-                return_value=b"\xff\xd8\xffposter",
-            ),
-            patch.object(
                 plugin,
-                "_send_group_card_url",
-                AsyncMock(side_effect=RuntimeError("public URL unavailable")),
+                "_render_bilibili_card",
+                AsyncMock(side_effect=RuntimeError("renderer unavailable")),
             ),
-            patch.object(plugin, "_render_bilibili_card", render),
-            patch.object(plugin, "_send_group_card", send_card),
+            patch.object(plugin, "_send_group_markdown", markdown),
+            patch.object(plugin, "_send_group_text", plain),
         ):
             delivered = await plugin._push_bilibili_message(
                 [
@@ -3621,33 +3472,21 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                         "group_openid": "group-1",
                         "platform_id": "platform-1",
                         "dynamic": True,
-                        "live": False,
-                    },
-                    {
-                        "group_openid": "group-2",
-                        "platform_id": "platform-1",
-                        "dynamic": True,
-                        "live": False,
-                    },
+                    }
                 ],
-                "# B站动态",
+                "# B站动态\n\n正文",
                 "dynamic",
-                card_data={
-                    "author": "UP",
-                    "kind": "图文",
-                    "native_cover": True,
-                    "cover": "https://i0.hdslb.com/bfs/draw.jpg",
-                    "link": "https://www.bilibili.com/opus/4",
-                },
+                card_data={"author": "UP", "cover": "https://i0.hdslb.com/1.jpg"},
             )
 
         self.assertTrue(delivered)
-        self.assertEqual(send_card.await_count, 4)
-        self.assertEqual(send_card.await_args_list[1].args[2], b"\x89PNG\r\nfocus")
-        self.assertEqual(send_card.await_args_list[3].args[2], b"\x89PNG\r\nfocus")
-        self.assertEqual(render.await_count, 2)
-        self.assertTrue(render.await_args.args[0]["focus_cover"])
-        self.assertEqual(len(client.api.messages), 2)
+        markdown.assert_awaited_once()
+        plain.assert_awaited_once_with(
+            client,
+            "group-1",
+            "B站动态\n\n正文",
+            policy_auto_recall=False,
+        )
 
     async def test_bilibili_card_renderer_accepts_temp_file_and_removes_it(self):
         plugin, _client = self.plugin()
@@ -3717,40 +3556,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
                 "group_openid": "group-1",
                 "msg_type": 7,
                 "media": {"file_info": "info-1"},
+                "content": "查看原动态：https://www.bilibili.com/opus/1",
             },
-        )
-
-    async def test_bilibili_public_url_media_prefers_original_candidate(self):
-        plugin, client = self.plugin()
-        api = SimpleNamespace(
-            upload_group_file=AsyncMock(
-                side_effect=[RuntimeError("original unavailable"), {"id": "url-1"}]
-            )
-        )
-        with patch.object(module, "QQGroupAPI", return_value=api):
-            result = await plugin._send_group_card_url(
-                client,
-                "group-1",
-                "http://i0.hdslb.com/bfs/new_dyn/post@672w_1c.webp?sign=ok",
-            )
-
-        self.assertEqual(result, {"id": "url-1"})
-        self.assertEqual(
-            api.upload_group_file.await_args_list,
-            [
-                unittest.mock.call(
-                    "group-1",
-                    "https://i0.hdslb.com/bfs/new_dyn/post.webp?sign=ok",
-                    file_name="bilibili-poster.jpg",
-                    file_type=1,
-                ),
-                unittest.mock.call(
-                    "group-1",
-                    "https://i0.hdslb.com/bfs/new_dyn/post@672w_1c.webp?sign=ok",
-                    file_name="bilibili-poster.jpg",
-                    file_type=1,
-                ),
-            ],
         )
 
     async def test_bilibili_live_push_uses_named_room_link(self):
@@ -3961,11 +3768,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(mute["member_openid"], "member-1")
         self.assertEqual(
             client.api.messages[-1]["content"],
-            '已禁言 45 秒：<qqbot-at-user id="member-1" />',
+            "已禁言 45 秒：<@member-1>",
         )
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertIn(
-            '<qqbot-at-user id="member-1" />',
+            "<@member-1>",
             client.api.messages[-1]["content"],
         )
 
@@ -3987,7 +3794,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertTrue(
             client.api.messages[-1]["content"].startswith(
-                '<qqbot-at-user id="member-1" /> 已设置禁言，至 '
+                "<@member-1> 已设置禁言，至 "
             )
         )
 
@@ -4025,16 +3832,16 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         content = client.api.messages[-1]["content"]
         self.assertLessEqual(len(content), 1000)
-        self.assertTrue(content.endswith('<qqbot-at-user id="member-1" />'))
+        self.assertTrue(content.endswith("<@member-1>"))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
         content = client.api.messages[-1]["content"]
         self.assertLessEqual(len(content), 1000)
-        mention = '<qqbot-at-user id="member-1" />'
+        mention = "<@member-1>"
         self.assertTrue(content.startswith(mention))
-        self.assertTrue(content.endswith(" />"))
-        self.assertNotRegex(content, r"<qqbot-at-user\\b[^>]*$")
+        self.assertTrue(content.endswith(">"))
+        self.assertNotRegex(content, r"<@[^>]*$")
 
     async def test_web_batch_save_and_sync(self):
         plugin, _client = self.plugin()
@@ -6218,7 +6025,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message["msg_type"], 0)
         self.assertIn("欢迎 新人 加入 测试群", message["content"])
         self.assertIn("UID=188144093", message["content"])
-        self.assertIn('<qqbot-at-user id="member-1" />', message["content"])
+        self.assertIn("<@member-1>", message["content"])
 
     def test_single_welcome_template_mapping_is_preserved(self):
         plugin, _client = self.plugin()

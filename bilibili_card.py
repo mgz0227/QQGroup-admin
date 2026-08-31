@@ -403,12 +403,40 @@ def render_bilibili_card(card_data: Mapping[str, Any]) -> bytes:
         "on",
     }
     avatar = _download_image(card_data.get("avatar"))
-    cover = _download_image(
-        card_data.get("cover"),
-        max_size=(1600, 2400) if focus_requested else (1600, 1000),
-    )
+    cover_values: list[object] = []
+    for value in [card_data.get("cover"), *(card_data.get("covers") or [])]:
+        if isinstance(value, Mapping):
+            value = value.get("url") or value.get("src") or value.get("image")
+        if value and value not in cover_values:
+            cover_values.append(value)
+    cover_images = [
+        image
+        for value in cover_values[:3]
+        if (
+            image := _download_image(
+                value,
+                max_size=(1600, 2400) if focus_requested else (1600, 1000),
+            )
+        )
+        is not None
+    ]
+    cover = cover_images[0] if cover_images else None
+    if len(cover_images) > 1:
+        gallery = Image.new("RGB", (1200, 800), "#f1f2f3")
+        boxes = (
+            ((0, 0, 594, 800), (606, 0, 1200, 800))
+            if len(cover_images) == 2
+            else (
+                (0, 0, 594, 800),
+                (606, 0, 1200, 394),
+                (606, 406, 1200, 800),
+            )
+        )
+        for image, box in zip(cover_images, boxes, strict=False):
+            _rounded_image(gallery, image.convert("RGB"), box, 14)
+        cover = gallery
     if (
-        card_data.get("cover")
+        cover_values
         and bool(card_data.get("require_cover"))
         and cover is None
     ):
@@ -711,6 +739,7 @@ def build_bilibili_card(
     title: object = "",
     summary: object = "",
     cover: object = "",
+    covers: object = (),
     avatar: object = "",
     status: object = "",
     link: object = "",
@@ -719,6 +748,7 @@ def build_bilibili_card(
     cover_height: object = 0,
     image_only: object = False,
     focus_cover: object = False,
+    **_extra: object,
 ) -> str:
     """Build a compact card for AstrBot's built-in HTML-to-image renderer."""
 
@@ -728,7 +758,17 @@ def build_bilibili_card(
     status_text = _text(status, 24)
     title_text = _text(title, 180)
     summary_html = _body(summary, 420)
-    cover_url = _url(cover, bilibili_media=True)
+    raw_covers = covers if isinstance(covers, (list, tuple)) else ()
+    cover_urls: list[str] = []
+    for value in (cover, *raw_covers):
+        if isinstance(value, Mapping):
+            value = value.get("url") or value.get("src") or value.get("image")
+        url = _url(value, bilibili_media=True)
+        if url and url not in cover_urls:
+            cover_urls.append(url)
+        if len(cover_urls) >= 3:
+            break
+    cover_url = cover_urls[0] if cover_urls else ""
     avatar_url = _url(avatar, bilibili_media=True)
     link_url = _url(link)
     brand, source, default_link_label = _card_labels(kind)
@@ -740,6 +780,7 @@ def build_bilibili_card(
         source_width = source_height = 0
     portrait_cover = bool(
         cover_url
+        and len(cover_urls) == 1
         and source_width > 0
         and source_height > 0
         and source_width / source_height < 0.78
@@ -781,11 +822,19 @@ def build_bilibili_card(
         if avatar_url
         else '<span class="avatar fallback-avatar">B</span>'
     )
-    cover_markup = (
-        f'<div class="cover-wrap"><img class="cover"{portrait_cover_style} src="{cover_url}" alt=""></div>'
-        if cover_url
-        else ""
-    )
+    if len(cover_urls) > 1:
+        gallery_images = "".join(
+            f'<img class="gallery-image" src="{url}" alt="">'
+            for url in cover_urls
+        )
+        cover_markup = (
+            f'<div class="cover-gallery gallery-{len(cover_urls)}">'
+            f"{gallery_images}</div>"
+        )
+    elif cover_url:
+        cover_markup = f'<div class="cover-wrap"><img class="cover"{portrait_cover_style} src="{cover_url}" alt=""></div>'
+    else:
+        cover_markup = ""
     status_markup = f'<div class="status">{status_text}</div>' if status_text else ""
     if title_text:
         title_markup = f'<div class="title">{title_text}</div>'
@@ -873,6 +922,9 @@ body {{
 .cover-wrap {{ display: flex; justify-content: center; overflow: hidden; margin-top: 14px; border-radius: 14px; background: #f1f2f3; line-height: 0; }}
 .portrait-cover .cover-wrap {{ margin-top: 0; }}
 .cover {{ display: block; width: auto; max-width: 100%; max-height: {760 if image_only_cover else (760 if focus_cover_requested else 520)}px; height: auto; object-fit: contain; background: #f1f2f3; }}
+.cover-gallery {{ display: grid; grid-template-columns: repeat(2, 1fr); gap: 8px; height: 360px; margin-top: 14px; overflow: hidden; border-radius: 14px; background: #f1f2f3; }}
+.gallery-image {{ display: block; width: 100%; height: 100%; min-height: 0; object-fit: contain; background: #f1f2f3; }}
+.gallery-3 .gallery-image:first-child {{ grid-row: span 2; }}
 .footer {{ display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 16px 28px 20px; border-top: 1px solid #f0f1f2; background: #fcfcfd; }}
 .source {{ color: #c0c4cc; font-size: 12px; letter-spacing: .5px; }}
 .open-link {{ padding: 8px 14px; border-radius: 9px; background: #eaf8ff; color: #008ac5; font-size: 14px; font-weight: 700; text-decoration: none; white-space: nowrap; }}

@@ -558,7 +558,9 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
                 {},
             )
 
-        cards = [card for card in (first_card(major), first_card(orig_major)) if card]
+        primary_card = first_card(major)
+        original_card = first_card(orig_major)
+        cards = [card for card in (primary_card, original_card) if card]
         summaries = [
             card.get("summary")
             for card in cards
@@ -618,7 +620,52 @@ def parse_dynamic_items(payload: Any) -> list[dict[str, Any]]:
         if dynamic_type == "DYNAMIC_TYPE_AV":
             text_candidates = (*card_text, *desc_text, *summary_text)
         elif dynamic_type == "DYNAMIC_TYPE_FORWARD":
-            text_candidates = (*desc_text, *summary_text, *card_text)
+            original_summary = (
+                original_card.get("summary")
+                if isinstance(original_card.get("summary"), dict)
+                else {}
+            )
+            forward_note = next(
+                (
+                    value
+                    for value in (
+                        _rich_text(desc),
+                        _clean_dynamic_text(desc.get("text")),
+                    )
+                    if value and value != title
+                ),
+                "",
+            )
+            original_values = (
+                (
+                    _rich_text(original_summary),
+                    _clean_dynamic_text(original_summary.get("text")),
+                    _rich_text(orig_desc),
+                    _clean_dynamic_text(orig_desc.get("text")),
+                )
+                if isinstance(orig_major.get("opus"), dict)
+                else (
+                    _rich_text(orig_desc),
+                    _clean_dynamic_text(orig_desc.get("text")),
+                    _rich_text(original_summary),
+                    _clean_dynamic_text(original_summary.get("text")),
+                )
+            )
+            original_text = next(
+                (
+                    value
+                    for value in (
+                        *original_values,
+                        _clean_dynamic_text(original_card.get("desc")),
+                        _clean_dynamic_text(original_card.get("description")),
+                    )
+                    if value and value != title
+                ),
+                "",
+            )
+            text_candidates = (
+                "\n\n".join(dict.fromkeys(filter(None, (forward_note, original_text)))),
+            )
         elif primary_opus:
             text_candidates = (*summary_text, *desc_text, *card_text)
         else:

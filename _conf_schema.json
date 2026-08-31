@@ -43,6 +43,13 @@
             "description": "设置面板自动撤回",
             "default": true
           },
+          "bot_message_recall_seconds": {
+            "type": "int",
+            "description": "机器人主动消息自动撤回（秒）",
+            "hint": "0 表示关闭；按该策略覆盖的群分别生效，B 站推送始终保留。",
+            "default": 0,
+            "slider": {"min": 0, "max": 120, "step": 5}
+          },
           "verification_message_recall_enabled": {
             "type": "bool",
             "description": "真人验证消息自动撤回",
@@ -347,6 +354,14 @@
     "description": "审核设置面板自动撤回",
     "hint": "开启后，/审核设置 发送的按钮面板会在 45 秒后自动撤回。",
     "default": true,
+    "invisible": true
+  },
+  "bot_message_recall_seconds": {
+    "type": "int",
+    "description": "机器人主动消息自动撤回（秒）",
+    "hint": "0 表示关闭；由 WebUI 的群级全局策略按群配置，B 站推送始终保留。QQ 群消息需在发送后 120 秒内撤回。",
+    "default": 0,
+    "slider": {"min": 0, "max": 120, "step": 5},
     "invisible": true
   },
   "settings_command_enabled": {

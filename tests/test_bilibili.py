@@ -284,6 +284,7 @@ class BilibiliTest(unittest.TestCase):
                         "orig": {
                             "modules": {
                                 "module_dynamic": {
+                                    "desc": {"text": "原动态短摘要"},
                                     "major": {
                                         "opus": {
                                             "title": "原动态标题",
@@ -313,7 +314,7 @@ class BilibiliTest(unittest.TestCase):
 
         item = parse_dynamic_items(payload)[0]
         self.assertEqual(item["title"], "原动态标题")
-        self.assertEqual(item["text"], "推荐一下")
+        self.assertEqual(item["text"], "推荐一下\n\n第一段 第二段")
         self.assertEqual(item["cover"], "https://i0.hdslb.com/bfs/original.jpg")
         self.assertEqual(item["cover_width"], 1320)
         self.assertEqual(item["cover_height"], 2468)

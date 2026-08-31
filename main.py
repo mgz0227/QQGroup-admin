@@ -14,7 +14,6 @@ from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
-from xml.sax.saxutils import quoteattr
 
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
@@ -37,9 +36,7 @@ from .bilibili_card import (
     BilibiliCoverUnavailable,
     build_bilibili_card,
     bilibili_media_url_candidates,
-    download_bilibili_image,
     render_bilibili_card,
-    split_bilibili_poster,
 )
 from .image_ocr import (
     embedded_image_text,
@@ -228,6 +225,7 @@ VIOLATION_REVIEW_STATUSES = frozenset({"pending", "confirmed", "false_positive"}
 GLOBAL_POLICY_DEFAULTS = {
     "settings_command_enabled": True,
     "settings_panel_auto_recall": True,
+    "bot_message_recall_seconds": 0,
     "verification_message_recall_enabled": True,
     "verification_message_timeout_seconds": 120,
     "mute_success_message": "已设置禁言，至 {expire_at}。",
@@ -358,6 +356,7 @@ GLOBAL_INHERIT_POLICY_KEYS = (
     "keyword_reply_recall_seconds",
     "verification_message_recall_enabled",
     "verification_message_timeout_seconds",
+    "bot_message_recall_seconds",
 )
 AI_REVIEW_MAX_IMAGES = 3
 
@@ -1467,9 +1466,11 @@ class QQGroupAdmin(Star):
     @staticmethod
     def _mention(member_openid: str) -> str:
         value = str(member_openid or "").strip()
-        # QQ's current text-chain protocol uses this tag for group mentions;
-        # the older <@OpenID> form is deprecated and may render literally.
-        return f"<qqbot-at-user id={quoteattr(value)} />" if value else ""
+        if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+            return ""
+        # Current QQ group clients still recognize this compatibility token;
+        # some clients render the documented qqbot-at-user tag literally.
+        return f"<@{value}>"
 
     def _next_outbound_message_seq(self) -> int:
         self._outbound_message_seq += 1
@@ -1485,6 +1486,7 @@ class QQGroupAdmin(Star):
         *,
         message_id: str = "",
         msg_seq: int | None = None,
+        policy_auto_recall: bool = True,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "group_openid": group_openid,
@@ -1495,7 +1497,10 @@ class QQGroupAdmin(Star):
             kwargs["msg_id"] = message_id
         if msg_seq is not None:
             kwargs["msg_seq"] = int(msg_seq)
-        return await client.api.post_group_message(**kwargs)
+        sent = await client.api.post_group_message(**kwargs)
+        if policy_auto_recall:
+            self._schedule_policy_recall(client, group_openid, sent)
+        return sent
 
     async def _send_group_markdown(
         self,
@@ -1506,6 +1511,7 @@ class QQGroupAdmin(Star):
         message_id: str = "",
         keyboard: dict[str, Any] | None = None,
         msg_seq: int | None = None,
+        policy_auto_recall: bool = True,
     ) -> Any:
         kwargs: dict[str, Any] = {
             "group_openid": group_openid,
@@ -1518,7 +1524,36 @@ class QQGroupAdmin(Star):
             kwargs["msg_id"] = message_id
         if msg_seq is not None:
             kwargs["msg_seq"] = int(msg_seq)
-        return await client.api.post_group_message(**kwargs)
+        sent = await client.api.post_group_message(**kwargs)
+        if policy_auto_recall:
+            self._schedule_policy_recall(client, group_openid, sent)
+        return sent
+
+    def _schedule_policy_recall(
+        self,
+        client: Any,
+        group_openid: str,
+        sent: Any,
+    ) -> None:
+        policy = self._global_policy_for_group(group_openid)
+        delay = self._bounded_int(
+            self._policy_value(policy, "bot_message_recall_seconds"),
+            0,
+            0,
+            120,
+        )
+        raw_message_id = (
+            sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "")
+        )
+        message_id = str(raw_message_id or "")
+        if delay and message_id:
+            self._schedule_recall(
+                client,
+                group_openid,
+                message_id,
+                delay,
+                "bot-message",
+            )
 
     async def _send_group_notice(
         self,
@@ -1528,6 +1563,7 @@ class QQGroupAdmin(Star):
         *,
         member_openid: str = "",
         message_id: str = "",
+        policy_auto_recall: bool = True,
     ) -> Any:
         """Send a moderation notice without exposing raw QQ mention markup."""
 
@@ -1539,22 +1575,36 @@ class QQGroupAdmin(Star):
             if not text:
                 return None
             return await self._send_group_text(
-                client, group_openid, text, message_id=message_id
+                client,
+                group_openid,
+                text,
+                message_id=message_id,
+                policy_auto_recall=policy_auto_recall,
             )
         mention = self._mention(member_openid)
+        if not mention:
+            text = text.replace("{at_user}", "").strip()
+            if not text:
+                return None
+            return await self._send_group_text(
+                client,
+                group_openid,
+                text,
+                message_id=message_id,
+                policy_auto_recall=policy_auto_recall,
+            )
         rendered = text.replace("{at_user}", mention)
         if rendered == text and mention not in rendered:
             rendered = f"{mention} {text}".strip()
         rendered = self._fit_notice_text(rendered, mention)
-        # QQ's text-chain protocol supports the official mention tag in plain
-        # text.  Using msg_type=0 avoids clients that render the tag literally
-        # when it is embedded in Markdown.
+        # Use a plain group message so QQ can parse the compatibility mention.
         try:
             return await self._send_group_text(
                 client,
                 group_openid,
                 rendered[:4000],
                 message_id=message_id,
+                policy_auto_recall=policy_auto_recall,
             )
         except Exception as exc:  # noqa: BLE001 - permission fallback
             self.logger.debug("带艾特提示发送失败，降级为普通文本：%s", exc)
@@ -1567,6 +1617,7 @@ class QQGroupAdmin(Star):
                 group_openid,
                 fallback,
                 message_id=message_id,
+                policy_auto_recall=policy_auto_recall,
             )
 
     @staticmethod
@@ -1583,9 +1634,9 @@ class QQGroupAdmin(Star):
         before = before[:available]
         after = after[: max(0, available - len(before))]
         result = before + mention + after
-        # Do not leave a second, partially copied official tag at the boundary.
-        last_open = result.rfind("<qqbot")
-        if last_open >= 0 and " />" not in result[last_open:]:
+        # Do not leave a second, partially copied mention at the boundary.
+        last_open = result.rfind("<@")
+        if last_open >= 0 and ">" not in result[last_open:]:
             result = result[:last_open].rstrip()
         return result
 
@@ -1732,6 +1783,7 @@ class QQGroupAdmin(Star):
                         group_openid,
                         text,
                         member_openid=member_openid if at_member else "",
+                        policy_auto_recall=False,
                     )
                     if sent is None:
                         continue
@@ -2170,6 +2222,7 @@ class QQGroupAdmin(Star):
                 card_prompt,
                 keyboard={"content": {"rows": [{"buttons": buttons}]}},
                 msg_seq=card_seq,
+                policy_auto_recall=False,
             )
             message_id_value = (
                 sent.get("id")
@@ -2195,6 +2248,7 @@ class QQGroupAdmin(Star):
                     group_openid,
                     prompt,
                     msg_seq=self._next_outbound_message_seq(),
+                    policy_auto_recall=False,
                 )
                 message_id_value = (
                     sent.get("id")
@@ -4035,207 +4089,85 @@ class QQGroupAdmin(Star):
         eligible_targets = [target for target in targets if target.get(kind)]
         if not eligible_targets:
             return True
-        success = True
-        card_image: bytes | None = None
-        focus_fallback_image: bytes | None = None
-        native_image: bytes | None = None
-        native_images: list[bytes] = []
-        native_url = ""
-        native_cover = False
-        native_preferred = False
-        gallery_mode = False
-        image_only = False
-        poster_caption = ""
-        caption_sent: set[tuple[int, str]] = set()
-        cover_values: list[str] = []
         if card_data:
-            raw_covers = card_data.get("covers") or card_data.get("images") or []
-            if isinstance(raw_covers, (list, tuple)):
-                for value in raw_covers:
-                    if isinstance(value, dict):
-                        value = (
-                            value.get("url")
-                            or value.get("src")
-                            or value.get("image")
-                        )
-                    value = str(value or "").strip()
-                    if value and value not in cover_values:
-                        cover_values.append(value)
-            first_cover = str(card_data.get("cover") or "").strip()
-            if first_cover:
-                cover_values = [
-                    first_cover,
-                    *(value for value in cover_values if value != first_cover),
-                ]
-            gallery_mode = self._bounded_int(
-                card_data.get("image_count") or len(cover_values),
-                len(cover_values),
-                0,
-                99,
-            ) > 1
-            image_only = str(card_data.get("image_only") or "").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-            native_cover = str(card_data.get("native_cover") or "").lower() in {
-                "1",
-                "true",
-                "yes",
-                "on",
-            }
-            native_cover = native_cover or image_only
-            native_preferred = str(
-                card_data.get("native_poster_preferred") or ""
-            ).lower() in {"1", "true", "yes", "on"}
-            if (image_only or native_cover) and cover_values:
-                native_urls = bilibili_media_url_candidates(cover_values[0])
-                # Keep the original feed URL here.  _send_group_card_url
-                # receives the full candidate list and tries the suffix-free
-                # source first, then the thumbnail if QQ cannot fetch it.
-                native_url = native_urls[0] if native_urls else ""
-            if native_cover:
-                poster_caption = self._bilibili_poster_caption(card_data)
             try:
-                # A poster-only dynamic already contains its complete copy.
-                # Sending a second, tall notification card makes QQ scale the
-                # poster down to the card height.  Send the bounded native
-                # poster first; cards remain the preferred layout when the
-                # dynamic has API text to show beside the cover.
-                if card_data and not image_only and not (
-                    native_preferred and native_cover
-                ):
-                    render_data = {
+                single_card = await self._render_bilibili_card(
+                    {
                         **card_data,
-                        "focus_cover": bool(native_cover)
-                        or card_data.get("focus_cover", False),
-                        "require_cover": bool(
-                            card_data.get("cover")
-                            and (native_cover or card_data.get("focus_cover"))
-                        ),
-                        "link": "",
-                        "link_label": "",
+                        "require_cover": bool(card_data.get("cover")),
                     }
-                    card_image = await self._render_bilibili_card(render_data)
-            except Exception as exc:  # noqa: BLE001 - renderer is optional
-                self.logger.debug("B 站统一卡片不可用，尝试原始海报：%s", exc)
-            if native_cover and card_image is None and cover_values:
-                # Keep gallery processing serial and bounded: one slow CDN or
-                # oversized image must not create an unbounded worker queue.
-                media_deadline = time.monotonic() + 20
-                for cover_value in cover_values[:3]:
-                    remaining = media_deadline - time.monotonic()
-                    if remaining <= 0.5:
-                        break
+                )
+            except Exception as exc:  # noqa: BLE001 - Markdown is the fallback
+                single_card = None
+                self.logger.debug("B 站合并卡片不可用，降级单条 Markdown：%s", exc)
+            success = True
+            for target in eligible_targets:
+                client = clients.get(str(target.get("platform_id") or ""))
+                if client is None:
+                    success = False
+                    continue
+                group_openid = str(target["group_openid"])
+                if single_card is None:
                     try:
-                        native_image = await asyncio.wait_for(
-                            asyncio.to_thread(
-                                download_bilibili_image,
-                                cover_value,
-                            ),
-                            timeout=min(8, remaining),
-                        )
-                    except Exception as exc:  # noqa: BLE001 - try next image
-                        self.logger.debug("B 站原图下载失败，跳过当前图片：%s", exc)
-                        continue
-                    if native_image is None:
-                        continue
-                    remaining = media_deadline - time.monotonic()
-                    if remaining <= 0.5:
-                        native_images.append(native_image)
-                        break
-                    if gallery_mode:
-                        parts = [native_image]
-                    else:
-                        try:
-                            parts = await asyncio.wait_for(
-                                asyncio.to_thread(split_bilibili_poster, native_image),
-                                timeout=min(8, remaining),
-                            )
-                        except Exception as exc:  # noqa: BLE001 - keep original poster
-                            parts = [native_image]
-                            self.logger.debug("B 站海报分段失败，保留整图：%s", exc)
-                    native_images.extend(parts)
-                    if len(native_images) >= 3:
-                        native_images = native_images[:3]
-                        break
-                if len(native_images) > 1:
-                    self.logger.debug(
-                        "B 站图文原图分段发送：parts=%s",
-                        len(native_images),
-                    )
-
-        async def send_poster_caption(client: Any, group_openid: str) -> None:
-            caption_key = (id(client), group_openid)
-            if not poster_caption or caption_key in caption_sent:
-                return
-            try:
-                await self._send_group_markdown(
-                    client,
-                    group_openid,
-                    poster_caption,
-                )
-            except Exception:
-                await self._send_group_text(
-                    client,
-                    group_openid,
-                    self._markdown_fallback_text(poster_caption),
-                )
-            caption_sent.add(caption_key)
-
-        async def send_native_poster(client: Any, group_openid: str) -> bool:
-            """Send the original poster when the composed card is unavailable."""
-
-            if not native_cover:
-                return False
-            if not image_only:
-                await send_poster_caption(client, group_openid)
-            poster_sent = False
-            if native_images:
-                sent_parts = 0
-                try:
-                    for poster in native_images:
-                        await self._send_group_card(
+                        await self._send_group_markdown(
                             client,
                             group_openid,
-                            poster,
-                            link=str((card_data or {}).get("link") or ""),
-                            link_label=str(
-                                (card_data or {}).get("link_label") or "查看原动态"
-                            ),
+                            text,
+                            policy_auto_recall=False,
                         )
-                        sent_parts += 1
-                    poster_sent = sent_parts == len(native_images)
-                except Exception as card_exc:  # noqa: BLE001 - try URL path
-                    if sent_parts:
-                        # Do not append a full fallback after a partial poster;
-                        # that would duplicate the first images.
-                        poster_sent = True
-                        self.logger.warning(
-                            "B 站海报分段发送不完整：sent=%s total=%s error=%s",
-                            sent_parts,
-                            len(native_images),
-                            card_exc,
-                        )
-                    else:
-                        self.logger.debug(
-                            "B 站原图媒体发送失败，尝试公开 URL：%s", card_exc
-                        )
-            if not poster_sent and native_url:
+                    except Exception as exc:  # noqa: BLE001 - QQ boundary
+                        try:
+                            await self._send_group_text(
+                                client,
+                                group_openid,
+                                self._markdown_fallback_text(text),
+                                policy_auto_recall=False,
+                            )
+                        except Exception as fallback_exc:  # noqa: BLE001 - QQ boundary
+                            success = False
+                            self.logger.warning(
+                                "发送 B 站单条推送失败：group=%s markdown=%s text=%s",
+                                target.get("group_openid"),
+                                exc,
+                                fallback_exc,
+                            )
+                    continue
                 try:
-                    await self._send_group_card_url(client, group_openid, native_url)
-                    poster_sent = True
-                except Exception as url_exc:  # noqa: BLE001 - local fallback
-                    self.logger.debug(
-                        "B 站公开 URL 图片发送失败，改用聚焦卡片：%s", url_exc
+                    await self._send_group_card(
+                        client,
+                        group_openid,
+                        single_card,
+                        link=str(card_data.get("link") or ""),
+                        link_label=str(card_data.get("link_label") or "查看原动态"),
+                        policy_auto_recall=False,
                     )
-            if not poster_sent:
-                return False
-            if image_only:
-                await send_poster_caption(client, group_openid)
-            return True
+                except Exception as exc:  # noqa: BLE001 - try one complete fallback
+                    try:
+                        await self._send_group_markdown(
+                            client,
+                            group_openid,
+                            text,
+                            policy_auto_recall=False,
+                        )
+                    except Exception:
+                        try:
+                            await self._send_group_text(
+                                client,
+                                group_openid,
+                                self._markdown_fallback_text(text),
+                                policy_auto_recall=False,
+                            )
+                        except Exception as fallback_exc:  # noqa: BLE001 - QQ boundary
+                            success = False
+                            self.logger.warning(
+                                "发送 B 站单条推送失败：group=%s card=%s fallback=%s",
+                                target.get("group_openid"),
+                                exc,
+                                fallback_exc,
+                            )
+            return success
 
+        success = True
         for target in eligible_targets:
             client = clients.get(str(target.get("platform_id") or ""))
             if client is None:
@@ -4243,145 +4175,29 @@ class QQGroupAdmin(Star):
                 continue
             group_openid = str(target["group_openid"])
             try:
-                if native_cover and card_image is None:
-                    if await send_native_poster(client, group_openid):
-                        continue
-                    try:
-                        if focus_fallback_image is None:
-                            focus_fallback_image = await self._render_bilibili_card(
-                                {
-                                    **(card_data or {}),
-                                    "focus_cover": True,
-                                    "require_cover": bool(
-                                        (card_data or {}).get("cover")
-                                    ),
-                                    "link": "",
-                                    "link_label": "",
-                                }
-                            )
-                        if not image_only:
-                            await send_poster_caption(client, group_openid)
-                        await self._send_group_card(
-                            client,
-                            group_openid,
-                            focus_fallback_image,
-                            link=str((card_data or {}).get("link") or ""),
-                            link_label=str(
-                                (card_data or {}).get("link_label") or "查看原动态"
-                            ),
-                        )
-                        await send_poster_caption(client, group_openid)
-                        continue
-                    except Exception as fallback_card_exc:  # noqa: BLE001
-                        self.logger.debug(
-                            "B 站聚焦卡片发送失败，降级 Markdown：%s",
-                            fallback_card_exc,
-                        )
-                media_image = card_image
-                if media_image:
-                    try:
-                        if native_cover and not image_only:
-                            await send_poster_caption(client, group_openid)
-                        await self._send_group_card(
-                            client,
-                            group_openid,
-                            media_image,
-                            link=str((card_data or {}).get("link") or ""),
-                            link_label=str(
-                                (card_data or {}).get("link_label") or "查看原动态"
-                            ),
-                        )
-                        if native_cover:
-                            await send_poster_caption(client, group_openid)
-                        else:
-                            await self._send_bilibili_link(
-                                client,
-                                group_openid,
-                                card_data or {},
-                            )
-                        continue
-                    except Exception as card_exc:  # noqa: BLE001 - optional card
-                        if native_cover and await send_native_poster(
-                            client, group_openid
-                        ):
-                            continue
-                        self.logger.debug(
-                            "B 站图片卡片发送失败，降级 Markdown：%s", card_exc
-                        )
-                await self._send_group_markdown(client, group_openid, text)
-                continue
+                await self._send_group_markdown(
+                    client,
+                    group_openid,
+                    text,
+                    policy_auto_recall=False,
+                )
             except Exception as exc:  # noqa: BLE001 - proactive QQ boundary
                 try:
                     await self._send_group_text(
                         client,
                         group_openid,
                         self._markdown_fallback_text(text),
+                        policy_auto_recall=False,
                     )
                 except Exception as fallback_exc:  # noqa: BLE001 - QQ boundary
                     success = False
                     self.logger.warning(
-                        "发送 B 站推送失败：group=%s markdown=%s text=%s",
+                        "发送 B 站单条推送失败：group=%s markdown=%s text=%s",
                         target.get("group_openid"),
                         exc,
                         fallback_exc,
                     )
         return success
-
-    def _bilibili_poster_caption(self, card_data: dict[str, Any]) -> str:
-        author = self._markdown_text(card_data.get("author") or "B站用户", 80)
-        kind = self._markdown_text(card_data.get("kind") or "图文", 24)
-        caption = f"**{author}**\n{kind}"
-        timestamp = str(card_data.get("timestamp") or "").strip()
-        if timestamp:
-            caption += " · " + self._markdown_text(timestamp, 32)
-        image_count = self._bounded_int(
-            card_data.get("image_count")
-            or len(card_data.get("covers") or card_data.get("images") or []),
-            0,
-            0,
-            99,
-        )
-        if image_count > 1:
-            caption += f" · {image_count} 张图片"
-            if image_count > 3:
-                caption += "（展示前 3 张）"
-        title = str(card_data.get("title") or "").strip()
-        summary = str(card_data.get("summary") or "").strip()
-        if title:
-            caption += "\n\n**" + self._markdown_text(title, 180) + "**"
-        if summary:
-            lines = [
-                self._markdown_text(line, 320)
-                for line in summary[:600].splitlines()
-                if line.strip()
-            ]
-            caption += "\n\n" + "\n".join(lines)
-        if not title and not summary:
-            caption += "\n\n图片动态：正文已包含在海报中。"
-        link = str(card_data.get("link") or "").strip()
-        if link:
-            label = self._markdown_text(card_data.get("link_label") or "查看原动态", 40)
-            caption += f"\n\n[{label} ↗]({link})"
-        return caption
-
-    async def _send_bilibili_link(
-        self,
-        client: Any,
-        group_openid: str,
-        card_data: dict[str, Any],
-    ) -> None:
-        link = str(card_data.get("link") or "").strip()
-        if not link:
-            return
-        label = str(card_data.get("link_label") or "查看原动态").strip()
-        try:
-            await self._send_group_markdown(
-                client,
-                group_openid,
-                f"[{label} ↗]({link})",
-            )
-        except Exception:
-            await self._send_group_text(client, group_openid, f"{label}：{link}")
 
     async def _render_bilibili_card(self, card_data: dict[str, Any]) -> bytes:
         try:
@@ -4392,9 +4208,8 @@ class QQGroupAdmin(Star):
             if image.startswith(b"\x89PNG") and len(image) <= 8 * 1024 * 1024:
                 return image
         except BilibiliCoverUnavailable:
-            # A poster-only notification must not be replaced by a successful
-            # looking card with an empty cover; let the native poster fallback
-            # in _push_bilibili_message handle it.
+            # Preserve the missing-cover signal so the caller can send one
+            # complete Markdown fallback instead of a blank card.
             raise
         except Exception as exc:  # noqa: BLE001 - HTML remains a compatibility fallback
             self.logger.debug("B 站本地图片卡片不可用，尝试 AstrBot T2I：%s", exc)
@@ -4448,9 +4263,10 @@ class QQGroupAdmin(Star):
         *,
         link: str = "",
         link_label: str = "查看原动态",
+        policy_auto_recall: bool = True,
     ) -> Any:
-        # QQ's msg_type=7 accepts media only; the named link is sent as a
-        # separate Markdown message by _push_bilibili_message.
+        # QQ accepts plain content together with msg_type=7 media.  Keeping the
+        # named link here makes the complete push a single group message.
         media = await QQGroupAPI(client).upload_group_image(
             group_openid,
             image,
@@ -4460,35 +4276,14 @@ class QQGroupAdmin(Star):
             "msg_type": 7,
             "media": {"file_info": str(media["file_info"])},
         }
-        return await client.api.post_group_message(
+        if link:
+            payload["content"] = f"{str(link_label or '查看原动态').strip()}：{link}"[:4000]
+        sent = await client.api.post_group_message(
             **payload,
         )
-
-    async def _send_group_card_url(
-        self,
-        client: Any,
-        group_openid: str,
-        url: str,
-    ) -> Any:
-        """Ask QQ to fetch and send a Bilibili poster without local re-rendering."""
-
-        candidates = bilibili_media_url_candidates(url)
-        if not candidates:
-            raise ValueError("B 站封面地址不在允许的媒体域名内")
-        last_error: Exception | None = None
-        # Prefer the suffix-free source poster; retry the CDN thumbnail only
-        # when QQ cannot fetch the original URL.
-        for candidate in reversed(candidates):
-            try:
-                return await QQGroupAPI(client).upload_group_file(
-                    group_openid,
-                    candidate,
-                    file_name="bilibili-poster.jpg",
-                    file_type=1,
-                )
-            except Exception as exc:  # noqa: BLE001 - try the next safe URL
-                last_error = exc
-        raise last_error or ValueError("B 站封面地址不可用")
+        if policy_auto_recall:
+            self._schedule_policy_recall(client, group_openid, sent)
+        return sent
 
     async def _poll_bilibili_live(
         self,
@@ -4666,8 +4461,6 @@ class QQGroupAdmin(Star):
                     height=item.get("cover_height"),
                 )
                 sections = ["# B站视频" if is_video else "# B站动态", meta]
-                if cover:
-                    sections.append(cover)
                 gallery = item.get("images")
                 gallery = gallery if isinstance(gallery, list) else []
                 covers = [
@@ -4679,19 +4472,31 @@ class QQGroupAdmin(Star):
                     covers.insert(0, item.get("cover"))
                 has_poster = bool(covers and kind in {"图文", "转发"})
                 image_only = bool(has_poster and not title and not summary)
-                # Portrait draw/forward posts remain readable when QQ receives
-                # the source poster directly; a tall composed card is scaled
-                # down by clients even when its title is useful.  Keep the
-                # metadata in the short caption sent after the poster.
-                native_cover = has_poster
-                native_poster_preferred = has_poster
-                focus_cover = False
                 if image_only:
                     sections.append("图片动态：正文已包含在海报中。")
                 if title:
                     sections.append(f"**{title}**")
                 if summary:
                     sections.append(summary)
+                markdown_images = [cover] if cover else []
+                seen_covers = {str(item.get("cover") or "")}
+                for image in gallery:
+                    if not isinstance(image, dict):
+                        continue
+                    image_url = str(image.get("url") or "")
+                    if not image_url or image_url in seen_covers:
+                        continue
+                    seen_covers.add(image_url)
+                    rendered_image = self._bilibili_markdown_image(
+                        image_url,
+                        width=image.get("width"),
+                        height=image.get("height"),
+                    )
+                    if rendered_image:
+                        markdown_images.append(rendered_image)
+                    if len(markdown_images) >= 3:
+                        break
+                sections.extend(markdown_images)
                 if not cover and not title and not summary:
                     sections.append(f"**发布了一条{kind}动态**")
                 link_label = "查看视频" if is_video else "查看原动态"
@@ -4726,11 +4531,6 @@ class QQGroupAdmin(Star):
                     # Some Bilibili draw posts have no API title/description:
                     # all copy is baked into the portrait poster itself.
                     "image_only": image_only,
-                    # The compact caption keeps title/summary readable beside
-                    # the native poster without making one very tall card.
-                    "native_cover": native_cover,
-                    "native_poster_preferred": native_poster_preferred,
-                    "focus_cover": focus_cover,
                     "avatar": item.get("avatar"),
                     "status": "",
                     "link": item.get("url"),
@@ -5873,6 +5673,7 @@ class QQGroupAdmin(Star):
                 group_openid,
                 reply,
                 message_id=message_id,
+                policy_auto_recall=False,
             )
         except Exception as exc:  # noqa: BLE001 - reply failures must not block chat
             self.logger.warning(
@@ -6823,6 +6624,7 @@ class QQGroupAdmin(Star):
             group_openid,
             text,
             keyboard={"content": {"rows": rows}},
+            policy_auto_recall=False,
         )
         sent_id = str(
             sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
@@ -7113,6 +6915,7 @@ class QQGroupAdmin(Star):
             group_openid,
             text,
             keyboard={"content": {"rows": rows}},
+            policy_auto_recall=False,
         )
         sent_id = str(
             sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
@@ -7175,10 +6978,7 @@ class QQGroupAdmin(Star):
         kind: str,
     ) -> None:
         await asyncio.sleep(delay)
-        try:
-            await QQGroupAPI(client).recall_group_message(group_openid, message_id)
-        except QQAPIError as exc:
-            self.logger.warning("自动撤回%s消息失败：%s", kind, exc)
+        await self._recall_messages(QQGroupAPI(client), group_openid, [message_id])
 
     @qq_admin_command("机器人状态")
     async def bot_state(self, event: AstrMessageEvent):
@@ -7280,17 +7080,15 @@ class QQGroupAdmin(Star):
         next_cursor = str(data.get("next_cursor") or "")
         if next_cursor:
             lines.append(f"\n下一页：/申请列表 {self._markdown_text(next_cursor)}")
-        kwargs = {
-            "group_openid": group_openid,
-            "msg_type": 2,
-            "markdown": {"content": "\n".join(lines)},
-            "keyboard": {"content": {"rows": rows}},
-        }
         message_id = str(getattr(event.message_obj, "message_id", "") or "")
-        if message_id:
-            kwargs["msg_id"] = message_id
         try:
-            await self._client(event).api.post_group_message(**kwargs)
+            await self._send_group_markdown(
+                self._client(event),
+                group_openid,
+                "\n".join(lines),
+                keyboard={"content": {"rows": rows}},
+                message_id=message_id,
+            )
         except Exception as exc:
             detail = self._plain_text(exc, 240)
             self.logger.warning("发送审批按钮失败：%s", exc)
@@ -8154,7 +7952,10 @@ class QQGroupAdmin(Star):
                     and raw.get(key) == legacy_values[key]
                 ):
                     continue
-                value = raw.get(key, GLOBAL_POLICY_DEFAULTS[key])
+                value = raw.get(
+                    key,
+                    existing_raw.get(key, GLOBAL_POLICY_DEFAULTS[key]),
+                )
                 profile[key] = list(value) if isinstance(value, list) else value
             profiles.append(profile)
         self.config[GLOBAL_POLICIES_KEY] = profiles

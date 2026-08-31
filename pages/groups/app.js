@@ -971,7 +971,7 @@
       : [];
     if (!runtimePolicies.length) {
       var legacyKeys = [
-        "settings_command_enabled", "settings_panel_auto_recall", "mute_success_message",
+        "settings_command_enabled", "settings_panel_auto_recall", "bot_message_recall_seconds", "mute_success_message",
         "global_reject_keywords", "global_message_reject_keywords", "global_message_reject_reply",
         "global_message_reject_at_member", "global_member_blacklist", "global_member_whitelist",
         "global_blacklist_reply", "global_blacklist_at_member", "global_ai_review_enabled",
@@ -1047,6 +1047,7 @@
     policy = policy || {};
     element("runtime-settings-command").checked = policy.settings_command_enabled !== false;
     element("runtime-panel-recall").checked = policy.settings_panel_auto_recall !== false;
+    element("runtime-bot-message-recall").value = Number(policy.bot_message_recall_seconds || 0);
     element("runtime-verification-recall").checked = policy.verification_message_recall_enabled !== false;
     element("runtime-verification-timeout").value = Number(policy.verification_message_timeout_seconds || 120);
     element("runtime-global-reject-keywords").value = policy.global_reject_keywords || "";
@@ -1195,6 +1196,7 @@
       group_openids: all ? [] : selectedGroups,
       settings_command_enabled: element("runtime-settings-command").checked,
       settings_panel_auto_recall: element("runtime-panel-recall").checked,
+      bot_message_recall_seconds: Number(element("runtime-bot-message-recall").value),
       verification_message_recall_enabled: element("runtime-verification-recall").checked,
       verification_message_timeout_seconds: Number(element("runtime-verification-timeout").value),
       mute_success_message: element("runtime-mute-message").value,

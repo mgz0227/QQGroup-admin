@@ -27,6 +27,7 @@ GLOBAL_POLICY_LIMIT = 50
 GLOBAL_POLICY_FIELDS = (
     "settings_command_enabled",
     "settings_panel_auto_recall",
+    "bot_message_recall_seconds",
     "verification_message_recall_enabled",
     "verification_message_timeout_seconds",
     "mute_success_message",
@@ -605,6 +606,14 @@ class GroupAdminWeb:
             "settings_panel_auto_recall": cls._bool(
                 payload, "settings_panel_auto_recall", True, "设置面板自动撤回"
             ),
+            "bot_message_recall_seconds": cls._int(
+                payload,
+                "bot_message_recall_seconds",
+                0,
+                0,
+                120,
+                "机器人主动消息自动撤回",
+            ),
             "settings_command_enabled": cls._bool(
                 payload, "settings_command_enabled", True, "审核设置命令"
             ),
@@ -995,6 +1004,7 @@ class GroupAdminWeb:
             "global_member_whitelist",
             "global_blacklist_reply",
             "global_blacklist_at_member",
+            "bot_message_recall_seconds",
             "verification_message_recall_enabled",
             "verification_message_timeout_seconds",
             "global_image_reject_reply",
