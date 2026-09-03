@@ -1468,9 +1468,9 @@ class QQGroupAdmin(Star):
         value = str(member_openid or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
             return ""
-        # Current QQ group clients still recognize this compatibility token;
-        # some clients render the documented qqbot-at-user tag literally.
-        return f"<@{value}>"
+        # This QQ client still renders both the current text-chain tag and the
+        # compact legacy form literally; the legacy bang form remains parsed.
+        return f"<@!{value}>"
 
     def _next_outbound_message_seq(self) -> int:
         self._outbound_message_seq += 1
@@ -1597,12 +1597,14 @@ class QQGroupAdmin(Star):
         if rendered == text and mention not in rendered:
             rendered = f"{mention} {text}".strip()
         rendered = self._fit_notice_text(rendered, mention)
-        # Use a plain group message so QQ can parse the compatibility mention.
+        # Keep moderation notices in the plain group content field.  Markdown
+        # is reserved for interactive panels; group clients may render its
+        # mention-like tags as literal text.
         try:
             return await self._send_group_text(
                 client,
                 group_openid,
-                rendered[:4000],
+                rendered,
                 message_id=message_id,
                 policy_auto_recall=policy_auto_recall,
             )
@@ -1635,8 +1637,9 @@ class QQGroupAdmin(Star):
         after = after[: max(0, available - len(before))]
         result = before + mention + after
         # Do not leave a second, partially copied mention at the boundary.
-        last_open = result.rfind("<@")
-        if last_open >= 0 and ">" not in result[last_open:]:
+        last_open = result.rfind("<")
+        tail = result[last_open:] if last_open >= 0 else ""
+        if tail != mention and mention.startswith(tail):
             result = result[:last_open].rstrip()
         return result
 

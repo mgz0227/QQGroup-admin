@@ -1411,11 +1411,32 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             client, "group-1", "sent-1", 30, "bot-message"
         )
 
-    def test_group_mention_uses_qq_client_compatible_token(self):
+    def test_group_mention_uses_qq_legacy_bang_compatibility_tag(self):
         plugin, _client = self.plugin()
 
-        self.assertEqual(plugin._mention("member-1"), "<@member-1>")
+        self.assertEqual(
+            plugin._mention("member-1"),
+            "<@!member-1>",
+        )
         self.assertEqual(plugin._mention("member>1"), "")
+
+    async def test_group_notice_uses_plain_content_for_mention(self):
+        plugin, client = self.plugin()
+
+        await plugin._send_group_notice(
+            client,
+            "group-1",
+            "已处理 {at_user}",
+            member_openid="member-1",
+        )
+
+        message = client.api.messages[-1]
+        self.assertEqual(message["msg_type"], 0)
+        self.assertEqual(
+            message["content"],
+            "已处理 <@!member-1>",
+        )
+        self.assertNotIn("markdown", message)
 
     async def test_group_text_can_skip_policy_auto_recall(self):
         plugin, client = self.plugin()
@@ -2276,6 +2297,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             "成员命中本群黑名单，消息已撤回。",
             client.api.messages[-1]["content"],
         )
+        self.assertIn(
+            "<@!member-2>",
+            client.api.messages[-1]["content"],
+        )
         api.recall_group_message.assert_awaited_once_with("group-1", "message-2")
 
     async def test_bot_message_is_not_moderated(self):
@@ -2626,7 +2651,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
             client.api.messages[-1]["content"],
-            "<@admin-1> 这条消息已撤回。",
+            "<@!admin-1> 这条消息已撤回。",
         )
 
     async def test_empty_recall_reply_can_disable_notice_when_mention_is_off(self):
@@ -2656,7 +2681,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
             client.api.messages[-1]["content"],
-            "<@admin-1>",
+            "<@!admin-1>",
         )
 
     async def test_global_image_keyword_has_separate_reply_and_mention_setting(self):
@@ -3766,13 +3791,13 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         mute = api.set_member_mutes.await_args.args[1][0]
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
+        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertEqual(
             client.api.messages[-1]["content"],
-            "已禁言 45 秒：<@member-1>",
+            "已禁言 45 秒：<@!member-1>",
         )
-        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
         self.assertIn(
-            "<@member-1>",
+            "<@!member-1>",
             client.api.messages[-1]["content"],
         )
 
@@ -3794,7 +3819,7 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(event.stopped)
         self.assertTrue(
             client.api.messages[-1]["content"].startswith(
-                "<@member-1> 已设置禁言，至 "
+                "<@!member-1> 已设置禁言，至 "
             )
         )
 
@@ -3813,8 +3838,12 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         calls = client.api.post_group_message.await_args_list
         self.assertEqual(calls[0].kwargs["msg_type"], 0)
+        self.assertEqual(
+            calls[0].kwargs["content"],
+            "<@!member-1> 图片文字命中禁止关键词，已撤回。",
+        )
         self.assertEqual(calls[1].kwargs["msg_type"], 0)
-        self.assertNotIn("qqbot-at-user", calls[1].kwargs["content"])
+        self.assertNotIn("<@", calls[1].kwargs["content"])
         self.assertEqual(calls[1].kwargs["content"], "图片文字命中禁止关键词，已撤回。")
 
     async def test_mute_template_keeps_at_tag_when_text_is_long(self):
@@ -3832,16 +3861,16 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result)
         content = client.api.messages[-1]["content"]
         self.assertLessEqual(len(content), 1000)
-        self.assertTrue(content.endswith("<@member-1>"))
+        self.assertTrue(content.endswith("<@!member-1>"))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
         content = client.api.messages[-1]["content"]
         self.assertLessEqual(len(content), 1000)
-        mention = "<@member-1>"
+        mention = "<@!member-1>"
         self.assertTrue(content.startswith(mention))
         self.assertTrue(content.endswith(">"))
-        self.assertNotRegex(content, r"<@[^>]*$")
+        self.assertNotRegex(content, r"<@!?[^>]*$")
 
     async def test_web_batch_save_and_sync(self):
         plugin, _client = self.plugin()
@@ -5187,6 +5216,39 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             script,
         )
 
+    def test_generic_config_schema_is_localized_and_hides_legacy_policy_fields(self):
+        schema = json.loads((ROOT / "_conf_schema.json").read_text(encoding="utf-8"))
+        html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
+
+        self.assertEqual(schema["welcome_rules"]["type"], "template_list")
+        self.assertTrue(schema["welcome_rules"]["invisible"])
+        self.assertFalse(schema["bot_message_recall_seconds"].get("invisible", False))
+        self.assertIn(">群策略设置</button>", html)
+        self.assertIn("机器人消息自动撤回", html)
+        for key in (
+            "global_image_spam_enabled",
+            "global_image_spam_count",
+            "global_image_spam_window_seconds",
+            "global_image_spam_group_min_members",
+            "global_image_spam_recall_count",
+            "global_image_spam_reply",
+            "global_image_spam_at_member",
+            "global_repeat_review_enabled",
+            "global_repeat_count",
+            "global_repeat_window_seconds",
+            "global_repeat_mute_min_seconds",
+            "global_repeat_mute_max_seconds",
+            "global_repeat_reply",
+            "global_repeat_at_member",
+            "global_rate_limit_enabled",
+            "global_rate_limit_count",
+            "global_rate_limit_window_seconds",
+            "global_rate_limit_recall_count",
+            "global_rate_limit_reply",
+            "global_rate_limit_at_member",
+        ):
+            self.assertTrue(schema[key]["invisible"], key)
+
     def test_runtime_page_keeps_ai_controls_in_independent_panel(self):
         html = (ROOT / "pages/groups/index.html").read_text(encoding="utf-8")
         script = (ROOT / "pages/groups/app.js").read_text(encoding="utf-8")
@@ -6023,9 +6085,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(client.api.messages), 1)
         message = client.api.messages[0]
         self.assertEqual(message["msg_type"], 0)
-        self.assertIn("欢迎 新人 加入 测试群", message["content"])
-        self.assertIn("UID=188144093", message["content"])
-        self.assertIn("<@member-1>", message["content"])
+        content = message["content"]
+        self.assertIn("欢迎 新人 加入 测试群", content)
+        self.assertIn("UID=188144093", content)
+        self.assertIn("<@!member-1>", content)
 
     def test_single_welcome_template_mapping_is_preserved(self):
         plugin, _client = self.plugin()

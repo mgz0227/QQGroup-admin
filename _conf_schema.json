@@ -1,4 +1,50 @@
 {
+  "welcome_rules": {
+    "type": "template_list",
+    "description": "入群欢迎规则",
+    "hint": "由插件页面的运行配置管理，可配置多条并按群生效。",
+    "default": [],
+    "invisible": true,
+    "templates": {
+      "welcome_rule": {
+        "name": "入群欢迎",
+        "display_item": "name",
+        "items": {
+          "name": {
+            "type": "string",
+            "description": "规则名称",
+            "default": "入群欢迎"
+          },
+          "message": {
+            "type": "text",
+            "description": "欢迎内容",
+            "default": "欢迎 {at_user} 加入 {group_name}"
+          },
+          "group_openids": {
+            "type": "list",
+            "description": "覆盖群 OpenID",
+            "default": []
+          },
+          "enabled": {
+            "type": "bool",
+            "description": "启用",
+            "default": true
+          },
+          "at_member": {
+            "type": "bool",
+            "description": "艾特新成员",
+            "default": true
+          },
+          "auto_recall_seconds": {
+            "type": "int",
+            "description": "自动撤回（秒）",
+            "default": 0,
+            "slider": {"min": 0, "max": 120, "step": 5}
+          }
+        }
+      }
+    }
+  },
   "global_policy_profiles": {
     "type": "template_list",
     "description": "群级全局策略档案",
@@ -358,10 +404,140 @@
   },
   "bot_message_recall_seconds": {
     "type": "int",
-    "description": "机器人主动消息自动撤回（秒）",
-    "hint": "0 表示关闭；由 WebUI 的群级全局策略按群配置，B 站推送始终保留。QQ 群消息需在发送后 120 秒内撤回。",
+    "description": "机器人自身消息自动撤回默认时间（秒）",
+    "hint": "未命中群级策略时使用；0 表示保留。按群自定义请打开“插件页面 -> QQ 群聊管理 -> 群策略设置 -> 机器人消息自动撤回”；B 站推送始终保留。",
     "default": 0,
-    "slider": {"min": 0, "max": 120, "step": 5},
+    "slider": {"min": 0, "max": 120, "step": 5}
+  },
+  "global_image_spam_enabled": {
+    "type": "bool",
+    "description": "连续发图检测（旧版兼容）",
+    "default": false,
+    "invisible": true
+  },
+  "global_image_spam_count": {
+    "type": "int",
+    "description": "连续发图触发数量（旧版兼容）",
+    "default": 5,
+    "slider": {"min": 2, "max": 20, "step": 1},
+    "invisible": true
+  },
+  "global_image_spam_window_seconds": {
+    "type": "int",
+    "description": "连续发图时间窗（旧版兼容）",
+    "default": 15,
+    "slider": {"min": 3, "max": 120, "step": 1},
+    "invisible": true
+  },
+  "global_image_spam_group_min_members": {
+    "type": "int",
+    "description": "跨成员发图触发人数（旧版兼容）",
+    "default": 2,
+    "slider": {"min": 2, "max": 10, "step": 1},
+    "invisible": true
+  },
+  "global_image_spam_recall_count": {
+    "type": "int",
+    "description": "连续发图撤回数量（旧版兼容）",
+    "default": 5,
+    "slider": {"min": 1, "max": 50, "step": 1},
+    "invisible": true
+  },
+  "global_image_spam_reply": {
+    "type": "string",
+    "description": "连续发图撤回回复（旧版兼容）",
+    "default": "检测到连续发送图片或表情，相关消息已撤回。",
+    "invisible": true
+  },
+  "global_image_spam_at_member": {
+    "type": "bool",
+    "description": "连续发图撤回时艾特（旧版兼容）",
+    "default": true,
+    "invisible": true
+  },
+  "global_repeat_review_enabled": {
+    "type": "bool",
+    "description": "复读随机禁言（旧版兼容）",
+    "default": false,
+    "invisible": true
+  },
+  "global_repeat_count": {
+    "type": "int",
+    "description": "复读触发次数（旧版兼容）",
+    "default": 4,
+    "slider": {"min": 3, "max": 20, "step": 1},
+    "invisible": true
+  },
+  "global_repeat_window_seconds": {
+    "type": "int",
+    "description": "复读时间窗（旧版兼容）",
+    "default": 30,
+    "slider": {"min": 5, "max": 120, "step": 1},
+    "invisible": true
+  },
+  "global_repeat_mute_min_seconds": {
+    "type": "int",
+    "description": "复读随机禁言最短时间（旧版兼容）",
+    "default": 60,
+    "slider": {"min": 1, "max": 2592000, "step": 1},
+    "invisible": true
+  },
+  "global_repeat_mute_max_seconds": {
+    "type": "int",
+    "description": "复读随机禁言最长时间（旧版兼容）",
+    "default": 600,
+    "slider": {"min": 1, "max": 2592000, "step": 1},
+    "invisible": true
+  },
+  "global_repeat_reply": {
+    "type": "string",
+    "description": "复读处置回复（旧版兼容）",
+    "default": "检测到集中复读，已随机禁言一名参与者。",
+    "invisible": true
+  },
+  "global_repeat_at_member": {
+    "type": "bool",
+    "description": "复读处置时艾特（旧版兼容）",
+    "default": true,
+    "invisible": true
+  },
+  "global_rate_limit_enabled": {
+    "type": "bool",
+    "description": "消息频率限制（旧版兼容）",
+    "default": false,
+    "invisible": true
+  },
+  "global_rate_limit_count": {
+    "type": "int",
+    "description": "频率限制触发条数（旧版兼容）",
+    "default": 8,
+    "slider": {"min": 2, "max": 100, "step": 1},
+    "invisible": true
+  },
+  "global_rate_limit_window_seconds": {
+    "type": "int",
+    "description": "频率限制时间窗（旧版兼容）",
+    "default": 10,
+    "slider": {"min": 3, "max": 120, "step": 1},
+    "invisible": true
+  },
+  "global_rate_limit_recall_count": {
+    "type": "int",
+    "description": "频率限制撤回数量（旧版兼容）",
+    "default": 5,
+    "slider": {"min": 1, "max": 50, "step": 1},
+    "invisible": true
+  },
+  "global_rate_limit_reply": {
+    "type": "string",
+    "description": "频率限制撤回回复（旧版兼容）",
+    "default": "消息发送过于频繁，相关消息已撤回。",
+    "invisible": true
+  },
+  "global_rate_limit_at_member": {
+    "type": "bool",
+    "description": "频率限制撤回时艾特（旧版兼容）",
+    "default": true,
     "invisible": true
   },
   "settings_command_enabled": {

@@ -21,7 +21,7 @@
       <nav class="view-tabs" role="tablist" aria-label="管理视图">
         <button class="view-tab active" id="groups-tab" type="button" role="tab" aria-selected="true" aria-controls="groups-view">群管理</button>
         <button class="view-tab" id="global-keywords-tab" type="button" role="tab" aria-selected="false" aria-controls="global-keywords-view">全局规则</button>
-        <button class="view-tab" id="runtime-tab" type="button" role="tab" aria-selected="false" aria-controls="runtime-view">运行配置</button>
+        <button class="view-tab" id="runtime-tab" type="button" role="tab" aria-selected="false" aria-controls="runtime-view">群策略设置</button>
         <button class="view-tab" id="identities-tab" type="button" role="tab" aria-selected="false" aria-controls="identities-view">身份验证</button>
       </nav>
 
@@ -144,7 +144,7 @@
           <div class="list-header global-keyword-header">
             <div>
               <h2>全局关键词回复</h2>
-              <p>单群规则优先，全局规则按列表顺序匹配；冷却和自动撤回时间请在“运行配置”的群级策略中设置。</p>
+              <p>单群规则优先，全局规则按列表顺序匹配；冷却和自动撤回时间请在“群策略设置”中配置。</p>
             </div>
             <div class="header-actions">
               <button class="button secondary" id="add-global-keyword-reply" type="button">添加回复</button>
@@ -160,7 +160,7 @@
       <section class="runtime-view" id="runtime-view" role="tabpanel" aria-labelledby="runtime-tab" hidden>
         <form id="runtime-form">
           <div class="list-header runtime-header">
-            <h2>全局运行配置</h2>
+            <h2>群策略与运行设置</h2>
             <button class="button" id="save-runtime" type="submit">保存</button>
           </div>
           <fieldset class="global-ai-panel">
@@ -205,7 +205,8 @@
             <label><span>审核轮询间隔（秒）</span><input id="runtime-review-interval" type="number" min="15" max="600" required></label>
             <label class="checkbox runtime-toggle"><input id="runtime-settings-command" type="checkbox"><span>启用群内审核设置命令</span></label>
             <label class="checkbox runtime-toggle"><input id="runtime-panel-recall" type="checkbox"><span>审核设置面板自动撤回</span></label>
-            <label><span>机器人主动消息自动撤回（秒）</span><input id="runtime-bot-message-recall" type="number" min="0" max="120" required><small>按当前策略覆盖群生效；0 表示保留。B 站推送始终保留，欢迎、关键词、验证题卡和设置面板仍使用各自的撤回设置。</small></label>
+            <div class="section-title wide">机器人消息自动撤回</div>
+            <label><span>机器人自身消息自动撤回时间（秒）</span><input id="runtime-bot-message-recall" type="number" min="0" max="120" required><small>可为当前策略覆盖的群单独设置；0 表示保留。B 站推送始终保留，欢迎、关键词、验证题卡和设置面板仍使用各自的撤回设置。</small></label>
             <div class="section-title wide">真人验证消息</div>
             <label class="checkbox runtime-toggle"><input id="runtime-verification-recall" type="checkbox"><span>验证完成或超时后撤回验证消息</span></label>
             <label><span>验证超时（秒）</span><input id="runtime-verification-timeout" type="number" min="15" max="600" required><small>超时后下次发言会重新出题；按当前策略覆盖群生效。</small></label>
@@ -393,7 +394,7 @@
             <p>仅在当前群生效，按列表顺序匹配。</p>
             <div class="keyword-reply-list" id="keyword-replies"></div>
           </div>
-          <p class="wide config-note">AI 内容审核和连续发图/复读处置均由“运行配置”的群级策略控制；本群页面只保留基础消息审核开关和本群规则。</p>
+          <p class="wide config-note">AI 内容审核和连续发图/复读处置均由“群策略设置”控制；本群页面只保留基础消息审核开关和本群规则。</p>
           <div class="section-title wide">B站推送</div>
           <label class="wide"><span>UP 主 UID</span><textarea id="bilibili-uids" rows="3" placeholder="每行一个 UID"></textarea></label>
           <label class="checkbox"><input id="bilibili-dynamic-enabled" type="checkbox"><span>推送动态</span></label>
