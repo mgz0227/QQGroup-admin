@@ -84,6 +84,7 @@ VERIFICATION_TOKEN_TTL = 5 * 60
 MESSAGE_SEQ_MAX = 2_000_000_000
 JOIN_LIST_LIMIT = 5
 RECENT_RECALL_LIMIT = 50
+QQ_RECALL_SAFE_DELAY_SECONDS = 115
 WELCOME_PENDING_TTL = 24 * 60 * 60
 WELCOME_PENDING_LIMIT = 2_000
 COMMAND_PANEL_REMARK = "astrbot_plugin_qqgroup_admin managed"
@@ -5432,11 +5433,12 @@ class QQGroupAdmin(Star):
             system_prompt: str,
             call_timeout: float,
             allow_text_only_retry: bool = True,
+            use_images: bool = True,
         ) -> Any:
             """Call one provider, retrying text-only when its vision input fails."""
 
             call_deadline = time.monotonic() + max(0.001, call_timeout)
-            current_images = vision_urls or None
+            current_images = (vision_urls or None) if use_images else None
             retried_text_only = False
             while True:
                 remaining_call = call_deadline - time.monotonic()
@@ -5504,6 +5506,24 @@ class QQGroupAdmin(Star):
                         continue
                     raise
 
+        def plan_candidates(
+            provider_ids: list[str],
+        ) -> tuple[list[tuple[str, bool]], list[str]]:
+            if not vision_urls:
+                return [(value, False) for value in provider_ids], []
+            visual = []
+            text_only = []
+            skipped = []
+            for value in provider_ids:
+                if self._provider_supports_image_input(value) is False:
+                    if review_text:
+                        text_only.append((value, False))
+                    else:
+                        skipped.append(value)
+                else:
+                    visual.append((value, True))
+            return visual + text_only, skipped
+
         providers = []
         if provider_id:
             providers.append(provider_id)
@@ -5518,22 +5538,17 @@ class QQGroupAdmin(Star):
                 self.logger.debug("读取当前 AI 审核模型失败：%s", exc)
         providers.extend(normalize_provider_ids(fallback_provider_ids))
         errors = []
-        candidates = list(
+        candidate_ids = list(
             dict.fromkeys(str(value or "").strip() for value in providers if value)
         )
-        for index, current_provider_id in enumerate(candidates):
-            if not current_provider_id:
-                continue
-            if (
-                vision_urls
-                and self._provider_supports_image_input(current_provider_id) is False
-            ):
-                errors.append(f"{current_provider_id}: 不支持图片输入")
-                self.logger.debug(
-                    "跳过不支持图片输入的 AI 审核模型：provider=%s",
-                    current_provider_id,
-                )
-                continue
+        candidates, skipped_candidates = plan_candidates(candidate_ids)
+        for skipped_provider in skipped_candidates:
+            errors.append(f"{skipped_provider}: 不支持图片输入")
+            self.logger.debug(
+                "跳过不支持图片输入的 AI 审核模型：provider=%s",
+                skipped_provider,
+            )
+        for index, (current_provider_id, use_images) in enumerate(candidates):
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 errors.append("达到 AI 审核总超时")
@@ -5558,6 +5573,7 @@ class QQGroupAdmin(Star):
                     # an image-capable fallback would never get a chance to
                     # review the attachment.
                     index == len(candidates) - 1,
+                    use_images,
                 )
                 raw_decision = str(
                     self._ai_response_field(response, "completion_text") or ""
@@ -5617,19 +5633,19 @@ class QQGroupAdmin(Star):
                         self._ai_warning_at = time.monotonic() + 300
                     return True
                 confirm_errors: list[tuple[str, str]] = []
-                for confirm_index, confirm_provider in enumerate(confirm_candidates):
-                    if confirm_provider in candidates:
+                confirm_candidates, skipped_confirm_candidates = plan_candidates(
+                    confirm_candidates
+                )
+                confirm_errors.extend(
+                    (provider, "确认模型不支持图片输入")
+                    for provider in skipped_confirm_candidates
+                )
+                for confirm_index, (confirm_provider, use_images) in enumerate(
+                    confirm_candidates
+                ):
+                    if confirm_provider in candidate_ids:
                         confirm_errors.append(
                             (confirm_provider, "确认模型与初判候选模型重复")
-                        )
-                        continue
-                    if (
-                        vision_urls
-                        and self._provider_supports_image_input(confirm_provider)
-                        is False
-                    ):
-                        confirm_errors.append(
-                            (confirm_provider, "确认模型不支持图片输入")
                         )
                         continue
                     confirm_remaining = deadline - time.monotonic()
@@ -5652,6 +5668,7 @@ class QQGroupAdmin(Star):
                             ),
                             min(confirm_timeout, confirm_remaining),
                             confirm_index == len(confirm_candidates) - 1,
+                            use_images,
                         )
                         raw_confirm = str(
                             self._ai_response_field(
@@ -7246,7 +7263,7 @@ class QQGroupAdmin(Star):
         delay: int,
         kind: str,
     ) -> None:
-        await asyncio.sleep(delay)
+        await asyncio.sleep(min(delay, QQ_RECALL_SAFE_DELAY_SECONDS))
         await self._recall_messages(QQGroupAPI(client), group_openid, [message_id])
 
     @qq_admin_command("机器人状态")

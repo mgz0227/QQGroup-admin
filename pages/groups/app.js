@@ -278,27 +278,66 @@
     var pager = element(id);
     pager.replaceChildren();
     if (!total) return;
-    var label = document.createElement("span");
-    label.textContent = "第 " + identityPages[kind] + " / " + totalPages + " 页，共 " + total + " 条";
+    function pageButton(label, symbol, target) {
+      var button = document.createElement("button");
+      button.type = "button";
+      button.className = "button secondary pager-button";
+      button.textContent = symbol;
+      button.title = label;
+      button.setAttribute("aria-label", label);
+      button.disabled = target === identityPages[kind];
+      button.addEventListener("click", function () {
+        identityPages[kind] = target;
+        loadIdentityKind(kind);
+      });
+      return button;
+    }
+    var first = pageButton("首页", "\u00ab", 1);
     var previous = document.createElement("button");
     previous.type = "button";
-    previous.className = "button secondary small-button";
-    previous.textContent = "上一页";
+    previous.className = "button secondary pager-button";
+    previous.textContent = "\u2039";
+    previous.title = "上一页";
+    previous.setAttribute("aria-label", "上一页");
     previous.disabled = identityPages[kind] <= 1;
     previous.addEventListener("click", function () {
       identityPages[kind] -= 1;
       loadIdentityKind(kind);
     });
+    var position = document.createElement("form");
+    position.className = "pager-position";
+    position.noValidate = true;
+    var pageInput = document.createElement("input");
+    pageInput.type = "number";
+    pageInput.min = "1";
+    pageInput.max = String(totalPages);
+    pageInput.value = String(identityPages[kind]);
+    pageInput.inputMode = "numeric";
+    pageInput.setAttribute("aria-label", "跳转页码");
+    position.append("第 ", pageInput, " / " + totalPages + " 页，共 " + total + " 条");
+    position.addEventListener("submit", function (event) {
+      event.preventDefault();
+      var target = Math.trunc(Number(pageInput.value));
+      if (!Number.isFinite(target)) target = identityPages[kind];
+      target = Math.max(1, Math.min(totalPages, target));
+      pageInput.value = String(target);
+      if (target === identityPages[kind]) return;
+      identityPages[kind] = target;
+      loadIdentityKind(kind);
+    });
     var next = document.createElement("button");
     next.type = "button";
-    next.className = "button secondary small-button";
-    next.textContent = "下一页";
+    next.className = "button secondary pager-button";
+    next.textContent = "\u203a";
+    next.title = "下一页";
+    next.setAttribute("aria-label", "下一页");
     next.disabled = identityPages[kind] >= totalPages;
     next.addEventListener("click", function () {
       identityPages[kind] += 1;
       loadIdentityKind(kind);
     });
-    pager.append(label, previous, next);
+    var last = pageButton("末页", "\u00bb", totalPages);
+    pager.append(first, previous, position, next, last);
   }
 
   function recordField(parent, label, value, code) {

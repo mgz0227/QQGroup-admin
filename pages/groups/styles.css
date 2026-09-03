@@ -68,6 +68,9 @@ code { font-family: ui-monospace, SFMono-Regular, Consolas, monospace; letter-sp
 .identity-field > span:not(.identity-field-label), .identity-field > code { display: block; overflow-wrap: anywhere; color: #18212f; font-size: 13px; line-height: 1.5; white-space: pre-wrap; }
 .identity-card-actions { grid-column: 1 / -1; justify-content: flex-end; }
 .pager { display: flex; align-items: center; justify-content: flex-end; gap: 8px; min-height: 56px; padding: 0 24px 16px; color: #697386; font-size: 13px; }
+.pager-button { width: 36px; min-width: 36px; height: 36px; padding: 0; font-size: 20px; line-height: 1; }
+.pager-position { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+.pager-position input { width: 64px; min-height: 36px; padding: 6px 8px; text-align: center; }
 .list-header { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 18px 20px; border-bottom: 1px solid #e5e9ee; }
 .batch-toolbar { display: flex; align-items: center; justify-content: space-between; gap: 16px; padding: 12px 20px; border-bottom: 1px solid #e5e9ee; background: #f7f9fb; color: #475467; font-size: 14px; }
 .batch-toolbar strong { color: #101828; }
@@ -249,7 +252,9 @@ dialog::backdrop { background: rgba(21, 29, 40, .48); }
   .identity-card summary { align-items: flex-start; flex-wrap: wrap; }
   .identity-card-meta { flex-basis: calc(100% - 30px); margin-left: 30px; white-space: normal; }
   .identity-card-body { grid-template-columns: 1fr; padding: 14px; }
-  .pager { flex-wrap: wrap; justify-content: center; padding: 0 16px 14px; }
+  .pager { flex-wrap: wrap; justify-content: center; gap: 6px; padding: 0 16px 14px; }
+  .pager-position { gap: 3px; font-size: 12px; }
+  .pager-position input { width: 52px; }
   .bilibili-login { grid-template-columns: 1fr; }
   .bilibili-login .button { width: 100%; }
   .bilibili-qr { grid-column: auto; }

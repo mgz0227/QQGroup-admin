@@ -1430,6 +1430,19 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             client, "group-1", "sent-1", 30, "bot-message"
         )
 
+    async def test_auto_recall_reserves_qq_api_deadline(self):
+        plugin, client = self.plugin()
+        with (
+            patch.object(module.asyncio, "sleep", AsyncMock()) as sleep,
+            patch.object(plugin, "_recall_messages", AsyncMock()) as recall,
+        ):
+            await plugin._recall_message(
+                client, "group-1", "sent-1", 120, "bot-message"
+            )
+
+        sleep.assert_awaited_once_with(115)
+        recall.assert_awaited_once()
+
     def test_group_mention_uses_qq_markdown_compatibility_tag(self):
         plugin, _client = self.plugin()
 
@@ -4371,6 +4384,52 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             ["vision-ref"],
         )
 
+    async def test_ai_image_review_falls_back_to_text_after_visual_chain_fails(self):
+        plugin, client = self.plugin()
+        text_only = SimpleNamespace(
+            provider_config={"modalities": "text"},
+        )
+        visual = SimpleNamespace(
+            provider_config={"modalities": "text image"},
+        )
+        plugin.context.get_provider_by_id = lambda provider_id: {
+            "text-primary": text_only,
+            "visual-fallback": visual,
+            "text-fallback": text_only,
+        }.get(provider_id)
+        calls = []
+
+        async def provider_call(**kwargs):
+            calls.append((kwargs["chat_provider_id"], kwargs["image_urls"]))
+            if kwargs["chat_provider_id"] == "visual-fallback":
+                raise RuntimeError("image transport failed")
+            return SimpleNamespace(
+                role="assistant",
+                completion_text="BLOCK confidence=99 reason=文字违规",
+            )
+
+        plugin.context.llm_generate = provider_call
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "违规文字"),
+                "违规文字",
+                ["https://example.test/image.png"],
+                "text-primary",
+                ["visual-fallback", "text-fallback"],
+                image_review_enabled=True,
+            )
+
+        self.assertTrue(blocked)
+        self.assertEqual(
+            calls,
+            [
+                ("visual-fallback", ["vision-ref"]),
+                ("text-primary", None),
+            ],
+        )
+
     async def test_ai_image_review_keeps_unknown_provider_compatible(self):
         plugin, client = self.plugin()
         plugin.context.get_provider_by_id = lambda _provider_id: None
@@ -4770,6 +4829,56 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(
             [call.kwargs["image_urls"] for call in calls],
             [["vision-ref"], ["vision-ref"], ["vision-ref"]],
+        )
+
+    async def test_ai_confirmation_falls_back_to_text_after_visual_chain_fails(self):
+        plugin, client = self.plugin()
+        text_only = SimpleNamespace(provider_config={"modalities": "text"})
+        visual = SimpleNamespace(provider_config={"modalities": "text image"})
+        plugin.context.get_provider_by_id = lambda provider_id: {
+            "primary": visual,
+            "confirm-text": text_only,
+            "confirm-visual": visual,
+        }.get(provider_id)
+        calls = []
+
+        async def provider_call(**kwargs):
+            provider_id = kwargs["chat_provider_id"]
+            calls.append((provider_id, kwargs["image_urls"]))
+            if provider_id == "primary":
+                return SimpleNamespace(
+                    role="assistant",
+                    completion_text="BLOCK confidence=99 reason=疑似违规",
+                )
+            if provider_id == "confirm-visual":
+                raise RuntimeError("image transport failed")
+            return SimpleNamespace(
+                role="assistant",
+                completion_text="ALLOW confidence=99 reason=文字正常",
+            )
+
+        plugin.context.llm_generate = provider_call
+        with patch.object(
+            plugin, "_bounded_media_thread", AsyncMock(return_value="vision-ref")
+        ):
+            blocked = await plugin._ai_blocks_message(
+                FakeEvent(client, "图片说明"),
+                "图片说明",
+                ["https://example.test/image.png"],
+                "primary",
+                image_review_enabled=True,
+                confirm_provider_id="confirm-text",
+                confirm_fallback_provider_ids=["confirm-visual"],
+            )
+
+        self.assertFalse(blocked)
+        self.assertEqual(
+            calls,
+            [
+                ("primary", ["vision-ref"]),
+                ("confirm-visual", ["vision-ref"]),
+                ("confirm-text", None),
+            ],
         )
 
     async def test_ai_confirmation_timeout_keeps_budget_for_ordered_fallback(self):
