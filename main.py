@@ -1468,9 +1468,8 @@ class QQGroupAdmin(Star):
         value = str(member_openid or "").strip()
         if not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
             return ""
-        # This QQ client still renders both the current text-chain tag and the
-        # compact legacy form literally; the legacy bang form remains parsed.
-        return f"<@!{value}>"
+        # QQ group mentions are parsed from Markdown content by current clients.
+        return f"<@{value}>"
 
     def _next_outbound_message_seq(self) -> int:
         self._outbound_message_seq += 1
@@ -1555,6 +1554,40 @@ class QQGroupAdmin(Star):
                 "bot-message",
             )
 
+    @filter.on_decorating_result()
+    async def track_core_group_reply_recall(self, event: AstrMessageEvent) -> None:
+        """Capture IDs from AstrBot's QQ sender so core replies can be recalled."""
+
+        platform_name = str(event.get_platform_name() or "").strip().lower()
+        raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
+        group_openid = str(getattr(raw, "group_openid", "") or "")
+        policy = self._global_policy_for_group(group_openid)
+        delay = self._bounded_int(
+            self._policy_value(policy, "bot_message_recall_seconds"),
+            0,
+            0,
+            120,
+        )
+        post_send_one = getattr(event, "_post_send_one", None)
+        if (
+            platform_name not in QQ_PLATFORM_NAMES
+            or not group_openid
+            or not delay
+            or not callable(post_send_one)
+            or getattr(event, "_qqgroup_admin_recall_wrapped", False)
+        ):
+            return
+
+        client = self._client(event)
+
+        async def send_and_schedule(*args: Any, **kwargs: Any) -> Any:
+            sent = await post_send_one(*args, **kwargs)
+            self._schedule_policy_recall(client, group_openid, sent)
+            return sent
+
+        event._post_send_one = send_and_schedule
+        event._qqgroup_admin_recall_wrapped = True
+
     async def _send_group_notice(
         self,
         client: Any,
@@ -1597,11 +1630,8 @@ class QQGroupAdmin(Star):
         if rendered == text and mention not in rendered:
             rendered = f"{mention} {text}".strip()
         rendered = self._fit_notice_text(rendered, mention)
-        # Keep moderation notices in the plain group content field.  Markdown
-        # is reserved for interactive panels; group clients may render its
-        # mention-like tags as literal text.
         try:
-            return await self._send_group_text(
+            return await self._send_group_markdown(
                 client,
                 group_openid,
                 rendered,

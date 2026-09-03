@@ -63,6 +63,7 @@ astrbot_event.filter = SimpleNamespace(
     event_message_type=identity_decorator,
     permission_type=identity_decorator,
     on_platform_loaded=identity_decorator,
+    on_decorating_result=identity_decorator,
     regex=identity_decorator,
     custom_filter=identity_decorator,
     CustomFilter=TestCustomFilter,
@@ -132,6 +133,9 @@ class FakeEvent:
 
     def get_platform_id(self):
         return "platform-1"
+
+    def get_platform_name(self):
+        return "qq_official"
 
     def plain_result(self, text):
         return text
@@ -1411,16 +1415,16 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
             client, "group-1", "sent-1", 30, "bot-message"
         )
 
-    def test_group_mention_uses_qq_legacy_bang_compatibility_tag(self):
+    def test_group_mention_uses_qq_markdown_compatibility_tag(self):
         plugin, _client = self.plugin()
 
         self.assertEqual(
             plugin._mention("member-1"),
-            "<@!member-1>",
+            "<@member-1>",
         )
         self.assertEqual(plugin._mention("member>1"), "")
 
-    async def test_group_notice_uses_plain_content_for_mention(self):
+    async def test_group_notice_uses_markdown_for_mention(self):
         plugin, client = self.plugin()
 
         await plugin._send_group_notice(
@@ -1431,12 +1435,37 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         message = client.api.messages[-1]
-        self.assertEqual(message["msg_type"], 0)
+        self.assertEqual(message["msg_type"], 2)
         self.assertEqual(
-            message["content"],
-            "已处理 <@!member-1>",
+            message["markdown"]["content"],
+            "已处理 <@member-1>",
         )
-        self.assertNotIn("markdown", message)
+        self.assertNotIn("content", message)
+
+    async def test_core_group_reply_uses_scoped_auto_recall(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 90,
+            }
+        ]
+        event = FakeEvent(client)
+
+        async def post_send_one(*_args, **_kwargs):
+            return SimpleNamespace(id="core-sent-1")
+
+        event._post_send_one = post_send_one
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            await plugin.track_core_group_reply_recall(event)
+            await event._post_send_one("message-chain")
+
+        schedule_recall.assert_called_once_with(
+            client, "group-1", "core-sent-1", 90, "bot-message"
+        )
 
     async def test_group_text_can_skip_policy_auto_recall(self):
         plugin, client = self.plugin()
@@ -2295,11 +2324,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(blocked.stopped)
         self.assertIn(
             "成员命中本群黑名单，消息已撤回。",
-            client.api.messages[-1]["content"],
+            client.api.messages[-1]["markdown"]["content"],
         )
         self.assertIn(
-            "<@!member-2>",
-            client.api.messages[-1]["content"],
+            "<@member-2>",
+            client.api.messages[-1]["markdown"]["content"],
         )
         api.recall_group_message.assert_awaited_once_with("group-1", "message-2")
 
@@ -2648,10 +2677,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         await plugin.audit_group_message(event)
 
-        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
-            client.api.messages[-1]["content"],
-            "<@!admin-1> 这条消息已撤回。",
+            client.api.messages[-1]["markdown"]["content"],
+            "<@admin-1> 这条消息已撤回。",
         )
 
     async def test_empty_recall_reply_can_disable_notice_when_mention_is_off(self):
@@ -2678,10 +2707,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         await plugin.audit_group_message(event)
 
-        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
-            client.api.messages[-1]["content"],
-            "<@!admin-1>",
+            client.api.messages[-1]["markdown"]["content"],
+            "<@admin-1>",
         )
 
     async def test_global_image_keyword_has_separate_reply_and_mention_setting(self):
@@ -3791,14 +3820,14 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         mute = api.set_member_mutes.await_args.args[1][0]
         self.assertEqual(mute["op"], "add")
         self.assertEqual(mute["member_openid"], "member-1")
-        self.assertEqual(client.api.messages[-1]["msg_type"], 0)
+        self.assertEqual(client.api.messages[-1]["msg_type"], 2)
         self.assertEqual(
-            client.api.messages[-1]["content"],
-            "已禁言 45 秒：<@!member-1>",
+            client.api.messages[-1]["markdown"]["content"],
+            "已禁言 45 秒：<@member-1>",
         )
         self.assertIn(
-            "<@!member-1>",
-            client.api.messages[-1]["content"],
+            "<@member-1>",
+            client.api.messages[-1]["markdown"]["content"],
         )
 
     async def test_standard_mute_stops_after_direct_mention_reply(self):
@@ -3818,8 +3847,8 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(results, [])
         self.assertTrue(event.stopped)
         self.assertTrue(
-            client.api.messages[-1]["content"].startswith(
-                "<@!member-1> 已设置禁言，至 "
+            client.api.messages[-1]["markdown"]["content"].startswith(
+                "<@member-1> 已设置禁言，至 "
             )
         )
 
@@ -3837,10 +3866,10 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         calls = client.api.post_group_message.await_args_list
-        self.assertEqual(calls[0].kwargs["msg_type"], 0)
+        self.assertEqual(calls[0].kwargs["msg_type"], 2)
         self.assertEqual(
-            calls[0].kwargs["content"],
-            "<@!member-1> 图片文字命中禁止关键词，已撤回。",
+            calls[0].kwargs["markdown"]["content"],
+            "<@member-1> 图片文字命中禁止关键词，已撤回。",
         )
         self.assertEqual(calls[1].kwargs["msg_type"], 0)
         self.assertNotIn("<@", calls[1].kwargs["content"])
@@ -3859,15 +3888,15 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIsNone(result)
-        content = client.api.messages[-1]["content"]
+        content = client.api.messages[-1]["markdown"]["content"]
         self.assertLessEqual(len(content), 1000)
-        self.assertTrue(content.endswith("<@!member-1>"))
+        self.assertTrue(content.endswith("<@member-1>"))
 
         plugin.config["mute_success_message"] = "{at_user}" * 40
         await plugin._send_mute_success(event, "member-1", "45", "ignored")
-        content = client.api.messages[-1]["content"]
+        content = client.api.messages[-1]["markdown"]["content"]
         self.assertLessEqual(len(content), 1000)
-        mention = "<@!member-1>"
+        mention = "<@member-1>"
         self.assertTrue(content.startswith(mention))
         self.assertTrue(content.endswith(">"))
         self.assertNotRegex(content, r"<@!?[^>]*$")
@@ -6084,11 +6113,11 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(client.api.messages), 1)
         message = client.api.messages[0]
-        self.assertEqual(message["msg_type"], 0)
-        content = message["content"]
+        self.assertEqual(message["msg_type"], 2)
+        content = message["markdown"]["content"]
         self.assertIn("欢迎 新人 加入 测试群", content)
         self.assertIn("UID=188144093", content)
-        self.assertIn("<@!member-1>", content)
+        self.assertIn("<@member-1>", content)
 
     def test_single_welcome_template_mapping_is_preserved(self):
         plugin, _client = self.plugin()
