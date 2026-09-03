@@ -15,6 +15,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import astrbot.api.message_components as Comp
 from astrbot.api import AstrBotConfig
 from astrbot.api.event import AstrMessageEvent, filter
 from astrbot.api.star import Context, Star
@@ -558,6 +559,7 @@ class QQGroupAdmin(Star):
         self._patched_member_clients: dict[Any, Any] = {}
         self._patched_connect_clients: dict[Any, Any] = {}
         self._patched_connection_connects: dict[Any, Any] = {}
+        self._patched_platform_senders: dict[Any, Any] = {}
         self._welcome_sent_at: dict[tuple[str, str, int], float] = {}
         self._welcome_pending: dict[tuple[str, str], tuple[float, dict[str, Any]]] = {}
         self._welcome_inflight: set[tuple[str, str]] = set()
@@ -1165,6 +1167,15 @@ class QQGroupAdmin(Star):
             if getattr(handler, "__qqgroup_admin_owner__", None) is self:
                 connection._connect = previous
         self._patched_connection_connects.clear()
+        for platform, previous in self._patched_platform_senders.items():
+            handler = getattr(platform, "send_by_session", None)
+            if getattr(handler, "__qqgroup_admin_owner__", None) is self:
+                if previous is None:
+                    with suppress(AttributeError):
+                        delattr(platform, "send_by_session")
+                else:
+                    platform.send_by_session = previous
+        self._patched_platform_senders.clear()
 
     async def _load_state(self) -> None:
         getter = getattr(self, "get_kv_data", None)
@@ -1542,7 +1553,11 @@ class QQGroupAdmin(Star):
             120,
         )
         raw_message_id = (
-            sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "")
+            sent
+            if isinstance(sent, str)
+            else sent.get("id")
+            if isinstance(sent, dict)
+            else getattr(sent, "id", "")
         )
         message_id = str(raw_message_id or "")
         if delay and message_id:
@@ -1556,37 +1571,251 @@ class QQGroupAdmin(Star):
 
     @filter.on_decorating_result()
     async def track_core_group_reply_recall(self, event: AstrMessageEvent) -> None:
-        """Capture IDs from AstrBot's QQ sender so core replies can be recalled."""
+        """Prepare QQ mentions and capture IDs from AstrBot's sender."""
 
         platform_name = str(event.get_platform_name() or "").strip().lower()
         raw = getattr(getattr(event, "message_obj", None), "raw_message", None)
         group_openid = str(getattr(raw, "group_openid", "") or "")
-        policy = self._global_policy_for_group(group_openid)
-        delay = self._bounded_int(
-            self._policy_value(policy, "bot_message_recall_seconds"),
-            0,
-            0,
-            120,
-        )
         post_send_one = getattr(event, "_post_send_one", None)
         if (
             platform_name not in QQ_PLATFORM_NAMES
             or not group_openid
-            or not delay
             or not callable(post_send_one)
             or getattr(event, "_qqgroup_admin_recall_wrapped", False)
         ):
             return
 
-        client = self._client(event)
+        try:
+            client = self._client(event)
+        except Exception:  # noqa: BLE001 - adapter compatibility
+            client = getattr(event, "bot", None)
 
-        async def send_and_schedule(*args: Any, **kwargs: Any) -> Any:
-            sent = await post_send_one(*args, **kwargs)
-            self._schedule_policy_recall(client, group_openid, sent)
+        async def send_and_schedule(
+            message_to_send: Any,
+            *args: Any,
+            **kwargs: Any,
+        ) -> Any:
+            self._render_qq_at_markdown(event, message_to_send)
+            sent = await post_send_one(message_to_send, *args, **kwargs)
+            if client is not None:
+                try:
+                    self._schedule_policy_recall(client, group_openid, sent)
+                except Exception as exc:  # noqa: BLE001 - never block a core reply
+                    self.logger.debug("AstrBot 核心消息自动撤回调度失败：%s", exc)
             return sent
 
         event._post_send_one = send_and_schedule
         event._qqgroup_admin_recall_wrapped = True
+
+    def _render_qq_at_markdown(self, event: AstrMessageEvent, message: Any) -> None:
+        chain = getattr(message, "chain", None)
+        if not isinstance(chain, list):
+            return
+        rendered = []
+        changed = False
+        for component in chain:
+            if isinstance(component, getattr(Comp, "Plain", ())):
+                rendered.append(component)
+                continue
+            if self._is_user_at_component(component):
+                mention = self._mention(getattr(component, "qq", ""))
+                if mention:
+                    rendered.append(Comp.Plain(mention))
+                    changed = True
+                    continue
+                return
+            if type(component).__name__ == "Reply":
+                rendered.append(component)
+                continue
+            # Unknown rich components must retain the adapter's normal path.
+            return
+        if not changed:
+            return
+        message.chain = rendered
+        message.use_markdown_ = True
+        send_buffer = getattr(event, "send_buffer", None)
+        if send_buffer is not None:
+            send_buffer.use_markdown_ = True
+
+    @staticmethod
+    def _is_user_at_component(component: Any) -> bool:
+        at_type = getattr(Comp, "At", ())
+        at_all_type = getattr(Comp, "AtAll", ())
+        return isinstance(component, at_type) and not (
+            at_all_type and isinstance(component, at_all_type)
+        )
+
+    def _session_markdown_text(self, message: Any) -> str:
+        """Render only a text/At/Reply session chain for QQ Markdown."""
+
+        chain = getattr(message, "chain", None)
+        if not isinstance(chain, (list, tuple)):
+            return ""
+        parts: list[str] = []
+        changed = False
+        for component in chain:
+            if isinstance(component, getattr(Comp, "Plain", ())):
+                parts.append(str(getattr(component, "text", "") or ""))
+                continue
+            if self._is_user_at_component(component):
+                mention = self._mention(getattr(component, "qq", ""))
+                if not mention:
+                    return ""
+                parts.append(mention)
+                changed = True
+                continue
+            if type(component).__name__ == "Reply":
+                continue
+            return ""
+        return "".join(parts) if changed else ""
+
+    @staticmethod
+    def _is_group_session(session: Any) -> bool:
+        message_type = getattr(session, "message_type", None)
+        value = getattr(message_type, "value", message_type)
+        return str(value or "").strip().lower() in {
+            "groupmessage",
+            "group_message",
+            "group",
+        }
+
+    @staticmethod
+    def _platform_session_message_id(platform: Any, session_id: str) -> str:
+        cached = getattr(platform, "_session_last_message_id", None)
+        if isinstance(cached, dict):
+            return str(cached.get(session_id) or "")
+        return ""
+
+    async def _send_session_mention(
+        self,
+        platform: Any,
+        session: Any,
+        message_chain: Any,
+    ) -> bool:
+        """Send tool/session mentions through QQ's Markdown group endpoint."""
+
+        if not self._is_group_session(session):
+            return False
+        group_openid = str(getattr(session, "session_id", "") or "").strip()
+        text = self._session_markdown_text(message_chain)
+        if not group_openid or not text:
+            return False
+        scene_map = getattr(platform, "_session_scene", None)
+        scene = scene_map.get(group_openid) if isinstance(scene_map, dict) else ""
+        if scene and scene != "group":
+            return False
+        try:
+            client = platform.get_client()
+        except Exception:  # noqa: BLE001 - adapter compatibility
+            client = getattr(platform, "client", None)
+        if client is None:
+            return False
+        previous_id = self._platform_session_message_id(platform, group_openid)
+        allow_proactive = bool(
+            scene == "group"
+            and getattr(platform, "_allow_group_proactive_send", False)
+        )
+        if not previous_id and not allow_proactive:
+            return False
+        try:
+            sent = await self._send_group_markdown(
+                client,
+                group_openid,
+                text,
+                message_id="" if allow_proactive else previous_id,
+                msg_seq=self._next_outbound_message_seq(),
+                policy_auto_recall=False,
+            )
+        except Exception as exc:  # noqa: BLE001 - retain adapter fallback path
+            self.logger.warning("QQ 会话艾特 Markdown 发送失败，回退平台发送：%s", exc)
+            return False
+        sent_id = str(
+            sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
+        )
+        if sent_id:
+            remember = getattr(platform, "remember_session_message_id", None)
+            if callable(remember):
+                with suppress(Exception):
+                    remember(group_openid, sent_id)
+        try:
+            self._schedule_policy_recall(client, group_openid, sent)
+        except Exception as exc:  # noqa: BLE001 - recall must not duplicate sends
+            self.logger.debug("QQ 会话消息自动撤回调度失败：%s", exc)
+        return True
+
+    def _schedule_platform_session_recall(
+        self,
+        platform: Any,
+        session: Any,
+        previous_id: str,
+        sent: Any,
+    ) -> None:
+        group_openid = str(getattr(session, "session_id", "") or "").strip()
+        if not group_openid or not self._is_group_session(session):
+            return
+        sent_id = str(
+            sent.get("id") if isinstance(sent, dict) else getattr(sent, "id", "") or ""
+        )
+        if not sent_id:
+            current_id = self._platform_session_message_id(platform, group_openid)
+            if current_id and current_id != previous_id:
+                sent_id = current_id
+        if not sent_id or sent_id == previous_id:
+            return
+        try:
+            client = platform.get_client()
+            self._schedule_policy_recall(client, group_openid, sent_id)
+        except Exception as exc:  # noqa: BLE001 - core sending must continue
+            self.logger.debug("QQ 会话消息自动撤回调度失败：%s", exc)
+
+    def _patch_qq_platform_sender(self, platform: Any) -> None:
+        meta = getattr(platform, "meta", None)
+        platform_name = ""
+        if callable(meta):
+            with suppress(Exception):
+                platform_name = str(getattr(meta(), "name", "") or "").strip().lower()
+        if platform_name not in QQ_PLATFORM_NAMES:
+            return
+        existing = getattr(platform, "send_by_session", None)
+        if not callable(existing):
+            return
+        owner = getattr(existing, "__qqgroup_admin_owner__", None)
+        if owner is self:
+            self._patched_platform_senders.setdefault(
+                platform,
+                getattr(existing, "__qqgroup_admin_previous__", None),
+            )
+            return
+        if owner is not None:
+            existing = getattr(existing, "__qqgroup_admin_previous__", existing)
+        if not callable(existing):
+            return
+
+        async def send_by_session(
+            session: Any,
+            message_chain: Any,
+            bound_platform: Any = platform,
+            previous_sender: Any = existing,
+        ) -> Any:
+            if await self._send_session_mention(bound_platform, session, message_chain):
+                return None
+            previous_id = self._platform_session_message_id(
+                bound_platform,
+                str(getattr(session, "session_id", "") or "").strip(),
+            )
+            result = await previous_sender(session, message_chain)
+            self._schedule_platform_session_recall(
+                bound_platform,
+                session,
+                previous_id,
+                result,
+            )
+            return result
+
+        send_by_session.__qqgroup_admin_owner__ = self
+        send_by_session.__qqgroup_admin_previous__ = existing
+        platform.send_by_session = send_by_session
+        self._patched_platform_senders[platform] = existing
 
     async def _send_group_notice(
         self,
@@ -2461,6 +2690,7 @@ class QQGroupAdmin(Star):
     def _patch_qq_clients(self) -> None:
         for platform in self._qq_platforms():
             try:
+                self._patch_qq_platform_sender(platform)
                 client = platform.get_client()
                 self._patch_qq_connect_intents(client)
                 existing = getattr(client, "on_interaction_create", None)
@@ -5751,6 +5981,12 @@ class QQGroupAdmin(Star):
     @filter.platform_adapter_type(QQ_PLATFORM_TYPES)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)
     async def audit_group_message(self, event: AstrMessageEvent) -> None:
+        try:
+            await self.track_core_group_reply_recall(event)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 - moderation must fail open
+            self.logger.debug("安装消息发送包装器失败，不影响群消息审核：%s", exc)
         try:
             await self._audit_group_message_impl(event)
         except asyncio.CancelledError:

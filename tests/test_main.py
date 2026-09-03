@@ -47,12 +47,26 @@ class TestCustomFilter:
         self.raise_error = raise_error
 
 
+class TestPlain:
+    def __init__(self, text):
+        self.text = text
+
+
+class TestAt:
+    def __init__(self, qq, name=""):
+        self.qq = qq
+        self.name = name
+
+
 astrbot = types.ModuleType("astrbot")
 astrbot_api = types.ModuleType("astrbot.api")
 astrbot_event = types.ModuleType("astrbot.api.event")
+astrbot_message_components = types.ModuleType("astrbot.api.message_components")
 astrbot_star = types.ModuleType("astrbot.api.star")
 astrbot_web = types.ModuleType("astrbot.api.web")
 astrbot_api.AstrBotConfig = TestConfig
+astrbot_message_components.Plain = TestPlain
+astrbot_message_components.At = TestAt
 astrbot_event.AstrMessageEvent = object
 astrbot_event.filter = SimpleNamespace(
     PlatformAdapterType=SimpleNamespace(QQOFFICIAL=1, QQOFFICIAL_WEBHOOK=2),
@@ -78,6 +92,7 @@ sys.modules.update(
         "astrbot": astrbot,
         "astrbot.api": astrbot_api,
         "astrbot.api.event": astrbot_event,
+        "astrbot.api.message_components": astrbot_message_components,
         "astrbot.api.star": astrbot_star,
         "astrbot.api.web": astrbot_web,
     }
@@ -1465,6 +1480,131 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
 
         schedule_recall.assert_called_once_with(
             client, "group-1", "core-sent-1", 90, "bot-message"
+        )
+
+    async def test_core_group_at_is_converted_to_markdown_before_tool_send(self):
+        plugin, client = self.plugin()
+        event = FakeEvent(client)
+        message = SimpleNamespace(
+            chain=[TestAt("member-1", "成员"), TestPlain(" 在的")],
+            use_markdown_=None,
+        )
+        event.send_buffer = message
+        captured = []
+
+        async def post_send_one(message_to_send, *_args, **_kwargs):
+            captured.append(message_to_send)
+            return SimpleNamespace(id="tool-sent-1")
+
+        event._post_send_one = post_send_one
+        await plugin.track_core_group_reply_recall(event)
+        await event._post_send_one(message)
+
+        self.assertEqual(
+            [component.text for component in captured[0].chain],
+            ["<@member-1>", " 在的"],
+        )
+        self.assertTrue(event.send_buffer.use_markdown_)
+
+    async def test_session_sender_converts_tool_at_and_schedules_recall(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 90,
+            }
+        ]
+
+        class FakePlatform:
+            def __init__(self):
+                self._session_scene = {"group-1": "group"}
+                self._session_last_message_id = {"group-1": "incoming-1"}
+                self._allow_group_proactive_send = False
+
+            def get_client(self):
+                return client
+
+            def meta(self):
+                return SimpleNamespace(name="qq_official")
+
+        platform = FakePlatform()
+        original_calls = []
+
+        async def original_sender(session, message_chain):
+            original_calls.append((session, message_chain))
+
+        platform.send_by_session = original_sender
+        plugin._qq_platforms = lambda: [platform]
+        message_chain = SimpleNamespace(
+            chain=[TestAt("member-1", "成员"), TestPlain(" 在的")],
+            use_markdown_=False,
+        )
+        session = SimpleNamespace(
+            message_type=SimpleNamespace(value="GroupMessage"),
+            session_id="group-1",
+        )
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            plugin._patch_qq_clients()
+            await platform.send_by_session(session, message_chain)
+
+        self.assertEqual(original_calls, [])
+        payload = client.api.messages[-1]
+        self.assertEqual(payload["group_openid"], "group-1")
+        self.assertEqual(payload["msg_type"], 2)
+        self.assertEqual(payload["markdown"], {"content": "<@member-1> 在的"})
+        self.assertEqual(payload["msg_id"], "incoming-1")
+        self.assertIsInstance(payload["msg_seq"], int)
+        schedule_recall.assert_called_once_with(
+            client, "group-1", "sent-1", 90, "bot-message"
+        )
+        await plugin.terminate()
+        self.assertIs(platform.send_by_session, original_sender)
+
+    async def test_session_sender_schedules_recall_from_cached_message_id(self):
+        plugin, client = self.plugin()
+        plugin.config["global_policy_profiles"] = [
+            {
+                "profile_id": "recall",
+                "name": "自动撤回",
+                "enabled": True,
+                "group_openids": ["group-1"],
+                "bot_message_recall_seconds": 90,
+            }
+        ]
+
+        class FakePlatform:
+            def __init__(self):
+                self._session_scene = {"group-1": "group"}
+                self._session_last_message_id = {"group-1": "incoming-1"}
+
+            def get_client(self):
+                return client
+
+            def meta(self):
+                return SimpleNamespace(name="qq_official_webhook")
+
+        platform = FakePlatform()
+
+        async def original_sender(session, _message_chain):
+            platform._session_last_message_id[session.session_id] = "sent-1"
+
+        platform.send_by_session = original_sender
+        session = SimpleNamespace(
+            message_type=SimpleNamespace(value="GroupMessage"),
+            session_id="group-1",
+        )
+        with patch.object(plugin, "_schedule_recall") as schedule_recall:
+            plugin._patch_qq_platform_sender(platform)
+            await platform.send_by_session(
+                session,
+                SimpleNamespace(chain=[TestPlain("普通工具回复")]),
+            )
+
+        schedule_recall.assert_called_once_with(
+            client, "group-1", "sent-1", 90, "bot-message"
         )
 
     async def test_group_text_can_skip_policy_auto_recall(self):
