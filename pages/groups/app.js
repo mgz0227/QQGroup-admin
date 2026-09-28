@@ -1010,6 +1010,7 @@
       : [];
     if (!runtimePolicies.length) {
       var legacyKeys = [
+        "global_ai_input_block_enabled", "global_ai_input_block_keywords",
         "settings_command_enabled", "settings_panel_auto_recall", "bot_message_recall_seconds", "mute_success_message",
         "global_reject_keywords", "global_message_reject_keywords", "global_message_reject_reply",
         "global_message_reject_at_member", "global_member_blacklist", "global_member_whitelist",
@@ -1029,7 +1030,7 @@
         "global_rate_limit_reply", "global_rate_limit_at_member",
         "keyword_reply_cooldown_seconds", "keyword_reply_recall_seconds"
       ];
-      var legacyPolicy = { name: "默认全局策略", profile_id: "default", enabled: true, group_openids: [] };
+      var legacyPolicy = { name: "默认全局策略", profile_id: "default", enabled: true, group_openids: [], global_ai_input_block_enabled: false, global_ai_input_block_keywords: "" };
       legacyKeys.forEach(function (key) {
         if (Object.prototype.hasOwnProperty.call(runtimeSettings, key)) legacyPolicy[key] = runtimeSettings[key];
       });
@@ -1084,6 +1085,8 @@
 
   function fillRuntimePolicyFields(policy) {
     policy = policy || {};
+    element("runtime-ai-input-block-enabled").checked = policy.global_ai_input_block_enabled === true;
+    element("runtime-ai-input-block-keywords").value = policy.global_ai_input_block_keywords || "";
     element("runtime-settings-command").checked = policy.settings_command_enabled !== false;
     element("runtime-panel-recall").checked = policy.settings_panel_auto_recall !== false;
     element("runtime-bot-message-recall").value = Number(policy.bot_message_recall_seconds || 0);
@@ -1233,6 +1236,8 @@
       name: element("runtime-policy-name").value.trim(),
       enabled: element("runtime-policy-enabled").checked,
       group_openids: all ? [] : selectedGroups,
+      global_ai_input_block_enabled: element("runtime-ai-input-block-enabled").checked,
+      global_ai_input_block_keywords: element("runtime-ai-input-block-keywords").value,
       settings_command_enabled: element("runtime-settings-command").checked,
       settings_panel_auto_recall: element("runtime-panel-recall").checked,
       bot_message_recall_seconds: Number(element("runtime-bot-message-recall").value),

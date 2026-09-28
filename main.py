@@ -7,6 +7,7 @@ import json
 import math
 import re
 import secrets
+import sys
 import time
 from contextlib import suppress
 from functools import wraps
@@ -225,6 +226,8 @@ MAX_SUSPICIOUS_MEMBERS = 10_000
 VIOLATION_REVIEW_STATUSES = frozenset({"pending", "confirmed", "false_positive"})
 
 GLOBAL_POLICY_DEFAULTS = {
+    "global_ai_input_block_enabled": False,
+    "global_ai_input_block_keywords": "",
     "settings_command_enabled": True,
     "settings_panel_auto_recall": True,
     "bot_message_recall_seconds": 0,
@@ -322,6 +325,8 @@ GLOBAL_MEDIA_POLICY_KEYS = (
 # non-media fields from the top-level configuration; media spam/repeat values
 # still need the legacy per-group compatibility path below.
 GLOBAL_INHERIT_POLICY_KEYS = (
+    "global_ai_input_block_enabled",
+    "global_ai_input_block_keywords",
     "global_reject_keywords",
     "global_message_reject_keywords",
     "global_message_reject_reply",
@@ -5994,6 +5999,43 @@ class QQGroupAdmin(Star):
         if hasattr(event, "stop_event"):
             event.stop_event()
         return True
+
+    @filter.platform_adapter_type(QQ_PLATFORM_TYPES)
+    @filter.event_message_type(
+        filter.EventMessageType.GROUP_MESSAGE, priority=sys.maxsize + 1
+    )
+    async def block_ai_input(self, event: AstrMessageEvent) -> None:
+        # Run before AstrBot's group-history recorder (sys.maxsize - 2), so
+        # blocked content cannot later reach the model through chat history.
+        group_openid = str(event.get_group_id() or "")
+        if not group_openid:
+            return
+        entry = self._group_config(group_openid)
+        if not entry or str(entry.get("platform_id") or "") != str(
+            event.get_platform_id()
+        ):
+            return
+        policy = self._global_policy_for_group(group_openid)
+        if not self._policy_value(policy, "global_ai_input_block_enabled"):
+            return
+        keywords = parse_keywords(
+            str(self._policy_value(policy, "global_ai_input_block_keywords") or "")
+        )
+        if not keywords:
+            return
+        raw = event.message_obj.raw_message
+        raw_text = getattr(raw, "content", "") or self._raw_data(event).get(
+            "content", ""
+        )
+        text = "\n".join(
+            (
+                str(event.get_message_str() or ""),
+                str(raw_text),
+                self._voice_asr_text(event),
+            )
+        )
+        if matched_keyword(text, keywords):
+            event.stop_event()
 
     @filter.platform_adapter_type(QQ_PLATFORM_TYPES)
     @filter.event_message_type(filter.EventMessageType.GROUP_MESSAGE, priority=1000)

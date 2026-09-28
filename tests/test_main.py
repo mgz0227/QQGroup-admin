@@ -2502,6 +2502,166 @@ class PluginFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(event.stopped)
         api.recall_group_message.assert_not_awaited()
 
+    async def test_ai_input_block_stops_before_models_and_message_actions(self):
+        for source in ("text", "raw", "voice", "missing_ids"):
+            with self.subTest(source=source):
+                plugin, client = self.plugin()
+                plugin.config["global_policy_profiles"] = [
+                    {
+                        "profile_id": "input-block",
+                        "name": "输入拦截",
+                        "enabled": True,
+                        "group_openids": [] if source == "missing_ids" else ["group-1"],
+                        "global_ai_input_block_enabled": True,
+                        "global_ai_input_block_keywords": "忽略\nDo Not Reply",
+                    }
+                ]
+                plugin.config.update(
+                    global_ai_review_enabled=True,
+                    global_ai_review_provider_id="primary",
+                    global_image_ocr_enabled=True,
+                )
+                plugin.config["auto_review_groups"][0].update(
+                    moderation_enabled=False,
+                    member_whitelist="admin-1" if source == "text" else "",
+                )
+                event = FakeEvent(
+                    client,
+                    "please DO NOT REPLY here"
+                    if source in {"text", "missing_ids"}
+                    else "",
+                )
+                if source == "missing_ids":
+                    event.message_obj.message_id = ""
+                    event.message_obj.raw_message.author = None
+                event.message_obj.raw_message.raw_data = {
+                    "author": {
+                        "member_role": "owner" if source == "text" else "member"
+                    },
+                    "content": "please DO NOT REPLY here" if source == "raw" else "",
+                    "attachments": [{"asr_refer_text": "please DO NOT REPLY here"}]
+                    if source == "voice"
+                    else [],
+                }
+                plugin._reply_to_keyword = AsyncMock()
+                plugin._image_ocr_text = AsyncMock()
+                plugin._ai_blocks_message = AsyncMock()
+                plugin._recall_messages = AsyncMock()
+                plugin.context.llm_generate = AsyncMock()
+
+                await plugin.block_ai_input(event)
+                if not event.stopped:
+                    await plugin.audit_group_message(event)
+
+                self.assertTrue(event.stopped)
+                plugin._reply_to_keyword.assert_not_awaited()
+                plugin._image_ocr_text.assert_not_awaited()
+                plugin._ai_blocks_message.assert_not_awaited()
+                plugin.context.llm_generate.assert_not_awaited()
+                plugin._recall_messages.assert_not_awaited()
+                self.assertEqual(client.api.messages, [])
+                self.assertEqual(plugin._violation_records, [])
+
+    async def test_ai_input_block_respects_scope_and_disabled_or_empty_rules(self):
+        for case in (
+            "disabled",
+            "empty",
+            "other_group",
+            "other_platform",
+            "unbound",
+            "no_match",
+            "profile_disabled",
+            "earlier_profile",
+        ):
+            with self.subTest(case=case):
+                plugin, client = self.plugin()
+                profile = {
+                    "profile_id": "input-block",
+                    "name": "输入拦截",
+                    "enabled": case != "profile_disabled",
+                    "group_openids": [
+                        "group-2" if case == "other_group" else "group-1"
+                    ],
+                    "global_ai_input_block_enabled": case != "disabled",
+                    "global_ai_input_block_keywords": " \n,； "
+                    if case == "empty"
+                    else "忽略",
+                }
+                plugin.config["global_policy_profiles"] = [profile]
+                if case == "earlier_profile":
+                    plugin.config["global_policy_profiles"].insert(
+                        0, {"enabled": True, "group_openids": []}
+                    )
+                if case == "other_platform":
+                    plugin.config["auto_review_groups"][0]["platform_id"] = "platform-2"
+                if case == "unbound":
+                    plugin.config["auto_review_groups"] = []
+                event = FakeEvent(
+                    client, "普通聊天" if case == "no_match" else "请忽略这条"
+                )
+                await plugin.block_ai_input(event)
+                await plugin.audit_group_message(event)
+                self.assertFalse(event.stopped)
+
+    async def test_ai_input_block_policy_validation_and_old_page_round_trip(self):
+        plugin, _client = self.plugin()
+        raw = {
+            "profile_id": "input-block",
+            "name": "输入拦截",
+            "group_openids": ["group-1"],
+            "global_ai_input_block_enabled": True,
+            "global_ai_input_block_keywords": "忽略,免回复\n忽略",
+        }
+        validate = module.GroupAdminWeb._global_policy_profiles
+        profiles = validate([raw], {"group-1"})
+        self.assertTrue(profiles[0]["global_ai_input_block_enabled"])
+        self.assertEqual(profiles[0]["global_ai_input_block_keywords"], "忽略\n免回复")
+        await plugin.web_save_global_policies({"profiles": profiles})
+        older_page = {
+            key: value
+            for key, value in raw.items()
+            if not key.startswith("global_ai_input_block_")
+        }
+        await plugin.web_save_global_policies(
+            {"profiles": validate([older_page], {"group-1"})}
+        )
+        saved = plugin._global_policy_profiles_for_web()[0]
+        self.assertTrue(saved["global_ai_input_block_enabled"])
+        self.assertEqual(saved["global_ai_input_block_keywords"], "忽略\n免回复")
+        await plugin._save_config_backup()
+        plugin.config["global_policy_profiles"] = []
+        self.assertTrue(await plugin._restore_config_backup())
+        restored = plugin._global_policy_profiles_for_web()[0]
+        self.assertTrue(restored["global_ai_input_block_enabled"])
+        self.assertEqual(restored["global_ai_input_block_keywords"], "忽略\n免回复")
+        await plugin.web_save_global_policies(
+            {
+                "profiles": validate(
+                    [
+                        {
+                            **raw,
+                            "global_ai_input_block_enabled": False,
+                            "global_ai_input_block_keywords": "",
+                        }
+                    ],
+                    {"group-1"},
+                )
+            }
+        )
+        cleared = plugin._global_policy_profiles_for_web()[0]
+        self.assertFalse(cleared["global_ai_input_block_enabled"])
+        self.assertEqual(cleared["global_ai_input_block_keywords"], "")
+        for invalid in (
+            {"global_ai_input_block_enabled": "true"},
+            {"global_ai_input_block_keywords": "x" * 65},
+            {"global_ai_input_block_keywords": "\n".join(str(i) for i in range(101))},
+        ):
+            with (
+                self.subTest(invalid=invalid),
+                self.assertRaises((TypeError, ValueError)),
+            ):
+                validate([{**raw, **invalid}], {"group-1"})
+
     async def test_global_keyword_uses_its_own_reply_without_mention(self):
         plugin, client = self.plugin()
         plugin.config.update(

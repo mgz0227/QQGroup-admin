@@ -199,8 +199,12 @@
               <label class="checkbox"><input id="runtime-policy-all-groups" type="checkbox"><span>全部已绑定群（包含以后新增的群）</span></label>
               <div class="group-choice-grid" id="runtime-policy-groups"></div>
             </fieldset>
-            <p class="config-note wide">策略按列表顺序匹配；同一群命中第一套启用策略。入群关键词、黑白名单、图片规则、回复和冷却可按群设置；AI/OCR 请在上方独立面板维护。运行轮询间隔、B站登录账号等平台级参数仍保持单份。</p>
+            <p class="config-note wide">策略按列表顺序匹配；同一群命中第一套启用策略。AI 输入拦截、入群关键词、黑白名单、图片规则、回复和冷却可按群设置；AI 审核/OCR 请在上方独立面板维护。运行轮询间隔、B站登录账号等平台级参数仍保持单份。</p>
             <div class="config-note config-warning wide" id="runtime-policy-warnings" role="status" hidden></div>
+            <div class="section-title wide">AI 输入拦截</div>
+            <p class="config-note wide" id="runtime-ai-input-block-hint">默认关闭，仅对当前策略覆盖的群生效。命中后静默终止事件，跳过 AI 审核、OCR、聊天及后续插件和命令；不撤回、不回复。管理员和白名单成员同样适用，不对纯图片做 OCR 匹配。</p>
+            <label class="checkbox runtime-toggle"><input id="runtime-ai-input-block-enabled" type="checkbox" aria-describedby="runtime-ai-input-block-hint"><span>拦截指定内容进入 AI</span></label>
+            <label class="wide"><span>拦截内容</span><textarea id="runtime-ai-input-block-keywords" maxlength="7000" rows="3" placeholder="每行一个关键词，也可用逗号或分号分隔" aria-describedby="runtime-ai-input-block-keywords-hint"></textarea><small id="runtime-ai-input-block-keywords-hint">支持中英文逗号、分号或换行；最多 100 项，每项最多 64 字。忽略空项，消息包含任意一项即命中，不区分大小写。</small></label>
             <div class="section-title wide">入群审核</div>
             <label><span>审核轮询间隔（秒）</span><input id="runtime-review-interval" type="number" min="15" max="600" required></label>
             <label class="checkbox runtime-toggle"><input id="runtime-settings-command" type="checkbox"><span>启用群内审核设置命令</span></label>

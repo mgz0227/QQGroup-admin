@@ -117,6 +117,18 @@
             "description": "全局入群拒绝关键词",
             "default": ""
           },
+          "global_ai_input_block_enabled": {
+            "type": "bool",
+            "description": "拦截指定内容进入 AI",
+            "hint": "按当前策略覆盖群生效；命中后静默停止后续处理，不进入 AI 审核、聊天模型或群历史记录，也不撤回消息。对管理员和白名单同样生效。",
+            "default": false
+          },
+          "global_ai_input_block_keywords": {
+            "type": "text",
+            "description": "AI 输入拦截内容",
+            "hint": "每行一条，也可用逗号或分号分隔；最多 100 条，每条最多 64 字。包含任意一条即拦截，英文不区分大小写；支持文本和 QQ 原生语音转写，不识别纯图片。",
+            "default": ""
+          },
           "global_message_reject_keywords": {
             "type": "text",
             "description": "全局消息撤回关键词",
@@ -573,6 +585,20 @@
     "type": "text",
     "description": "全局拒绝关键词",
     "hint": "逗号、分号或换行分隔，最多 100 个。命中后立即拒绝，优先于群级规则、有效 UID 直通和其他条件。",
+    "default": "",
+    "invisible": true
+  },
+  "global_ai_input_block_enabled": {
+    "type": "bool",
+    "description": "AI 输入拦截默认开关",
+    "hint": "请在插件页面的群策略设置中按群配置。",
+    "default": false,
+    "invisible": true
+  },
+  "global_ai_input_block_keywords": {
+    "type": "text",
+    "description": "AI 输入拦截默认内容",
+    "hint": "请在插件页面的群策略设置中按群配置。",
     "default": "",
     "invisible": true
   },

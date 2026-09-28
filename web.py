@@ -25,6 +25,8 @@ MAX_AI_FALLBACK_PROVIDERS = 3
 MAX_MEMBER_LIST_ITEMS = 10_000
 GLOBAL_POLICY_LIMIT = 50
 GLOBAL_POLICY_FIELDS = (
+    "global_ai_input_block_enabled",
+    "global_ai_input_block_keywords",
     "settings_command_enabled",
     "settings_panel_auto_recall",
     "bot_message_recall_seconds",
@@ -631,6 +633,19 @@ class GroupAdminWeb:
                 600,
                 "真人验证超时",
             ),
+            "global_ai_input_block_enabled": cls._bool(
+                payload, "global_ai_input_block_enabled", False, "AI 输入拦截开关"
+            ),
+            "global_ai_input_block_keywords": "\n".join(
+                parse_keywords(
+                    cls._text(
+                        payload.get("global_ai_input_block_keywords", ""),
+                        "AI 输入拦截内容",
+                        7_000,
+                        multiline=True,
+                    )
+                )
+            ),
             "global_reject_keywords": "\n".join(
                 parse_keywords(
                     cls._text(
@@ -998,6 +1013,8 @@ class GroupAdminWeb:
         # fields.  Treat those keys as a partial update so a stale page cannot
         # erase values already configured in the current runtime settings.
         for key in (
+            "global_ai_input_block_enabled",
+            "global_ai_input_block_keywords",
             "global_message_reject_reply",
             "global_message_reject_at_member",
             "global_member_blacklist",
